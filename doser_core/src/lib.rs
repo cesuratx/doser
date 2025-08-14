@@ -44,6 +44,9 @@ impl Doser {
         // 1. Read scale
         let weight = self.scale.read_weight();
         self.last_weight = weight;
+        if weight < 0.0 {
+            return Err(eyre::eyre!(DoserError::NegativeWeight));
+        }
         // 2. Update moving average filter
         if self.filter_window.len() == self.filter_size {
             self.filter_window.pop_front();

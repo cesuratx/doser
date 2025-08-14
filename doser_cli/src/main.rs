@@ -13,6 +13,9 @@ use std::path::Path;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// Log file path (optional)
+    #[arg(long)]
+    log: Option<String>,
     /// Target grams to dose
     #[arg(short, long)]
     grams: Option<f32>,
@@ -184,7 +187,11 @@ fn main() -> Result<()> {
         session.dt_pin, session.sck_pin, session.step_pin, session.dir_pin
     );
 
-    let logger = doser_core::logger::FileLogger::new("dosing_log.txt".to_string());
+    let log_path = args
+        .log
+        .clone()
+        .unwrap_or_else(|| "dosing_log.txt".to_string());
+    let logger = doser_core::logger::FileLogger::new(log_path);
     if let Some(cal_src) = &calibration_source {
         let cal_data = cal_src.get_calibration();
         logger.log(&format!("Calibration data loaded: {:?}", cal_data));
