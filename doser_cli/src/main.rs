@@ -1,7 +1,8 @@
 use clap::Parser;
 use csv::ReaderBuilder;
 use doser_core::config::{ConfigSource, CsvConfigSource, TomlConfigSource};
-use doser_core::{DoserError, dose_to_target, log_dosing_result, render_progress_bar};
+use doser_core::logger::Logger;
+use doser_core::render_progress_bar;
 use std::collections::HashMap;
 // ...existing code...
 use eyre::{Result, WrapErr};
@@ -80,8 +81,11 @@ fn main() -> Result<()> {
         }
     }
     let csv_path = Path::new("doser_config.csv");
+    let mut calibration_source: Option<Box<dyn doser_core::calibration::CalibrationSource>> = None;
+    let mut avg_scale_factor: Option<f32> = None;
     if csv_path.exists() {
         let mut csv_config: HashMap<String, String> = HashMap::new();
+        let mut calibration_data: Vec<(f32, f32)> = Vec::new();
         let mut rdr = ReaderBuilder::new()
             .has_headers(false)
             .from_path(csv_path)?;
@@ -91,11 +95,30 @@ fn main() -> Result<()> {
                 let key = record[0].trim().to_string();
                 let value = record[1].trim().to_string();
                 if !key.starts_with('#') && !key.is_empty() {
-                    csv_config.insert(key, value);
+                    // Calibration data: numeric key and value
+                    if let (Ok(w), Ok(r)) = (key.parse::<f32>(), value.parse::<f32>()) {
+                        calibration_data.push((w, r));
+                    } else {
+                        csv_config.insert(key, value);
+                    }
                 }
             }
         }
         config_sources.push(Box::new(CsvConfigSource(csv_config)));
+        if !calibration_data.is_empty() {
+            calibration_source = Some(Box::new(
+                doser_core::calibration::CsvCalibrationSource::new(calibration_data.clone()),
+            ));
+            // Calculate average scale factor from calibration data
+            let factors: Vec<f32> = calibration_data
+                .iter()
+                .map(|(w, r)| doser_core::calculate_scale_factor(*w, *r))
+                .collect();
+            if !factors.is_empty() {
+                avg_scale_factor =
+                    Some(factors.iter().copied().sum::<f32>() / factors.len() as f32);
+            }
+        }
     }
 
     // Helper to get config value from sources (CSV > TOML)
@@ -161,51 +184,72 @@ fn main() -> Result<()> {
         session.dt_pin, session.sck_pin, session.step_pin, session.dir_pin
     );
 
+    let logger = doser_core::logger::FileLogger::new("dosing_log.txt".to_string());
+    if let Some(cal_src) = &calibration_source {
+        let cal_data = cal_src.get_calibration();
+        logger.log(&format!("Calibration data loaded: {:?}", cal_data));
+        if let Some(avg) = avg_scale_factor {
+            logger.log(&format!("Average scale factor: {:.4}", avg));
+        }
+    }
+
     if args.grams.is_some() {
         println!("Target grams: {:.2}", session.target_grams);
         scale.tare();
         motor.start();
-        let result = dose_to_target(
+        // Create Doser instance with moving average filter (window size 5)
+        let mut doser = doser_core::Doser::new(
+            scale,
+            motor,
             session.target_grams,
-            || {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                scale.read_weight()
-            },
-            session.max_attempts,
+            5, // moving average window size
         );
-        motor.stop();
-        match result {
-            Ok(dosing) => {
-                let bar = render_progress_bar(dosing.final_weight, session.target_grams, 20);
-                log_dosing_result(
-                    "dosing_log.txt",
-                    &dosing,
-                    session.target_grams,
-                    session.dt_pin,
-                    session.sck_pin,
-                    session.step_pin,
-                    session.dir_pin,
-                    None,
-                );
-                println!("\rDosing: {}", bar);
-                println!("Dosing complete in {} attempts.", dosing.attempts);
-                // Demonstrate iterator ADT usage
-                let mut step_iter = session.steps(|| {
+        let mut attempts = 0;
+        let mut weights: Vec<f32> = Vec::new();
+        loop {
+            // Step-wise dosing control
+            match doser.step() {
+                Ok(status) => {
+                    attempts += 1;
+                    let filtered_weight = doser.filtered_weight();
+                    weights.push(filtered_weight);
+                    let bar = render_progress_bar(filtered_weight, session.target_grams, 20);
+                    print!("\rDosing: {} | {:.2}g", bar, filtered_weight);
                     std::thread::sleep(std::time::Duration::from_millis(500));
-                    scale.read_weight()
-                });
-                println!("Step-by-step weights:");
-                while let Some((attempt, weight)) = step_iter.next() {
-                    println!("Attempt {}: {:.2}g", attempt, weight);
+                    match status {
+                        doser_core::DosingStatus::Complete => {
+                            println!("");
+                            break;
+                        }
+                        doser_core::DosingStatus::Running => {}
+                        doser_core::DosingStatus::Error => {
+                            println!("");
+                            eyre::bail!("Dosing failed: error status returned");
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("");
+                    eyre::bail!("Dosing failed: {}", e);
                 }
             }
-            Err(e) => match e {
-                DoserError::NegativeTarget => eyre::bail!("Target grams must be positive."),
-                DoserError::MaxAttemptsExceeded => {
-                    eyre::bail!("Dosing failed, weight did not reach target in reasonable time.")
-                }
-                DoserError::NegativeWeight => eyre::bail!("Negative weight reading detected."),
-            },
+        }
+        let log_msg = format!(
+            "target: {:.2}, final: {:.2}, attempts: {}, pins: DT={}, SCK={}, STEP={}, DIR={}, calibration: {:?}",
+            session.target_grams,
+            doser.filtered_weight(),
+            attempts,
+            session.dt_pin,
+            session.sck_pin,
+            session.step_pin,
+            session.dir_pin,
+            Option::<f32>::None
+        );
+        logger.log(&log_msg);
+        println!("Dosing complete in {} attempts.", attempts);
+        println!("Step-by-step weights:");
+        for (i, w) in weights.iter().enumerate() {
+            println!("Attempt {}: {:.2}g", i + 1, w);
         }
     } else {
         println!(

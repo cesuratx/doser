@@ -1,4 +1,120 @@
+use doser_hardware::{Motor, Scale};
+use std::collections::VecDeque;
+
+/// Status returned by Doser::step()
+#[derive(Debug, PartialEq)]
+pub enum DosingStatus {
+    Running,
+    Complete,
+    Error,
+}
+
+/// Doser struct for real-time, precise dosing control
+pub struct Doser {
+    scale: Box<dyn Scale>,
+    motor: Box<dyn Motor>,
+    target_grams: f32,
+    filter_window: VecDeque<f32>,
+    filter_size: usize,
+    last_weight: f32,
+    dosing_started: bool,
+}
+
+impl Doser {
+    /// Create a new Doser
+    pub fn new(
+        scale: Box<dyn Scale>,
+        motor: Box<dyn Motor>,
+        target_grams: f32,
+        filter_size: usize,
+    ) -> Self {
+        Doser {
+            scale,
+            motor,
+            target_grams,
+            filter_window: VecDeque::with_capacity(filter_size),
+            filter_size,
+            last_weight: 0.0,
+            dosing_started: false,
+        }
+    }
+
+    /// Perform one step of dosing: read scale, update filter, control motor
+    pub fn step(&mut self) -> Result<DosingStatus, eyre::Report> {
+        // 1. Read scale
+        let weight = self.scale.read_weight();
+        self.last_weight = weight;
+        // 2. Update moving average filter
+        if self.filter_window.len() == self.filter_size {
+            self.filter_window.pop_front();
+        }
+        self.filter_window.push_back(weight);
+        let avg_weight = self.filter_window.iter().sum::<f32>() / self.filter_window.len() as f32;
+
+        // 3. Control motor
+        if avg_weight < self.target_grams {
+            if !self.dosing_started {
+                self.motor.start();
+                self.dosing_started = true;
+            }
+            Ok(DosingStatus::Running)
+        } else {
+            if self.dosing_started {
+                self.motor.stop();
+                self.dosing_started = false;
+            }
+            Ok(DosingStatus::Complete)
+        }
+    }
+
+    /// Get the last raw weight
+    pub fn last_weight(&self) -> f32 {
+        self.last_weight
+    }
+
+    /// Get the current filtered weight
+    pub fn filtered_weight(&self) -> f32 {
+        if self.filter_window.is_empty() {
+            0.0
+        } else {
+            self.filter_window.iter().sum::<f32>() / self.filter_window.len() as f32
+        }
+    }
+}
+
+// Implement Debug for Doser
+
+// Implement Debug for Doser
+impl std::fmt::Debug for Doser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Doser")
+            .field("target_grams", &self.target_grams)
+            .field("filter_size", &self.filter_size)
+            .field("last_weight", &self.last_weight)
+            .field("filtered_weight", &self.filtered_weight())
+            .field("dosing_started", &self.dosing_started)
+            .finish()
+    }
+}
+
+// Implement Display for Doser
+impl std::fmt::Display for Doser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Doser(target_grams: {:.2}, filter_size: {}, last_weight: {:.2}, filtered_weight: {:.2}, dosing_started: {})",
+            self.target_grams,
+            self.filter_size,
+            self.last_weight,
+            self.filtered_weight(),
+            self.dosing_started
+        )
+    }
+}
+pub mod calibration;
 pub mod config;
+pub mod dosing_strategy;
+pub mod logger;
 /// Builder for a dosing session
 #[derive(Debug, Default, Clone)]
 pub struct DosingSessionBuilder {
@@ -108,6 +224,7 @@ where
         }
     }
 }
+use eyre::Report;
 use std::fmt;
 use thiserror::Error;
 
@@ -123,6 +240,11 @@ pub enum DoserError {
     /// Weight reading was negative
     #[error("Negative weight reading")]
     NegativeWeight,
+}
+
+/// Helper to convert Result<T, DoserError> to Result<T, eyre::Report>
+pub fn to_report<T>(result: Result<T, DoserError>) -> Result<T, Report> {
+    result.map_err(Report::from)
 }
 impl fmt::Display for DosingResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -182,7 +304,6 @@ pub fn render_progress_bar(current: f32, target: f32, bar_width: usize) -> Strin
         bar, percent, current, target
     )
 }
-// ...existing code...
 
 /// Dosing result
 #[derive(Debug, Clone, PartialEq)]

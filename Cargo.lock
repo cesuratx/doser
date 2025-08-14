@@ -207,6 +207,8 @@ name = "doser_core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "doser_hardware",
+ "eyre",
  "rstest",
  "thiserror",
  "toml 0.9.5",
