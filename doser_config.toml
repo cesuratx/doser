@@ -1,0 +1,9 @@
+# Doser hardware configuration
+
+[hx711]
+dt_pin = 5
+sck_pin = 6
+
+[stepper]
+step_pin = 13
+dir_pin = 19

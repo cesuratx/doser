@@ -1,0 +1,14 @@
+# Example CSV config for doser
+# key,value
+hx711_dt_pin,5
+hx711_sck_pin,6
+stepper_step_pin,13
+stepper_dir_pin,19
+target_grams,18.5
+max_attempts,100
+
+# Example calibration data
+# calibration_weight,scale_reading
+50,49.8
+100,99.7
+200,199.5
