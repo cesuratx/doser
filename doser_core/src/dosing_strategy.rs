@@ -1,53 +1,34 @@
-use crate::Doser;
-use crate::error::{DoserError, Result};
+use crate::{
+    Doser, DosingStatus,
+    error::{DoserError, Result},
+};
 
-pub trait DosingStrategy {
-    fn dose(&self, doser: &mut Doser) -> Result<crate::DosingResult>;
+pub struct DefaultDosingStrategy {
+    pub max_attempts: u32,
 }
 
-pub struct DefaultDosingStrategy;
+impl Default for DefaultDosingStrategy {
+    fn default() -> Self {
+        Self { max_attempts: 100 }
+    }
+}
 
-impl DosingStrategy for DefaultDosingStrategy {
-    fn dose(&self, doser: &mut Doser) -> Result<crate::DosingResult> {
-        let mut attempts = 0;
-        let max_attempts = 100;
+impl DefaultDosingStrategy {
+    pub fn dose(&self, doser: &mut Doser) -> Result<()> {
+        let mut attempts = 0_u32;
         loop {
             attempts += 1;
-            let status = doser.step()?;
-            let avg_weight = doser.filtered_weight();
-            let diff = (doser.target_grams - avg_weight).abs();
-            // Adaptive motor control: slow down as we approach target
-            if diff < 0.5 {
-                doser.motor.stop();
-            } else {
-                doser.motor.start();
-            }
-            match status {
-                crate::DosingStatus::Complete => {
-                    doser.motor.stop();
-                    return Ok(crate::DosingResult {
-                        final_weight: avg_weight,
-                        attempts,
-                        error: None,
-                    });
+            match doser.step()? {
+                DosingStatus::Complete => return Ok(()),
+                DosingStatus::Running => { /* keep going */ }
+                DosingStatus::Aborted(e) => {
+                    let _ = doser.motor_stop();
+                    return Err(e);
                 }
-                crate::DosingStatus::Aborted(e) => {
-                    doser.motor.stop();
-                    return Ok(crate::DosingResult {
-                        final_weight: avg_weight,
-                        attempts,
-                        error: Some(*e),
-                    });
-                }
-                crate::DosingStatus::Running => {}
             }
-            if attempts >= max_attempts {
-                doser.motor.stop();
-                return Ok(crate::DosingResult {
-                    final_weight: avg_weight,
-                    attempts,
-                    error: Some(DoserError::Config("Max attempts exceeded".to_string())),
-                });
+            if attempts >= self.max_attempts {
+                let _ = doser.motor_stop();
+                return Err(DoserError::State("max attempts exceeded".into()));
             }
         }
     }

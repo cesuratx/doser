@@ -1,199 +1,193 @@
-#[cfg(feature = "hardware")]
-pub mod hx711;
-use doser_traits::{Motor, Scale};
-use std::cell::Cell;
-use std::rc::Rc;
+//! doser_hardware: hardware and simulation backends behind `doser_traits`.
+//!
+//! Features:
+//! - `hardware`: enable Raspberry Pi GPIO/HX711-backed implementations.
+//! - (default) no `hardware` feature: use simulation types that satisfy the traits.
 
-/// Simulated scale implementation
-pub struct SimulatedScale {
-    weight: Rc<Cell<f32>>,
-    scale_factor: Rc<Cell<f32>>,
-}
-
-impl SimulatedScale {
-    pub fn new() -> Self {
-        SimulatedScale {
-            weight: Rc::new(Cell::new(0.0)),
-            scale_factor: Rc::new(Cell::new(1.0)),
-        }
-    }
-}
-
-impl Scale for SimulatedScale {
-    fn read(
-        &mut self,
-        _timeout: std::time::Duration,
-    ) -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
-        let w = self.weight.get() + 2.0;
-        self.weight.set(w);
-        let factor = self.scale_factor.get();
-        println!("Reading scale (simulated): {:.2}g", w * factor);
-        Ok((w * factor) as i32)
-    }
-}
-
-/// Simulated motor implementation
-pub struct SimulatedMotor;
-
-impl SimulatedMotor {
-    pub fn start(&mut self) {
-        println!("Motor started (simulated)");
-    }
-}
-
-impl Motor for SimulatedMotor {
-    fn set_speed(
-        &mut self,
-        _steps_per_sec: u32,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        Ok(())
-    }
-    fn stop(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        Ok(())
-    }
-    fn start(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        println!("Motor started (simulated)");
-        Ok(())
-    }
-}
-
-#[cfg(feature = "hardware")]
-use hx711::Hx711;
-
-#[cfg(feature = "hardware")]
-pub struct HardwareScale {
-    hx711: hx711::Hx711,
-    scale_factor: f32,
-}
-
-#[cfg(feature = "hardware")]
-impl HardwareScale {
-    pub fn new(dt_pin: u8, sck_pin: u8, gain_pulses: u8) -> Result<Self, hx711::HwError> {
-        let hx711 = hx711::Hx711::new(dt_pin, sck_pin, gain_pulses)?;
-        Ok(HardwareScale {
-            hx711,
-            scale_factor: 1.0,
-        })
-    }
-}
-
-#[cfg(feature = "hardware")]
-impl Scale for HardwareScale {
-    fn read(&mut self, timeout: std::time::Duration) -> Result<i32, crate::error::HwError> {
-        let mut attempts = 0;
-        let max_attempts = 3;
-        loop {
-            match self.hx711.read_with_timeout(timeout) {
-                Ok(raw) => {
-                    tracing::debug!(raw = raw, "hx711 sample");
-                    return Ok(raw);
-                }
-                Err(crate::error::HwError::Timeout) if attempts < max_attempts => {
-                    attempts += 1;
-                    tracing::warn!(retries = attempts, "scale timeout, retrying");
-                }
-                Err(e) => {
-                    tracing::error!("Scale read error: {}", e);
-                    return Err(e);
-                }
-            }
-        }
-    }
-}
-
-#[cfg(feature = "hardware")]
-use stepper::Stepper;
-
-#[cfg(feature = "hardware")]
-pub struct HardwareMotor {
-    stepper: Stepper,
-}
-
-#[cfg(feature = "hardware")]
-impl HardwareMotor {
-    pub fn new(step_pin: u8, dir_pin: u8) -> Self {
-        HardwareMotor {
-            stepper: Stepper::new(step_pin, dir_pin),
-        }
-    }
-}
-
-#[cfg(feature = "hardware")]
-impl Motor for HardwareMotor {
-    fn set_speed(&mut self, steps_per_sec: u32) -> Result<(), crate::error::HwError> {
-        self.stepper.set_speed(steps_per_sec);
-        Ok(())
-    }
-    fn stop(&mut self) -> Result<(), crate::error::HwError> {
-        self.stepper.stop();
-        Ok(())
-    }
-    fn start(&mut self) -> Result<(), crate::error::HwError> {
-        self.stepper.start();
-        Ok(())
-    }
-}
-
-#[cfg(feature = "hardware")]
-mod stepper {
-    use rppal::gpio::{Gpio, OutputPin};
-    use std::thread::sleep;
+#[cfg(not(feature = "hardware"))]
+pub mod sim {
+    use doser_traits::{Motor, Scale};
+    use std::error::Error;
     use std::time::Duration;
 
-    pub struct Stepper {
-        step: OutputPin,
-        dir: OutputPin,
+    /// Simple simulated scale that stores an internal weight in grams.
+    /// `read()` returns a synthetic raw value (grams * 1000) as i32.
+    #[derive(Default)]
+    pub struct SimulatedScale {
+        grams: f32,
     }
 
-    impl Stepper {
-        pub fn new(step_pin: u8, dir_pin: u8) -> Self {
-            let gpio = Gpio::new().unwrap();
-            let step = gpio.get(step_pin).unwrap().into_output();
-            let dir = gpio.get(dir_pin).unwrap().into_output();
-            Stepper { step, dir }
+    impl SimulatedScale {
+        pub fn new() -> Self {
+            Self { grams: 0.0 }
         }
 
-        pub fn set_speed(&mut self, _steps_per_sec: u32) {
-            // Implement speed control if needed
-        }
-
-        pub fn start(&mut self) {
-            self.dir.set_high(); // Example: set direction
-            println!("Stepper motor started (hardware)");
-            // Example: pulse step pin for a short time
-            for _ in 0..100 {
-                self.step.set_high();
-                sleep(Duration::from_micros(500));
-                self.step.set_low();
-                sleep(Duration::from_micros(500));
+        /// Add grams to the simulated hopper (for tests/demos).
+        pub fn push(&mut self, grams: f32) {
+            self.grams += grams;
+            if self.grams.is_sign_negative() {
+                self.grams = 0.0;
             }
         }
 
-        pub fn stop(&mut self) {
-            println!("Stepper motor stopped (hardware)");
-            // Optionally set pins low
-            self.step.set_low();
-            self.dir.set_low();
+        /// Set absolute weight (useful for deterministic tests).
+        pub fn set(&mut self, grams: f32) {
+            self.grams = grams.max(0.0);
+        }
+    }
+
+    impl Scale for SimulatedScale {
+        fn read(&mut self, _timeout: Duration) -> Result<i32, Box<dyn Error + Send + Sync>> {
+            // Convert grams → a pretend "raw" reading. Core can treat this as grams if desired.
+            Ok((self.grams * 1000.0) as i32)
+        }
+    }
+
+    /// Minimal simulated motor; tracks speed and running state.
+    #[derive(Default)]
+    pub struct SimulatedMotor {
+        speed_sps: u32,
+        running: bool,
+    }
+
+    impl Motor for SimulatedMotor {
+        fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+            self.running = true;
+            Ok(())
+        }
+
+        fn set_speed(&mut self, sps: u32) -> Result<(), Box<dyn Error + Send + Sync>> {
+            // You can enforce "must start first" semantics if you want:
+            // if !self.running { return Err("motor not started".into()); }
+            self.speed_sps = sps;
+            Ok(())
+        }
+
+        fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+            self.speed_sps = 0;
+            self.running = false;
+            Ok(())
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[cfg(feature = "hardware")]
+pub mod hardware {
+    use doser_traits::{Motor, Scale};
+    use std::error::Error;
+    use std::fmt::{Display, Formatter};
+    use std::time::{Duration, Instant};
 
-    #[test]
-    fn test_simulated_scale() {
-        let mut scale = SimulatedScale::new();
-        let w1 = scale.read(std::time::Duration::from_millis(100)).unwrap();
-        let w2 = scale.read(std::time::Duration::from_millis(100)).unwrap();
-        assert!(w2 > w1);
+    // Bring in rppal for actual GPIO when you wire it up.
+    // use rppal::gpio::{Gpio, InputPin, OutputPin};
+
+    /// Simple error wrapper to avoid unwraps in hardware paths.
+    #[derive(Debug)]
+    struct HwErr(String);
+    impl Display for HwErr {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            write!(f, "hardware error: {}", self.0)
+        }
+    }
+    impl Error for HwErr {}
+
+    /// Hardware scale backed by HX711 (skeleton).
+    /// Fill in pin types and HX711 driver hookup inside.
+    pub struct HardwareScale {
+        // dt: InputPin,
+        // sck: OutputPin,
+        // gain_pulses: u8,
+        // offset: i32,
+        // scale_factor: f32,
     }
 
-    #[test]
-    fn test_simulated_motor() {
-        let mut motor = SimulatedMotor;
-        motor.start();
-        motor.stop();
+    impl HardwareScale {
+        /// Fallible constructor — never unwrap.
+        pub fn try_new(
+            _dt_pin: u8,
+            _sck_pin: u8,
+            // _gain_pulses: u8,
+        ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+            // let gpio = Gpio::new().map_err(|e| HwErr(format!("gpio: {e}")))?;
+            // let dt = gpio.get(_dt_pin).map_err(|e| HwErr(format!("dt pin: {e}")))?.into_input();
+            // let sck = gpio.get(_sck_pin).map_err(|e| HwErr(format!("sck pin: {e}")))?.into_output();
+            Ok(Self {
+                // dt,
+                // sck,
+                // gain_pulses: _gain_pulses,
+                // offset: 0,
+                // scale_factor: 1.0,
+            })
+        }
+
+        /// Example of a timed raw read. Replace body with your HX711 read logic.
+        fn read_raw_timeout(
+            &mut self,
+            timeout: Duration,
+        ) -> Result<i32, Box<dyn Error + Send + Sync>> {
+            let _deadline = Instant::now() + timeout;
+            // Wait for DRDY (DT low), then clock out 24 bits, sign-extend.
+            // For now, return a stub value so the type-check passes:
+            Ok(0)
+        }
+    }
+
+    impl Scale for HardwareScale {
+        fn read(&mut self, timeout: Duration) -> Result<i32, Box<dyn Error + Send + Sync>> {
+            // If you keep a scale_factor/offset internally, apply here; otherwise
+            // return raw i32 and let core interpret it.
+            self.read_raw_timeout(timeout)
+        }
+    }
+
+    /// Hardware motor backed by your step/dir driver (skeleton).
+    pub struct HardwareMotor {
+        // step: OutputPin,
+        // dir: OutputPin,
+        running: bool,
+        speed_sps: u32,
+    }
+
+    impl HardwareMotor {
+        /// Fallible constructor — never unwrap.
+        pub fn try_new(_step_pin: u8, _dir_pin: u8) -> Result<Self, Box<dyn Error + Send + Sync>> {
+            // let gpio = Gpio::new().map_err(|e| HwErr(format!("gpio: {e}")))?;
+            // let step = gpio.get(_step_pin).map_err(|e| HwErr(format!("step pin: {e}")))?.into_output();
+            // let dir  = gpio.get(_dir_pin ).map_err(|e| HwErr(format!("dir pin: {e}")))?.into_output();
+            Ok(Self {
+                // step,
+                // dir,
+                running: false,
+                speed_sps: 0,
+            })
+        }
+    }
+
+    impl Motor for HardwareMotor {
+        fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+            // Enable your driver if needed
+            self.running = true;
+            Ok(())
+        }
+
+        fn set_speed(&mut self, sps: u32) -> Result<(), Box<dyn Error + Send + Sync>> {
+            // Program your stepper pulse timing here
+            self.speed_sps = sps;
+            Ok(())
+        }
+
+        fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+            // Disable driver / stop pulsing
+            self.speed_sps = 0;
+            self.running = false;
+            Ok(())
+        }
     }
 }
+
+// Re-exports for callers (CLI/tests) to pick the right backend easily.
+#[cfg(not(feature = "hardware"))]
+pub use sim::{SimulatedMotor, SimulatedScale};
+
+#[cfg(feature = "hardware")]
+pub use hardware::{HardwareMotor, HardwareScale};

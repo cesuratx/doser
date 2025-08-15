@@ -1,268 +1,168 @@
-use clap::Parser;
-use csv::ReaderBuilder;
-use doser_core::config::{ConfigSource, CsvConfigSource, TomlConfigSource};
-use doser_core::logger::Logger;
-use doser_core::render_progress_bar;
-use eyre::{Result, WrapErr};
-use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
+use std::{fs, path::PathBuf};
 
-/// Simple CLI for bean doser
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct Args {
-    /// Log file path (optional)
-    #[arg(long)]
-    log: Option<String>,
-    /// Target grams to dose
-    #[arg(short, long)]
-    grams: Option<f32>,
+use anyhow::Context;
+use clap::{ArgAction, Parser, Subcommand};
+use doser_config::{load_calibration_csv, Calibration, Config};
+use doser_core::{error::Result as CoreResult, Doser, DosingStatus};
+use doser_traits; // for trait names in function signatures
 
-    /// Calibrate with known weight (in grams)
-    #[arg(long)]
-    calibrate: Option<f32>,
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-    /// HX711 DT pin
-    #[arg(long)]
-    dt_pin: Option<u8>,
+/// Initialize tracing once for the whole app.
+fn init_tracing(json: bool, level: &str) {
+    // EnvFilter supports strings like "info", "debug", or module-level filters.
+    let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("info"));
 
-    /// HX711 SCK pin
-    #[arg(long)]
-    sck_pin: Option<u8>,
-
-    /// Stepper STEP pin
-    #[arg(long)]
-    step_pin: Option<u8>,
-
-    /// Stepper DIR pin
-    #[arg(long)]
-    dir_pin: Option<u8>,
+    if json {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt::layer().json().with_target(false))
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(fmt::layer().pretty().with_target(false))
+            .init();
+    }
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
+#[derive(Parser, Debug)]
+#[command(name = "doser", version, about = "Doser CLI")]
+struct Cli {
+    /// Path to config TOML (typed)
+    #[arg(long, value_name = "FILE", default_value = "etc/doser_config.toml")]
+    config: PathBuf,
 
-    // Choose hardware or simulation
-    #[cfg(feature = "hardware")]
-    let mut scale: Box<dyn doser_hardware::Scale> = Box::new(doser_hardware::HardwareScale::new(
-        args.dt_pin.unwrap_or(5),
-        args.sck_pin.unwrap_or(6),
-    ));
-    #[cfg(not(feature = "hardware"))]
-    let mut scale: Box<dyn doser_hardware::Scale> = Box::new(doser_hardware::SimulatedScale::new());
+    /// Optional calibration CSV (strict header)
+    #[arg(long, value_name = "FILE")]
+    calibration: Option<PathBuf>,
 
-    #[cfg(feature = "hardware")]
-    let mut motor: Box<dyn doser_hardware::Motor> = Box::new(doser_hardware::HardwareMotor::new(
-        args.step_pin.unwrap_or(13),
-        args.dir_pin.unwrap_or(19),
-    ));
-    #[cfg(not(feature = "hardware"))]
-    let mut motor: Box<dyn doser_hardware::Motor> = Box::new(doser_hardware::SimulatedMotor);
+    /// Log as JSON lines instead of pretty
+    #[arg(long, action = ArgAction::SetTrue)]
+    json: bool,
 
-    if let Some(known_weight) = args.calibrate {
-        if known_weight <= 0.0 {
-            eyre::bail!("Calibration weight must be positive.");
-        }
-        scale.tare();
-        println!("Place known weight (e.g., calibration mass) on scale...");
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        scale.calibrate(known_weight);
-        println!("Calibration finished.");
-        return Ok(());
-    }
+    /// Log level: trace,debug,info,warn,error
+    #[arg(long, value_name = "LEVEL", default_value = "info")]
+    log_level: String,
 
-    // Load config sources (TOML and CSV)
-    let mut config_sources: Vec<Box<dyn ConfigSource>> = Vec::new();
-    let config_path = Path::new("doser_config.toml");
-    if config_path.exists() {
-        let content =
-            fs::read_to_string(config_path).wrap_err_with(|| "Failed to read config file")?;
-        if let Ok(val) = toml::from_str(&content) {
-            config_sources.push(Box::new(TomlConfigSource(val)));
-        }
-    }
-    let csv_path = Path::new("doser_config.csv");
-    let mut calibration_source: Option<Box<dyn doser_core::calibration::CalibrationSource>> = None;
-    let mut avg_scale_factor: Option<f32> = None;
-    if csv_path.exists() {
-        let mut csv_config: HashMap<String, String> = HashMap::new();
-        let mut calibration_data: Vec<(f32, f32)> = Vec::new();
-        let mut rdr = ReaderBuilder::new()
-            .has_headers(false)
-            .from_path(csv_path)?;
-        for result in rdr.records() {
-            let record = result?;
-            if record.len() >= 2 {
-                let key = record[0].trim().to_string();
-                let value = record[1].trim().to_string();
-                if !key.starts_with('#') && !key.is_empty() {
-                    // Calibration data: numeric key and value
-                    if let (Ok(w), Ok(r)) = (key.parse::<f32>(), value.parse::<f32>()) {
-                        calibration_data.push((w, r));
-                    } else {
-                        csv_config.insert(key, value);
-                    }
-                }
-            }
-        }
-        config_sources.push(Box::new(CsvConfigSource(csv_config)));
-        if !calibration_data.is_empty() {
-            calibration_source = Some(Box::new(
-                doser_core::calibration::CsvCalibrationSource::new(calibration_data.clone()),
-            ));
-            // Calculate average scale factor from calibration data
-            let factors: Vec<f32> = calibration_data
-                .iter()
-                .map(|(w, r)| doser_core::calculate_scale_factor(*w, *r))
-                .collect();
-            if !factors.is_empty() {
-                avg_scale_factor =
-                    Some(factors.iter().copied().sum::<f32>() / factors.len() as f32);
-            }
-        }
-    }
+    #[command(subcommand)]
+    cmd: Commands,
+}
 
-    // Helper to get config value from sources (CSV > TOML)
-    fn get_config_u8(sources: &[Box<dyn ConfigSource>], key: &str) -> Option<u8> {
-        for src in sources {
-            if let Some(v) = src.get_u8(key) {
-                return Some(v);
-            }
-        }
-        None
-    }
-    fn get_config_u32(sources: &[Box<dyn ConfigSource>], key: &str) -> Option<u32> {
-        for src in sources {
-            if let Some(v) = src.get_u32(key) {
-                return Some(v);
-            }
-        }
-        None
-    }
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Run a dose to a target in grams
+    Dose {
+        #[arg(long)]
+        grams: f32,
+    },
+    /// Quick health check (hardware presence / sim ok)
+    SelfCheck,
+}
 
-    // Use builder pattern for dosing session
-    let mut builder = doser_core::DosingSessionBuilder::new();
-    if let Some(g) = args.grams {
-        builder = builder.target_grams(g);
-    }
-    builder = builder
-        .max_attempts(
-            get_config_u32(&config_sources, "max_attempts")
-                .map(|v| v as usize)
-                .unwrap_or(100),
-        )
-        .dt_pin(
-            args.dt_pin
-                .or_else(|| get_config_u8(&config_sources, "hx711_dt_pin"))
-                .unwrap_or(5),
-        )
-        .sck_pin(
-            args.sck_pin
-                .or_else(|| get_config_u8(&config_sources, "hx711_sck_pin"))
-                .unwrap_or(6),
-        )
-        .step_pin(
-            args.step_pin
-                .or_else(|| get_config_u8(&config_sources, "stepper_step_pin"))
-                .unwrap_or(13),
-        )
-        .dir_pin(
-            args.dir_pin
-                .or_else(|| get_config_u8(&config_sources, "stepper_dir_pin"))
-                .unwrap_or(19),
-        );
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    init_tracing(cli.json, &cli.log_level);
 
-    let session = match builder.build() {
-        Some(s) => s,
-        None => {
-            println!("Please specify --grams <value> to dose and all required pins.");
-            return Ok(());
+    // 1) Load typed config from TOML
+    let cfg_text =
+        fs::read_to_string(&cli.config).with_context(|| format!("read config {:?}", cli.config))?;
+    let cfg: Config =
+        toml::from_str(&cfg_text).with_context(|| format!("parse config {:?}", cli.config))?;
+
+    // 2) Load calibration if provided
+    let calib: Option<Calibration> = match &cli.calibration {
+        Some(p) => {
+            let c =
+                load_calibration_csv(p).with_context(|| format!("parse calibration {:?}", p))?;
+            Some(c)
         }
+        None => None,
     };
 
-    println!(
-        "Using pins: HX711 DT={} SCK={}, Stepper STEP={} DIR={}",
-        session.dt_pin, session.sck_pin, session.step_pin, session.dir_pin
-    );
+    // 3) Build hardware (feature-gated) or sim
+    #[cfg(feature = "hardware")]
+    let mut hw = {
+        use doser_hardware::{HardwareMotor, HardwareScale};
+        let scale =
+            HardwareScale::try_new(cfg.pins.hx711_dt, cfg.pins.hx711_sck).context("open HX711")?;
+        let motor = HardwareMotor::try_new(cfg.pins.motor_step, cfg.pins.motor_dir)
+            .context("open motor")?;
+        (scale, motor)
+    };
 
-    if let Some(cal_src) = &calibration_source {
-        let cal_data = cal_src.get_calibration();
-        tracing::info!(cal_data=?cal_data, "Calibration data loaded");
-        if let Some(avg) = avg_scale_factor {
-            tracing::info!(avg_scale_factor=?avg, "Average scale factor");
+    #[cfg(not(feature = "hardware"))]
+    let hw = {
+        use doser_hardware::{SimulatedMotor, SimulatedScale};
+        (SimulatedScale::new(), SimulatedMotor::default())
+    };
+
+    match cli.cmd {
+        Commands::SelfCheck => {
+            tracing::info!("self-check starting");
+            // Minimal probe: on hardware builds try a short read;
+            // on sim builds just succeed.
+            #[cfg(feature = "hardware")]
+            {
+                use doser_traits::Scale;
+                use std::time::Duration;
+                let mut hw_mut = hw; // need mutable to call read()
+                let _ = hw_mut
+                    .0
+                    .read(Duration::from_millis(cfg.timeouts.sensor_ms))
+                    .context("scale read")?;
+            }
+            tracing::info!("self-check ok");
+            println!("OK");
+            Ok(())
+        }
+        Commands::Dose { grams } => {
+            run_dose(&cfg, calib.as_ref(), grams, hw).with_context(|| "dose failed")
         }
     }
+}
 
-    if args.grams.is_some() {
-        println!("Target grams: {:.2}", session.target_grams);
-        scale.tare();
-        motor.start();
-        // Create Sampler for scale readings
-        let sampler = doser_core::sampler::Sampler::spawn(
-            *scale,
-            10,                                    // sample rate Hz
-            std::time::Duration::from_millis(150), // scale read timeout
-        );
-        // Create Doser instance with moving average filter (window size 5)
-        let mut doser = doser_core::Doser::new(
-            sampler,
-            motor,
-            session.target_grams,
-            5,    // moving average window size
-            1000, // sample timeout ms
-        );
-        let mut attempts = 0;
-        let mut weights: Vec<f32> = Vec::new();
-        loop {
-            // Step-wise dosing control
-            match doser.step() {
-                Ok(status) => {
-                    attempts += 1;
-                    let filtered_weight = doser.filtered_weight();
-                    weights.push(filtered_weight);
-                    let bar = render_progress_bar(filtered_weight, session.target_grams, 20);
-                    print!("\rDosing: {} | {:.2}g", bar, filtered_weight);
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    match status {
-                        doser_core::DosingStatus::Complete => {
-                            println!("");
-                            break;
-                        }
-                        doser_core::DosingStatus::Running => {}
-                        doser_core::DosingStatus::Aborted(_) => {
-                            println!("");
-                            eyre::bail!("Dosing failed: error status returned");
-                        }
-                    }
-                }
-                Err(e) => {
-                    println!("");
-                    eyre::bail!("Dosing failed: {}", e);
-                }
+#[allow(clippy::type_complexity)]
+fn run_dose(
+    _cfg: &doser_config::Config,
+    calib: Option<&Calibration>,
+    grams: f32,
+    // 'static bounds so these can be boxed inside the Doser builder:
+    hw: (
+        impl doser_traits::Scale + 'static,
+        impl doser_traits::Motor + 'static,
+    ),
+) -> CoreResult<()> {
+    // For now, pass core defaults for filter/control/timeouts.
+    // We can map _cfg fields into core types later once names are aligned.
+    let mut doser = Doser::builder()
+        .with_scale(hw.0)
+        .with_motor(hw.1)
+        .with_filter(doser_core::FilterCfg::default())
+        .with_control(doser_core::ControlCfg::default())
+        .with_timeouts(doser_core::Timeouts::default())
+        .with_target_grams(grams)
+        .apply_calibration(calib) // generic; core stays config-agnostic
+        .build()?;
+
+    tracing::info!(target_g = grams, "dose start");
+
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        match doser.step()? {
+            DosingStatus::Running => continue,
+            DosingStatus::Complete => {
+                let final_g = doser.last_weight();
+                tracing::info!(final_g, attempts, "dose complete");
+                println!("final: {final_g:.2} g  attempts: {attempts}");
+                return Ok(());
+            }
+            DosingStatus::Aborted(e) => {
+                let _ = doser.motor_stop();
+                tracing::error!(error = %e, attempts, "dose aborted");
+                return Err(e);
             }
         }
-        let log_msg = format!(
-            "target: {:.2}, final: {:.2}, attempts: {}, pins: DT={}, SCK={}, STEP={}, DIR={}, calibration: {:?}",
-            session.target_grams,
-            doser.filtered_weight(),
-            attempts,
-            session.dt_pin,
-            session.sck_pin,
-            session.step_pin,
-            session.dir_pin,
-            Option::<f32>::None
-        );
-        tracing::info!(log_msg, "Dosing session completed");
-        println!("Dosing complete in {} attempts.", attempts);
-        println!("Step-by-step weights:");
-        for (i, w) in weights.iter().enumerate() {
-            println!("Attempt {}: {:.2}g", i + 1, w);
-        }
-    } else {
-        println!(
-            "Please specify --grams <value> to dose or --calibrate <known_weight> to calibrate."
-        );
     }
-    Ok(())
 }

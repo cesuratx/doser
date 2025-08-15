@@ -1,562 +1,262 @@
-pub mod error;
-pub mod sampler;
-use crate::error::{DoserError, Result};
-use crate::sampler::{Sampler, now_ms};
-use doser_traits::Motor;
-use std::collections::VecDeque;
+//! Core dosing logic (hardware-agnostic).
+//! - Keeps all hardware behind doser_traits::Scale/Motor
+//! - Exposes a small builder to wire config + traits
+//! - One-step control loop (call step() from the CLI or a strategy)
 
-/// Status returned by Doser::step()
+pub mod error;
+
+use crate::error::{DoserError, Result};
+use std::time::{Duration, Instant};
+
+/// Public status of a single step of the dosing loop.
 #[derive(Debug)]
 pub enum DosingStatus {
+    /// Keep going; not settled yet.
     Running,
+    /// Target reached and settled; motor already stopped.
     Complete,
-    Aborted(Box<DoserError>),
+    /// Aborted with a typed error; motor has been asked to stop.
+    Aborted(DoserError),
 }
 
-/// Doser struct for real-time, precise dosing control
+/// Filter configuration (keep it simple for now).
+#[derive(Debug, Clone)]
+pub struct FilterCfg {
+    /// moving average window size (not used in this minimal variant)
+    pub ma_window: usize,
+    /// median prefilter window size (not used here)
+    pub median_window: usize,
+    /// sampling rate in Hz (informational)
+    pub sample_rate_hz: u32,
+}
+
+impl Default for FilterCfg {
+    fn default() -> Self {
+        Self {
+            ma_window: 1,
+            median_window: 1,
+            sample_rate_hz: 50,
+        }
+    }
+}
+
+/// Control configuration.
+#[derive(Debug, Clone)]
+pub struct ControlCfg {
+    /// Switch to fine speed once err <= slow_at_g
+    pub slow_at_g: f32,
+    /// Consider “in band” if |err| <= hysteresis_g
+    pub hysteresis_g: f32,
+    /// Reported stable if weight stays within hysteresis for this many ms
+    pub stable_ms: u64,
+    /// Coarse motor speed (steps per second or implementation-defined)
+    pub coarse_speed: u32,
+    /// Fine motor speed for the final approach
+    pub fine_speed: u32,
+}
+
+impl Default for ControlCfg {
+    fn default() -> Self {
+        Self {
+            slow_at_g: 1.0,
+            hysteresis_g: 0.05,
+            stable_ms: 250,
+            coarse_speed: 1200,
+            fine_speed: 250,
+        }
+    }
+}
+
+/// Timeouts and watchdogs.
+#[derive(Debug, Clone)]
+pub struct Timeouts {
+    /// Max sensor wait per read (ms)
+    pub sensor_ms: u64,
+}
+
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self { sensor_ms: 150 }
+    }
+}
+
+/// Main core object — owns the Scale/Motor and executes the control loop.
 pub struct Doser {
-    sampler: Sampler,
-    motor: Box<dyn Motor>,
-    target_grams: f32,
-    filter_window: VecDeque<f32>,
-    filter_size: usize,
-    last_weight: f32,
-    dosing_started: bool,
-    sample_timeout_ms: u64,
+    scale: Box<dyn doser_traits::Scale>,
+    motor: Box<dyn doser_traits::Motor>,
+    #[allow(dead_code)] // Informational for now; reserved for future filtering logic
+    filter: FilterCfg,
+    control: ControlCfg,
+    timeouts: Timeouts,
+    target_g: f32,
+
+    last_weight_g: f32,
+    settled_since: Option<Instant>,
 }
 
 impl Doser {
-    /// Create a new Doser
-    pub fn new(
-        sampler: Sampler,
-        motor: Box<dyn Motor>,
-        target_grams: f32,
-        filter_size: usize,
-        sample_timeout_ms: u64,
-    ) -> Self {
-        Doser {
-            sampler,
-            motor,
-            target_grams,
-            filter_window: VecDeque::with_capacity(filter_size),
-            filter_size,
-            last_weight: 0.0,
-            dosing_started: false,
-            sample_timeout_ms,
-        }
+    /// Start building a Doser.
+    pub fn builder() -> DoserBuilder {
+        DoserBuilder::default()
     }
 
-    /// Perform one step of dosing: read scale, update filter, control motor
-    pub fn step(&mut self) -> Result<DosingStatus> {
-        // 1. Read scale via sampler
-        let now = now_ms();
-        if self.sampler.stalled_for(now) > self.sample_timeout_ms {
-            self.motor.stop();
-            return Err(DoserError::Timeout("Scale sampling stalled".to_string()));
-        }
-        let weight = self.sampler.latest().unwrap_or(self.last_weight as i32) as f32;
-        self.last_weight = weight;
-        if weight < 0.0 {
-            return Err(DoserError::Hardware(
-                "Negative weight read from scale".to_string(),
-            ));
-        }
-        // 2. Update moving average filter
-        if self.filter_window.len() == self.filter_size {
-            self.filter_window.pop_front();
-        }
-        self.filter_window.push_back(weight);
-        let avg_weight = self.filter_window.iter().sum::<f32>() / self.filter_window.len() as f32;
-
-        // 3. Control motor
-        if avg_weight < self.target_grams {
-            if !self.dosing_started {
-                self.motor.start();
-                self.dosing_started = true;
-            }
-            Ok(DosingStatus::Running)
-        } else {
-            if self.dosing_started {
-                self.motor.stop();
-                self.dosing_started = false;
-            }
-            Ok(DosingStatus::Complete)
-        }
-    }
-
-    /// Get the last raw weight
+    /// Return the last observed weight in grams.
     pub fn last_weight(&self) -> f32 {
-        self.last_weight
+        self.last_weight_g
     }
 
-    /// Get the current filtered weight
-    pub fn filtered_weight(&self) -> f32 {
-        if self.filter_window.is_empty() {
-            0.0
+    /// Return the configured filter parameters (currently informational).
+    pub fn filter_cfg(&self) -> &FilterCfg {
+        &self.filter
+    }
+
+    /// Stop the motor (best-effort).
+    pub fn motor_stop(&mut self) -> Result<()> {
+        self.motor
+            .stop()
+            .map_err(|e| DoserError::Hardware(e.to_string()))
+    }
+
+    /// One iteration of the dosing loop:
+    /// - reads the scale with a timeout
+    /// - adjusts motor speed (coarse/fine)
+    /// - tracks settling window inside the hysteresis band
+    /// - returns `Running`, `Complete`, or `Aborted(err)`
+    pub fn step(&mut self) -> Result<DosingStatus> {
+        // 1) read current weight
+        let timeout = Duration::from_millis(self.timeouts.sensor_ms);
+        let raw = self
+            .scale
+            .read(timeout)
+            .map_err(|e| DoserError::Hardware(e.to_string()))?;
+
+        // If your Scale returns raw ADC units, apply calibration here.
+        // For this minimal core, assume upstream returns grams (i32 -> f32).
+        let w = raw as f32;
+
+        self.last_weight_g = w;
+        let err = self.target_g - w;
+        let abs_err = err.abs();
+
+        // 2) inside hysteresis band? attempt to settle
+        if abs_err <= self.control.hysteresis_g {
+            if self.settled_since.is_none() {
+                self.settled_since = Some(Instant::now());
+            }
+            let stable_for = self.settled_since.unwrap().elapsed();
+            if stable_for.as_millis() as u64 >= self.control.stable_ms {
+                let _ = self.motor_stop();
+                return Ok(DosingStatus::Complete);
+            }
+            return Ok(DosingStatus::Running);
         } else {
-            self.filter_window.iter().sum::<f32>() / self.filter_window.len() as f32
+            // left the band; reset settling timer
+            self.settled_since = None;
         }
+
+        // 3) choose coarse or fine speed
+        let target_speed = if abs_err <= self.control.slow_at_g {
+            self.control.fine_speed
+        } else {
+            self.control.coarse_speed
+        };
+
+        self.motor
+            .set_speed(target_speed)
+            .map_err(|e| DoserError::Hardware(e.to_string()))?;
+
+        Ok(DosingStatus::Running)
     }
 }
 
-// Implement Debug for Doser
-
-// Implement Debug for Doser
-impl std::fmt::Debug for Doser {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Doser")
-            .field("target_grams", &self.target_grams)
-            .field("filter_size", &self.filter_size)
-            .field("last_weight", &self.last_weight)
-            .field("filtered_weight", &self.filtered_weight())
-            .field("dosing_started", &self.dosing_started)
-            .finish()
-    }
+/// Builder for `Doser`. All fields are validated on `build()`.
+#[derive(Default)]
+pub struct DoserBuilder {
+    scale: Option<Box<dyn doser_traits::Scale>>,
+    motor: Option<Box<dyn doser_traits::Motor>>,
+    filter: Option<FilterCfg>,
+    control: Option<ControlCfg>,
+    timeouts: Option<Timeouts>,
+    target_g: Option<f32>,
+    // keep for future use; no-op in this minimal core
+    _calibration_loaded: bool,
 }
 
-// Implement Display for Doser
-impl std::fmt::Display for Doser {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Doser(target_grams: {:.2}, filter_size: {}, last_weight: {:.2}, filtered_weight: {:.2}, dosing_started: {})",
-            self.target_grams,
-            self.filter_size,
-            self.last_weight,
-            self.filtered_weight(),
-            self.dosing_started
-        )
+impl DoserBuilder {
+    /// Supply a Scale implementation.
+    pub fn with_scale<S: doser_traits::Scale + 'static>(mut self, s: S) -> Self {
+        self.scale = Some(Box::new(s));
+        self
     }
-}
-pub mod calibration;
-pub mod config;
-pub mod dosing_strategy;
-pub mod logger;
-/// Builder for a dosing session
-#[derive(Debug, Default, Clone)]
-pub struct DosingSessionBuilder {
-    target_grams: Option<f32>,
-    max_attempts: Option<usize>,
-    dt_pin: Option<u8>,
-    sck_pin: Option<u8>,
-    step_pin: Option<u8>,
-    dir_pin: Option<u8>,
-}
 
-impl DosingSessionBuilder {
-    pub fn new() -> Self {
-        Self::default()
-    }
-    pub fn target_grams(mut self, grams: f32) -> Self {
-        self.target_grams = Some(grams);
+    /// Supply a Motor implementation.
+    pub fn with_motor<M: doser_traits::Motor + 'static>(mut self, m: M) -> Self {
+        self.motor = Some(Box::new(m));
         self
     }
-    pub fn max_attempts(mut self, attempts: usize) -> Self {
-        self.max_attempts = Some(attempts);
+
+    /// Supply filter config (optional).
+    pub fn with_filter(mut self, f: FilterCfg) -> Self {
+        self.filter = Some(f);
         self
     }
-    pub fn dt_pin(mut self, pin: u8) -> Self {
-        self.dt_pin = Some(pin);
+
+    /// Supply control config (optional).
+    pub fn with_control(mut self, c: ControlCfg) -> Self {
+        self.control = Some(c);
         self
     }
-    pub fn sck_pin(mut self, pin: u8) -> Self {
-        self.sck_pin = Some(pin);
+
+    /// Supply timeouts (optional).
+    pub fn with_timeouts(mut self, t: Timeouts) -> Self {
+        self.timeouts = Some(t);
         self
     }
-    pub fn step_pin(mut self, pin: u8) -> Self {
-        self.step_pin = Some(pin);
+
+    /// Set the target grams.
+    pub fn with_target_grams(mut self, g: f32) -> Self {
+        self.target_g = Some(g);
         self
     }
-    pub fn dir_pin(mut self, pin: u8) -> Self {
-        self.dir_pin = Some(pin);
+
+    /// Optional no-op hook so the CLI can pass a calibration value without
+    /// forcing a dependency on any config crate here.
+    pub fn apply_calibration<T>(mut self, _calib: Option<&T>) -> Self {
+        self._calibration_loaded = _calib.is_some();
         self
     }
-    pub fn build(self) -> Option<DosingSession> {
-        Some(DosingSession {
-            target_grams: self.target_grams?,
-            max_attempts: self.max_attempts.unwrap_or(100),
-            dt_pin: self.dt_pin?,
-            sck_pin: self.sck_pin?,
-            step_pin: self.step_pin?,
-            dir_pin: self.dir_pin?,
+
+    /// Validate and build the Doser.
+    pub fn build(self) -> Result<Doser> {
+        let scale = self
+            .scale
+            .ok_or_else(|| DoserError::Config("scale not provided".into()))?;
+        let motor = self
+            .motor
+            .ok_or_else(|| DoserError::Config("motor not provided".into()))?;
+        let target_g = self
+            .target_g
+            .ok_or_else(|| DoserError::Config("target grams not provided".into()))?;
+
+        if !(0.1..=5000.0).contains(&target_g) {
+            return Err(DoserError::Config(format!(
+                "target grams out of range: {target_g}"
+            )));
+        }
+
+        let filter = self.filter.unwrap_or_default();
+        let control = self.control.unwrap_or_default();
+        let timeouts = self.timeouts.unwrap_or_default();
+
+        Ok(Doser {
+            scale,
+            motor,
+            filter,
+            control,
+            timeouts,
+            target_g,
+            last_weight_g: 0.0,
+            settled_since: None,
         })
-    }
-}
-
-/// ADT for a dosing session
-#[derive(Debug, Clone)]
-pub struct DosingSession {
-    pub target_grams: f32,
-    pub max_attempts: usize,
-    pub dt_pin: u8,
-    pub sck_pin: u8,
-    pub step_pin: u8,
-    pub dir_pin: u8,
-}
-
-impl std::fmt::Display for DosingSession {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "DosingSession(target_grams: {:.2}, max_attempts: {}, DT: {}, SCK: {}, STEP: {}, DIR: {})",
-            self.target_grams,
-            self.max_attempts,
-            self.dt_pin,
-            self.sck_pin,
-            self.step_pin,
-            self.dir_pin
-        )
-    }
-}
-impl DosingSession {
-    /// Returns a dosing step iterator for the session
-    pub fn steps<F>(&self, read_weight: F) -> DosingStepEnum<F>
-    where
-        F: FnMut() -> f32,
-    {
-        DosingStepEnum::Steps(DosingStep::new(
-            self.target_grams,
-            read_weight,
-            self.max_attempts,
-        ))
-    }
-}
-
-/// ADT for dosing step iterator
-pub enum DosingStepEnum<F>
-where
-    F: FnMut() -> f32,
-{
-    Steps(DosingStep<F>),
-}
-
-impl<F> Iterator for DosingStepEnum<F>
-where
-    F: FnMut() -> f32,
-{
-    type Item = (usize, f32);
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            DosingStepEnum::Steps(iter) => iter.next(),
-        }
-    }
-}
-use std::fmt;
-impl fmt::Display for DosingResult {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Final weight: {:.2}g, Attempts: {}, Error: {}",
-            self.final_weight,
-            self.attempts,
-            match &self.error {
-                Some(e) => e.to_string(),
-                None => "None".to_string(),
-            }
-        )
-    }
-}
-/// Render a simple progress bar for dosing
-pub fn render_progress_bar(current: f32, target: f32, bar_width: usize) -> String {
-    let percent = (current / target * 100.0).min(100.0).max(0.0);
-    let filled = ((percent / 100.0) * bar_width as f32).round() as usize;
-    let empty = bar_width - filled;
-    let bar = format!("[{}{}]", "#".repeat(filled), "-".repeat(empty));
-    format!(
-        "{} {:>5.1}% ({:.2}g / {:.2}g)",
-        bar, percent, current, target
-    )
-}
-
-/// Dosing result
-#[derive(Debug, Clone)]
-pub struct DosingResult {
-    pub final_weight: f32,
-    pub attempts: usize,
-    pub error: Option<DoserError>,
-}
-
-impl Default for DosingResult {
-    fn default() -> Self {
-        DosingResult {
-            final_weight: 0.0,
-            attempts: 0,
-            error: None,
-        }
-    }
-}
-
-/// Core dosing algorithm (hardware-agnostic)
-/// Attempts to dose to the target weight.
-///
-/// # Errors
-/// Returns `Err(DoserError)` if:
-/// - `target_grams` is not positive
-/// - `read_weight` closure returns a negative value
-/// - Maximum attempts are exceeded before reaching target
-///
-/// # Returns
-/// - Ok(DosingResult) if successful
-/// - Err(DoserError) if a precondition or runtime error occurs
-pub fn dose_to_target<F>(
-    target_grams: f32,
-    mut read_weight: F,
-    max_attempts: usize,
-) -> crate::error::Result<DosingResult>
-where
-    F: FnMut() -> f32,
-{
-    if target_grams <= 0.0 {
-        return Err(crate::error::DoserError::Config(
-            "Negative target grams".to_string(),
-        ));
-    }
-    let mut attempts = 0;
-    let mut current_weight = read_weight();
-    while current_weight < target_grams {
-        attempts += 1;
-        if attempts > max_attempts {
-            return Err(crate::error::DoserError::Config(
-                "Max attempts exceeded".to_string(),
-            ));
-        }
-        if current_weight < 0.0 {
-            return Err(crate::error::DoserError::Hardware(
-                "Negative weight reading".to_string(),
-            ));
-        }
-        current_weight = read_weight();
-    }
-    Ok(DosingResult {
-        final_weight: current_weight,
-        attempts,
-        error: None,
-    })
-}
-
-/// Calibration math (returns scale factor)
-pub fn calculate_scale_factor(known_weight: f32, raw: f32) -> f32 {
-    if raw > 0.0 { known_weight / raw } else { 1.0 }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rstest::rstest;
-
-    #[rstest]
-    #[case(10.0, 2.0, 5.0)]
-    #[case(10.0, 0.0, 1.0)]
-    #[case(0.0, 10.0, 0.0)]
-    fn test_calculate_scale_factor(#[case] known: f32, #[case] raw: f32, #[case] expected: f32) {
-        assert_eq!(calculate_scale_factor(known, raw), expected);
-    }
-
-    #[test]
-    fn test_dose_to_target_success() {
-        let mut w = 0.0;
-        let result = dose_to_target(
-            10.0,
-            || {
-                w += 2.0;
-                w
-            },
-            10,
-        );
-        assert!(result.is_ok());
-        let dosing = result.unwrap();
-        assert_eq!(dosing.final_weight, 10.0);
-        assert!(dosing.error.is_none());
-    }
-
-    #[test]
-    fn test_dose_to_target_negative_target() {
-        let result = dose_to_target(-5.0, || 0.0, 10);
-        match result {
-            Err(crate::error::DoserError::Config(msg)) => assert_eq!(msg, "Negative target grams"),
-            _ => panic!("Expected Config error for negative target grams"),
-        }
-    }
-
-    #[test]
-    fn test_dose_to_target_max_attempts() {
-        let mut w = 0.0;
-        let result = dose_to_target(
-            10.0,
-            || {
-                w += 1.0;
-                w
-            },
-            5,
-        );
-        match result {
-            Err(crate::error::DoserError::Config(msg)) => assert_eq!(msg, "Max attempts exceeded"),
-            _ => panic!("Expected Config error for max attempts exceeded"),
-        }
-    }
-
-    #[test]
-    fn test_dose_to_target_negative_weight() {
-        let mut w = 0.0;
-        let result = dose_to_target(
-            10.0,
-            || {
-                w -= 2.0;
-                w
-            },
-            10,
-        );
-        match result {
-            Err(crate::error::DoserError::Hardware(msg)) => {
-                assert_eq!(msg, "Negative weight reading")
-            }
-            _ => panic!("Expected Hardware error for negative weight reading"),
-        }
-    }
-}
-/// Iterator over dosing steps, yielding (attempt, weight) each time.
-pub struct DosingStep<F>
-where
-    F: FnMut() -> f32,
-{
-    target: f32,
-    max_attempts: usize,
-    read_weight: F,
-    attempt: usize,
-    finished: bool,
-}
-
-impl<F> DosingStep<F>
-where
-    F: FnMut() -> f32,
-{
-    pub fn new(target: f32, read_weight: F, max_attempts: usize) -> Self {
-        DosingStep {
-            target,
-            max_attempts,
-            read_weight,
-            attempt: 0,
-            finished: false,
-        }
-    }
-}
-
-impl<F> Iterator for DosingStep<F>
-where
-    F: FnMut() -> f32,
-{
-    type Item = (usize, f32);
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.finished || self.attempt >= self.max_attempts {
-            return None;
-        }
-        self.attempt += 1;
-        let weight = (self.read_weight)();
-        if weight >= self.target || weight < 0.0 {
-            self.finished = true;
-        }
-        Some((self.attempt, weight))
-    }
-}
-
-#[cfg(test)]
-mod iterator_tests {
-    use super::*;
-    #[test]
-    fn test_dosing_step_iterator() {
-        let mut w = 0.0;
-        let iter = DosingStep::new(
-            6.0,
-            || {
-                w += 2.0;
-                w
-            },
-            10,
-        );
-        let steps: Vec<_> = iter.collect();
-        assert_eq!(steps, vec![(1, 2.0), (2, 4.0), (3, 6.0)]);
-    }
-
-    #[test]
-    fn test_dosing_step_iterator_negative_weight() {
-        let mut w = 2.0;
-        let iter = DosingStep::new(
-            6.0,
-            || {
-                w -= 3.0;
-                w
-            },
-            10,
-        );
-        let steps: Vec<_> = iter.collect();
-        // Should stop after first negative weight
-        assert_eq!(steps, vec![(1, -1.0)]);
-    }
-
-    #[test]
-    fn test_dosing_step_iterator_max_attempts() {
-        let mut w = 0.0;
-        let iter = DosingStep::new(
-            100.0,
-            || {
-                w += 1.0;
-                w
-            },
-            3,
-        );
-        let steps: Vec<_> = iter.collect();
-        assert_eq!(steps, vec![(1, 1.0), (2, 2.0), (3, 3.0)]);
-    }
-
-    #[test]
-    fn test_dosing_step_enum_iterator() {
-        let mut w = 0.0;
-        let mut iter = DosingStepEnum::Steps(DosingStep::new(
-            5.0,
-            || {
-                w += 2.0;
-                w
-            },
-            10,
-        ));
-        let mut results = vec![];
-        while let Some((attempt, weight)) = iter.next() {
-            results.push((attempt, weight));
-        }
-        assert_eq!(results, vec![(1, 2.0), (2, 4.0), (3, 6.0)]);
-    }
-
-    #[test]
-    fn test_dosing_session_builder_and_steps() {
-        let builder = DosingSessionBuilder::new()
-            .target_grams(6.0)
-            .max_attempts(5)
-            .dt_pin(1)
-            .sck_pin(2)
-            .step_pin(3)
-            .dir_pin(4);
-        let session = builder.build().unwrap();
-        let mut w = 0.0;
-        let mut iter = session.steps(|| {
-            w += 2.0;
-            w
-        });
-        let mut results = vec![];
-        while let Some((attempt, weight)) = iter.next() {
-            results.push((attempt, weight));
-        }
-        assert_eq!(results, vec![(1, 2.0), (2, 4.0), (3, 6.0)]);
-    }
-
-    #[test]
-    fn test_dosing_session_builder_missing_fields() {
-        let builder = DosingSessionBuilder::new()
-            .target_grams(6.0)
-            .max_attempts(5)
-            .dt_pin(1)
-            .sck_pin(2)
-            .step_pin(3);
-        // Missing dir_pin
-        assert!(builder.build().is_none());
     }
 }

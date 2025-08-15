@@ -1,33 +1,95 @@
-use doser_core::*;
+use doser_core::error::DoserError;
+use doser_core::{ControlCfg, Doser, FilterCfg, Timeouts};
+use doser_traits::{Motor, Scale};
+use std::error::Error;
+use std::time::Duration;
 
-#[test]
-fn test_dosing_session_builder_and_display() {
-    let builder = DosingSessionBuilder::new()
-        .target_grams(10.0)
-        .max_attempts(5)
-        .dt_pin(1)
-        .sck_pin(2)
-        .step_pin(3)
-        .dir_pin(4);
-    let session = builder.build().unwrap();
-    let display_str = format!("{}", session);
-    assert!(display_str.contains("DosingSession("));
+#[derive(Default)]
+struct DummyScale;
+impl Scale for DummyScale {
+    fn read(&mut self, _timeout: Duration) -> Result<i32, Box<dyn Error + Send + Sync>> {
+        Ok(0)
+    }
+}
+
+#[derive(Default)]
+struct DummyMotor;
+impl Motor for DummyMotor {
+    fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        Ok(())
+    }
+    fn set_speed(&mut self, _sps: u32) -> Result<(), Box<dyn Error + Send + Sync>> {
+        Ok(())
+    }
+    fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        Ok(())
+    }
 }
 
 #[test]
-fn test_dosing_step_enum_iterator() {
-    let mut w = 0.0;
-    let mut iter = DosingStepEnum::Steps(DosingStep::new(
-        5.0,
-        || {
-            w += 2.0;
-            w
-        },
-        10,
-    ));
-    let mut results = vec![];
-    while let Some((attempt, weight)) = iter.next() {
-        results.push((attempt, weight));
+fn builder_requires_scale_motor_target() {
+    // Missing everything
+    let err = match Doser::builder().build() {
+        Err(e) => e,
+        Ok(_) => panic!("should fail without fields"),
+    };
+    assert_is_config_err(err);
+
+    // Missing motor
+    let err = match Doser::builder()
+        .with_scale(DummyScale::default())
+        .with_target_grams(10.0)
+        .build()
+    {
+        Err(e) => e,
+        Ok(_) => panic!("should fail when motor is missing"),
+    };
+    assert_is_config_err(err);
+
+    // Missing scale
+    let err = match Doser::builder()
+        .with_motor(DummyMotor::default())
+        .with_target_grams(10.0)
+        .build()
+    {
+        Err(e) => e,
+        Ok(_) => panic!("should fail when scale is missing"),
+    };
+    assert_is_config_err(err);
+
+    // Missing target
+    let err = match Doser::builder()
+        .with_scale(DummyScale::default())
+        .with_motor(DummyMotor::default())
+        .build()
+    {
+        Err(e) => e,
+        Ok(_) => panic!("should fail when target is missing"),
+    };
+    assert_is_config_err(err);
+}
+
+#[test]
+fn builder_accepts_defaults() {
+    let res = Doser::builder()
+        .with_scale(DummyScale::default())
+        .with_motor(DummyMotor::default())
+        .with_filter(FilterCfg::default())
+        .with_control(ControlCfg::default())
+        .with_timeouts(Timeouts::default())
+        .with_target_grams(10.0)
+        .apply_calibration::<()>(None)
+        .build();
+
+    match res {
+        Ok(_) => {} // success
+        Err(e) => panic!("builder with defaults should succeed, got error: {e}"),
     }
-    assert_eq!(results, vec![(1, 2.0), (2, 4.0), (3, 6.0)]);
+}
+
+fn assert_is_config_err(err: DoserError) {
+    match err {
+        DoserError::Config(_) => {}
+        other => panic!("expected Config error, got: {other:?}"),
+    }
 }
