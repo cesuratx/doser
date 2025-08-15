@@ -1,51 +1,65 @@
-use doser_hardware::{Motor, Scale};
+pub mod error;
+pub mod sampler;
+use crate::error::{DoserError, Result};
+use crate::sampler::{Sampler, now_ms};
+use doser_traits::Motor;
 use std::collections::VecDeque;
 
 /// Status returned by Doser::step()
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum DosingStatus {
     Running,
     Complete,
-    Error,
+    Aborted(Box<DoserError>),
 }
 
 /// Doser struct for real-time, precise dosing control
 pub struct Doser {
-    scale: Box<dyn Scale>,
+    sampler: Sampler,
     motor: Box<dyn Motor>,
     target_grams: f32,
     filter_window: VecDeque<f32>,
     filter_size: usize,
     last_weight: f32,
     dosing_started: bool,
+    sample_timeout_ms: u64,
 }
 
 impl Doser {
     /// Create a new Doser
     pub fn new(
-        scale: Box<dyn Scale>,
+        sampler: Sampler,
         motor: Box<dyn Motor>,
         target_grams: f32,
         filter_size: usize,
+        sample_timeout_ms: u64,
     ) -> Self {
         Doser {
-            scale,
+            sampler,
             motor,
             target_grams,
             filter_window: VecDeque::with_capacity(filter_size),
             filter_size,
             last_weight: 0.0,
             dosing_started: false,
+            sample_timeout_ms,
         }
     }
 
     /// Perform one step of dosing: read scale, update filter, control motor
-    pub fn step(&mut self) -> Result<DosingStatus, eyre::Report> {
-        // 1. Read scale
-        let weight = self.scale.read_weight();
+    pub fn step(&mut self) -> Result<DosingStatus> {
+        // 1. Read scale via sampler
+        let now = now_ms();
+        if self.sampler.stalled_for(now) > self.sample_timeout_ms {
+            self.motor.stop();
+            return Err(DoserError::Timeout("Scale sampling stalled".to_string()));
+        }
+        let weight = self.sampler.latest().unwrap_or(self.last_weight as i32) as f32;
         self.last_weight = weight;
         if weight < 0.0 {
-            return Err(eyre::eyre!(DoserError::NegativeWeight));
+            return Err(DoserError::Hardware(
+                "Negative weight read from scale".to_string(),
+            ));
         }
         // 2. Update moving average filter
         if self.filter_window.len() == self.filter_size {
@@ -170,7 +184,7 @@ impl DosingSessionBuilder {
 }
 
 /// ADT for a dosing session
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct DosingSession {
     pub target_grams: f32,
     pub max_attempts: usize,
@@ -227,28 +241,7 @@ where
         }
     }
 }
-use eyre::Report;
 use std::fmt;
-use thiserror::Error;
-
-/// Error types for dosing operations
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum DoserError {
-    /// Target weight must be positive
-    #[error("Negative target grams")]
-    NegativeTarget,
-    /// Maximum number of dosing attempts exceeded
-    #[error("Max attempts exceeded")]
-    MaxAttemptsExceeded,
-    /// Weight reading was negative
-    #[error("Negative weight reading")]
-    NegativeWeight,
-}
-
-/// Helper to convert Result<T, DoserError> to Result<T, eyre::Report>
-pub fn to_report<T>(result: Result<T, DoserError>) -> Result<T, Report> {
-    result.map_err(Report::from)
-}
 impl fmt::Display for DosingResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -261,39 +254,6 @@ impl fmt::Display for DosingResult {
                 None => "None".to_string(),
             }
         )
-    }
-}
-use chrono::Local;
-use std::fs::OpenOptions;
-use std::io::Write;
-
-/// Log dosing result to a file, including timestamp, pin config, and calibration info
-pub fn log_dosing_result(
-    path: &str,
-    result: &DosingResult,
-    target: f32,
-    dt_pin: u8,
-    sck_pin: u8,
-    step_pin: u8,
-    dir_pin: u8,
-    calibration: Option<f32>,
-) {
-    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
-    let log_entry = format!(
-        "{} | target: {:.2}, final: {:.2}, attempts: {}, error: {:?}, pins: DT={}, SCK={}, STEP={}, DIR={}, calibration: {:?}\n",
-        timestamp,
-        target,
-        result.final_weight,
-        result.attempts,
-        result.error,
-        dt_pin,
-        sck_pin,
-        step_pin,
-        dir_pin,
-        calibration
-    );
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = file.write_all(log_entry.as_bytes());
     }
 }
 /// Render a simple progress bar for dosing
@@ -309,7 +269,7 @@ pub fn render_progress_bar(current: f32, target: f32, bar_width: usize) -> Strin
 }
 
 /// Dosing result
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct DosingResult {
     pub final_weight: f32,
     pub attempts: usize,
@@ -342,22 +302,28 @@ pub fn dose_to_target<F>(
     target_grams: f32,
     mut read_weight: F,
     max_attempts: usize,
-) -> Result<DosingResult, DoserError>
+) -> crate::error::Result<DosingResult>
 where
     F: FnMut() -> f32,
 {
     if target_grams <= 0.0 {
-        return Err(DoserError::NegativeTarget);
+        return Err(crate::error::DoserError::Config(
+            "Negative target grams".to_string(),
+        ));
     }
     let mut attempts = 0;
     let mut current_weight = read_weight();
     while current_weight < target_grams {
         attempts += 1;
         if attempts > max_attempts {
-            return Err(DoserError::MaxAttemptsExceeded);
+            return Err(crate::error::DoserError::Config(
+                "Max attempts exceeded".to_string(),
+            ));
         }
         if current_weight < 0.0 {
-            return Err(DoserError::NegativeWeight);
+            return Err(crate::error::DoserError::Hardware(
+                "Negative weight reading".to_string(),
+            ));
         }
         current_weight = read_weight();
     }
@@ -400,13 +366,16 @@ mod tests {
         assert!(result.is_ok());
         let dosing = result.unwrap();
         assert_eq!(dosing.final_weight, 10.0);
-        assert_eq!(dosing.error, None);
+        assert!(dosing.error.is_none());
     }
 
     #[test]
     fn test_dose_to_target_negative_target() {
         let result = dose_to_target(-5.0, || 0.0, 10);
-        assert_eq!(result, Err(DoserError::NegativeTarget));
+        match result {
+            Err(crate::error::DoserError::Config(msg)) => assert_eq!(msg, "Negative target grams"),
+            _ => panic!("Expected Config error for negative target grams"),
+        }
     }
 
     #[test]
@@ -420,7 +389,10 @@ mod tests {
             },
             5,
         );
-        assert_eq!(result, Err(DoserError::MaxAttemptsExceeded));
+        match result {
+            Err(crate::error::DoserError::Config(msg)) => assert_eq!(msg, "Max attempts exceeded"),
+            _ => panic!("Expected Config error for max attempts exceeded"),
+        }
     }
 
     #[test]
@@ -434,7 +406,12 @@ mod tests {
             },
             10,
         );
-        assert_eq!(result, Err(DoserError::NegativeWeight));
+        match result {
+            Err(crate::error::DoserError::Hardware(msg)) => {
+                assert_eq!(msg, "Negative weight reading")
+            }
+            _ => panic!("Expected Hardware error for negative weight reading"),
+        }
     }
 }
 /// Iterator over dosing steps, yielding (attempt, weight) each time.

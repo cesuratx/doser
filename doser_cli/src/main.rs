@@ -3,9 +3,8 @@ use csv::ReaderBuilder;
 use doser_core::config::{ConfigSource, CsvConfigSource, TomlConfigSource};
 use doser_core::logger::Logger;
 use doser_core::render_progress_bar;
-use std::collections::HashMap;
-// ...existing code...
 use eyre::{Result, WrapErr};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -187,16 +186,11 @@ fn main() -> Result<()> {
         session.dt_pin, session.sck_pin, session.step_pin, session.dir_pin
     );
 
-    let log_path = args
-        .log
-        .clone()
-        .unwrap_or_else(|| "dosing_log.txt".to_string());
-    let logger = doser_core::logger::FileLogger::new(log_path);
     if let Some(cal_src) = &calibration_source {
         let cal_data = cal_src.get_calibration();
-        logger.log(&format!("Calibration data loaded: {:?}", cal_data));
+        tracing::info!(cal_data=?cal_data, "Calibration data loaded");
         if let Some(avg) = avg_scale_factor {
-            logger.log(&format!("Average scale factor: {:.4}", avg));
+            tracing::info!(avg_scale_factor=?avg, "Average scale factor");
         }
     }
 
@@ -204,12 +198,19 @@ fn main() -> Result<()> {
         println!("Target grams: {:.2}", session.target_grams);
         scale.tare();
         motor.start();
+        // Create Sampler for scale readings
+        let sampler = doser_core::sampler::Sampler::spawn(
+            *scale,
+            10,                                    // sample rate Hz
+            std::time::Duration::from_millis(150), // scale read timeout
+        );
         // Create Doser instance with moving average filter (window size 5)
         let mut doser = doser_core::Doser::new(
-            scale,
+            sampler,
             motor,
             session.target_grams,
-            5, // moving average window size
+            5,    // moving average window size
+            1000, // sample timeout ms
         );
         let mut attempts = 0;
         let mut weights: Vec<f32> = Vec::new();
@@ -229,7 +230,7 @@ fn main() -> Result<()> {
                             break;
                         }
                         doser_core::DosingStatus::Running => {}
-                        doser_core::DosingStatus::Error => {
+                        doser_core::DosingStatus::Aborted(_) => {
                             println!("");
                             eyre::bail!("Dosing failed: error status returned");
                         }
@@ -252,7 +253,7 @@ fn main() -> Result<()> {
             session.dir_pin,
             Option::<f32>::None
         );
-        logger.log(&log_msg);
+        tracing::info!(log_msg, "Dosing session completed");
         println!("Dosing complete in {} attempts.", attempts);
         println!("Step-by-step weights:");
         for (i, w) in weights.iter().enumerate() {

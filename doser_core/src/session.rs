@@ -1,0 +1,35 @@
+use crate::error::{DoserError, Result};
+
+pub struct DosingSessionBuilder {
+    grams: Option<f32>,
+    // ... other fields
+}
+
+#[derive(Debug)]
+pub struct DosingSession {
+    grams: f32,
+    // ...
+}
+
+impl DosingSessionBuilder {
+    pub fn new() -> Self {
+        Self {
+            grams: None, /* ... */
+        }
+    }
+
+    pub fn grams(mut self, g: f32) -> Self {
+        self.grams = Some(g);
+        self
+    }
+
+    pub fn build(self) -> Result<DosingSession> {
+        let grams = self
+            .grams
+            .ok_or_else(|| DoserError::Config("grams not set".into()))?;
+        if !(0.1..=1000.0).contains(&grams) {
+            return Err(DoserError::Config(format!("grams out of range: {grams}")));
+        }
+        Ok(DosingSession { grams })
+    }
+}

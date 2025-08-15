@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rppal = { version = "0.22.1", optional = true }
+doser_traits = { path = "../doser_traits" }
+thiserror = "1"
+rppal = { version = "0.17", optional = true }
+tracing = "0.1"
 
 [features]
 hardware = ["rppal"]

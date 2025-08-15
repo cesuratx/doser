@@ -1,5 +1,5 @@
 use crate::Doser;
-use eyre::Result;
+use crate::error::{DoserError, Result};
 
 pub trait DosingStrategy {
     fn dose(&self, doser: &mut Doser) -> Result<crate::DosingResult>;
@@ -22,20 +22,31 @@ impl DosingStrategy for DefaultDosingStrategy {
             } else {
                 doser.motor.start();
             }
-            if status == crate::DosingStatus::Complete {
-                doser.motor.stop();
-                return Ok(crate::DosingResult {
-                    final_weight: avg_weight,
-                    attempts,
-                    error: None,
-                });
+            match status {
+                crate::DosingStatus::Complete => {
+                    doser.motor.stop();
+                    return Ok(crate::DosingResult {
+                        final_weight: avg_weight,
+                        attempts,
+                        error: None,
+                    });
+                }
+                crate::DosingStatus::Aborted(e) => {
+                    doser.motor.stop();
+                    return Ok(crate::DosingResult {
+                        final_weight: avg_weight,
+                        attempts,
+                        error: Some(*e),
+                    });
+                }
+                crate::DosingStatus::Running => {}
             }
             if attempts >= max_attempts {
                 doser.motor.stop();
                 return Ok(crate::DosingResult {
                     final_weight: avg_weight,
                     attempts,
-                    error: Some(crate::DoserError::MaxAttemptsExceeded),
+                    error: Some(DoserError::Config("Max attempts exceeded".to_string())),
                 });
             }
         }
