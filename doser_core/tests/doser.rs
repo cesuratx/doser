@@ -340,18 +340,42 @@ fn requires_time_to_settle_when_stable_ms_positive() {
 
 #[test]
 fn aborts_on_no_progress_watchdog() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
     struct ConstScale(i32);
     impl Scale for ConstScale {
         fn read(&mut self, _timeout: Duration) -> Result<i32, Box<dyn Error + Send + Sync>> {
             Ok(self.0)
         }
     }
+    // Deterministic test clock
+    #[derive(Clone)]
+    struct TestClock(Arc<AtomicU64>);
+    impl TestClock {
+        fn new() -> Self {
+            Self(Arc::new(AtomicU64::new(0)))
+        }
+        fn advance(&self, ms: u64) {
+            self.0.fetch_add(ms, Ordering::Relaxed);
+        }
+    }
+    impl doser_core::Clock for TestClock {
+        fn now_ms(&self) -> u64 {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
     let safety = SafetyCfg {
         max_run_ms: 60_000,
         max_overshoot_g: 10.0,
         no_progress_epsilon_g: 0.01,
-        no_progress_ms: 1,
+        no_progress_ms: 5,
     };
+
+    let tclk = TestClock::new();
+
     let mut doser = Doser::builder()
         .with_scale(ConstScale(0))
         .with_motor(SpyMotor::default())
@@ -366,14 +390,15 @@ fn aborts_on_no_progress_watchdog() {
         .with_safety(safety)
         .with_timeouts(Timeouts { sensor_ms: 1 })
         .with_target_grams(10.0)
+        .with_clock(tclk.clone())
         .apply_calibration::<()>(None)
         .build()
         .expect("build doser");
 
     // First step should run
     assert!(matches!(doser.step().unwrap(), DosingStatus::Running));
-    // Wait to exceed the watchdog window
-    std::thread::sleep(Duration::from_millis(5));
+    // Advance virtual time to exceed the watchdog window
+    tclk.advance(10);
     // Next step should hit watchdog and abort (no progress)
     match doser.step().unwrap() {
         DosingStatus::Aborted(e) => assert!(format!("{e}").contains("no progress")),

@@ -106,6 +106,32 @@ cargo run --release --bin doser_cli -- --grams 18.5 --calibration etc/calibratio
 - offset is the tare baseline in raw counts
 - scale_factor is grams per count (gain)
 
+## Logging
+
+- Console: pretty or JSON (`--json`).
+- File: when `logging.file` is set in the TOML, a non-blocking log appender writes JSON/pretty entries to that file in addition to the console. The log writer is kept alive for process lifetime.
+- Rotation: you can switch to daily or hourly rotation by using `tracing_appender::rolling::daily(dir, file)` or `...::hourly(dir, file)` in the CLI. Ensure the directory exists (e.g., create it with `std::fs::create_dir_all`).
+
+## Deterministic time in tests
+
+The core exposes a `Clock` (`fn now_ms() -> u64`). `DoserBuilder::with_clock(...)` lets tests inject a deterministic clock and advance time without sleeping. Example sketch:
+
+```rust
+#[derive(Clone)]
+struct TestClock(std::sync::Arc<std::sync::atomic::AtomicU64>);
+impl TestClock { fn new() -> Self { Self(Default::default()) } fn advance(&self, ms: u64) { self.0.fetch_add(ms, std::sync::atomic::Ordering::Relaxed); } }
+impl doser_core::Clock for TestClock { fn now_ms(&self) -> u64 { self.0.load(std::sync::atomic::Ordering::Relaxed) } }
+
+let clk = TestClock::new();
+let mut d = doser_core::Doser::builder()
+    // ... hardware, configs ...
+    .with_clock(clk.clone())
+    .build()?;
+assert!(matches!(d.step()?, doser_core::DosingStatus::Running));
+clk.advance(1000);
+// subsequent step observes the elapsed time
+```
+
 ## Hardware Feature
 
 Simulation (no hardware) is the default. To enable real GPIO/I2C on Raspberry Pi builds:

@@ -20,7 +20,13 @@ fn init_tracing(json: bool, level: &str, file: Option<&str>) {
     if json {
         let console = fmt::layer().json().with_target(false);
         if let Some(path) = file {
+            // Ensure directory exists and allow switching to rotation if needed.
+            let p = std::path::Path::new(path);
+            if let Some(parent) = p.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
             let file_appender = tracing_appender::rolling::never(".", path);
+            // For rotation, consider: rolling::daily(dir, filename) or rolling::hourly(dir, filename)
             let (nb_writer, guard) = tracing_appender::non_blocking(file_appender);
             let _ = FILE_GUARD.set(guard);
             let file_layer = fmt::layer()
@@ -34,6 +40,10 @@ fn init_tracing(json: bool, level: &str, file: Option<&str>) {
     } else {
         let console = fmt::layer().pretty().with_target(false);
         if let Some(path) = file {
+            let p = std::path::Path::new(path);
+            if let Some(parent) = p.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
             let file_appender = tracing_appender::rolling::never(".", path);
             let (nb_writer, guard) = tracing_appender::non_blocking(file_appender);
             let _ = FILE_GUARD.set(guard);
