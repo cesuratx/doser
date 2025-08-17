@@ -15,6 +15,7 @@ impl Default for DefaultDosingStrategy {
 
 impl DefaultDosingStrategy {
     pub fn dose(&self, doser: &mut Doser) -> Result<()> {
+        doser.begin();
         let mut attempts = 0_u32;
         loop {
             attempts += 1;

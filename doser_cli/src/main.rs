@@ -55,6 +55,12 @@ enum Commands {
     Dose {
         #[arg(long)]
         grams: f32,
+        /// Override safety: max run time in ms (takes precedence over config)
+        #[arg(long, value_name = "MS")]
+        max_run_ms: Option<u64>,
+        /// Override safety: abort if overshoot exceeds this many grams
+        #[arg(long, value_name = "GRAMS")]
+        max_overshoot_g: Option<f32>,
     },
     /// Quick health check (hardware presence / sim ok)
     SelfCheck,
@@ -109,16 +115,19 @@ fn main() -> anyhow::Result<()> {
                 let mut hw_mut = hw; // need mutable to call read()
                 let _ = hw_mut
                     .0
-                    .read(Duration::from_millis(cfg.timeouts.sensor_ms))
+                    .read(Duration::from_millis(cfg.timeouts.sample_ms))
                     .context("scale read")?;
             }
             tracing::info!("self-check ok");
             println!("OK");
             Ok(())
         }
-        Commands::Dose { grams } => {
-            run_dose(&cfg, calib.as_ref(), grams, hw).with_context(|| "dose failed")
-        }
+        Commands::Dose {
+            grams,
+            max_run_ms,
+            max_overshoot_g,
+        } => run_dose(&cfg, calib.as_ref(), grams, max_run_ms, max_overshoot_g, hw)
+            .with_context(|| "dose failed"),
     }
 }
 
@@ -127,23 +136,66 @@ fn run_dose(
     _cfg: &doser_config::Config,
     calib: Option<&Calibration>,
     grams: f32,
+    // CLI safety overrides
+    max_run_ms_override: Option<u64>,
+    max_overshoot_g_override: Option<f32>,
     // 'static bounds so these can be boxed inside the Doser builder:
     hw: (
         impl doser_traits::Scale + 'static,
         impl doser_traits::Motor + 'static,
     ),
 ) -> CoreResult<()> {
-    // For now, pass core defaults for filter/control/timeouts.
-    // We can map _cfg fields into core types later once names are aligned.
-    let mut doser = Doser::builder()
+    // Map typed config into core config objects
+    let filter = doser_core::FilterCfg {
+        ma_window: _cfg.filter.ma_window,
+        median_window: _cfg.filter.median_window,
+        sample_rate_hz: _cfg.filter.sample_rate_hz,
+    };
+    let control = doser_core::ControlCfg {
+        coarse_speed: _cfg.control.coarse_speed,
+        fine_speed: _cfg.control.fine_speed,
+        slow_at_g: _cfg.control.slow_at_g,
+        hysteresis_g: _cfg.control.hysteresis_g,
+        stable_ms: _cfg.control.stable_ms,
+    };
+    let timeouts = doser_core::Timeouts {
+        sensor_ms: _cfg.timeouts.sample_ms,
+    };
+    let defaults = doser_core::SafetyCfg::default();
+    let safety = doser_core::SafetyCfg {
+        max_run_ms: max_run_ms_override.unwrap_or_else(|| {
+            if _cfg.safety.max_run_ms == 0 {
+                defaults.max_run_ms
+            } else {
+                _cfg.safety.max_run_ms
+            }
+        }),
+        max_overshoot_g: max_overshoot_g_override.unwrap_or_else(|| {
+            if _cfg.safety.max_overshoot_g == 0.0 {
+                defaults.max_overshoot_g
+            } else {
+                _cfg.safety.max_overshoot_g
+            }
+        }),
+    };
+
+    let mut builder = Doser::builder()
         .with_scale(hw.0)
         .with_motor(hw.1)
-        .with_filter(doser_core::FilterCfg::default())
-        .with_control(doser_core::ControlCfg::default())
-        .with_timeouts(doser_core::Timeouts::default())
-        .with_target_grams(grams)
-        .apply_calibration(calib) // generic; core stays config-agnostic
-        .build()?;
+        .with_filter(filter)
+        .with_control(control)
+        .with_safety(safety)
+        .with_timeouts(timeouts)
+        .with_target_grams(grams);
+
+    // Apply calibration CSV if provided
+    if let Some(c) = calib {
+        builder = builder
+            .with_tare_counts(c.offset)
+            .with_calibration_gain_offset(c.scale_factor, 0.0);
+    }
+
+    let mut doser = builder.build()?;
 
     tracing::info!(target_g = grams, "dose start");
 

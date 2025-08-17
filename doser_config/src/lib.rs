@@ -30,6 +30,12 @@ pub struct Timeouts {
     pub sample_ms: u64,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct Safety {
+    pub max_run_ms: u64,
+    pub max_overshoot_g: f32,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Logging {
     pub file: Option<String>,  // path to .log (JSON lines)
@@ -42,6 +48,8 @@ pub struct Config {
     pub filter: FilterCfg,
     pub control: ControlCfg,
     pub timeouts: Timeouts,
+    #[serde(default)]
+    pub safety: Safety,
     pub logging: Logging,
 }
 
