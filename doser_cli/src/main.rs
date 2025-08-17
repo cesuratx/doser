@@ -6,23 +6,45 @@ use doser_config::{load_calibration_csv, Calibration, Config};
 use doser_core::{error::Result as CoreResult, Doser, DosingStatus};
 use doser_traits; // for trait names in function signatures
 
+use std::sync::OnceLock;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
+static FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
+
 /// Initialize tracing once for the whole app.
-fn init_tracing(json: bool, level: &str) {
-    // EnvFilter supports strings like "info", "debug", or module-level filters.
+fn init_tracing(json: bool, level: &str, file: Option<&str>) {
     let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("info"));
 
+    let base = tracing_subscriber::registry().with(filter);
+
     if json {
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt::layer().json().with_target(false))
-            .init();
+        let console = fmt::layer().json().with_target(false);
+        if let Some(path) = file {
+            let file_appender = tracing_appender::rolling::never(".", path);
+            let (nb_writer, guard) = tracing_appender::non_blocking(file_appender);
+            let _ = FILE_GUARD.set(guard);
+            let file_layer = fmt::layer()
+                .with_ansi(false)
+                .with_target(false)
+                .with_writer(nb_writer);
+            base.with(console).with(file_layer).init();
+        } else {
+            base.with(console).init();
+        }
     } else {
-        tracing_subscriber::registry()
-            .with(filter)
-            .with(fmt::layer().pretty().with_target(false))
-            .init();
+        let console = fmt::layer().pretty().with_target(false);
+        if let Some(path) = file {
+            let file_appender = tracing_appender::rolling::never(".", path);
+            let (nb_writer, guard) = tracing_appender::non_blocking(file_appender);
+            let _ = FILE_GUARD.set(guard);
+            let file_layer = fmt::layer()
+                .with_ansi(false)
+                .with_target(false)
+                .with_writer(nb_writer);
+            base.with(console).with(file_layer).init();
+        } else {
+            base.with(console).init();
+        }
     }
 }
 
@@ -68,13 +90,14 @@ enum Commands {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    init_tracing(cli.json, &cli.log_level);
 
-    // 1) Load typed config from TOML
+    // 1) Load typed config from TOML (for logging.file)
     let cfg_text =
         fs::read_to_string(&cli.config).with_context(|| format!("read config {:?}", cli.config))?;
     let cfg: Config =
         toml::from_str(&cfg_text).with_context(|| format!("parse config {:?}", cli.config))?;
+
+    init_tracing(cli.json, &cli.log_level, cfg.logging.file.as_deref());
 
     // 2) Load calibration if provided
     let calib: Option<Calibration> = match &cli.calibration {
@@ -177,6 +200,8 @@ fn run_dose(
                 _cfg.safety.max_overshoot_g
             }
         }),
+        no_progress_epsilon_g: _cfg.safety.no_progress_epsilon_g,
+        no_progress_ms: _cfg.safety.no_progress_ms,
     };
 
     let mut builder = Doser::builder()
@@ -187,6 +212,24 @@ fn run_dose(
         .with_safety(safety)
         .with_timeouts(timeouts)
         .with_target_grams(grams);
+
+    // Hardware E-stop hookup (feature-gated). Create a real GPIO-backed checker.
+    #[cfg(feature = "hardware")]
+    {
+        if let Some(estop_pin) = _cfg.pins.estop_in {
+            // Active-low E-stop is common; poll every 5ms.
+            match doser_hardware::make_estop_checker(estop_pin, true, 5) {
+                Ok(checker) => {
+                    // move the boxed closure into the builder; wrap to erase Send+Sync bound
+                    builder = builder.with_estop_check(move || checker());
+                }
+                Err(e) => {
+                    // If we cannot create the checker, proceed without E-stop but log it.
+                    tracing::warn!("failed to init estop checker: {}", e);
+                }
+            }
+        }
+    }
 
     // Apply calibration CSV if provided
     if let Some(c) = calib {

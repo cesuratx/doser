@@ -141,6 +141,8 @@ fn aborts_on_excessive_overshoot() {
     let safety = SafetyCfg {
         max_run_ms: 60_000,
         max_overshoot_g: 0.5,
+        no_progress_epsilon_g: 0.0,
+        no_progress_ms: 0,
     };
     let scale = SeqScale::new([8, 9, 11]); // target 10, overshoot by 1g > 0.5
     let mut doser = Doser::builder()
@@ -172,6 +174,8 @@ fn aborts_on_max_runtime() {
     let safety = SafetyCfg {
         max_run_ms: 0,
         max_overshoot_g: 10.0,
+        no_progress_epsilon_g: 0.0,
+        no_progress_ms: 0,
     };
     let mut doser = Doser::builder()
         .with_scale(SeqScale::new([0]))
@@ -331,5 +335,48 @@ fn requires_time_to_settle_when_stable_ms_positive() {
     match doser.step().unwrap() {
         DosingStatus::Running => {}
         other => panic!("expected Running before stable_ms elapsed, got {other:?}"),
+    }
+}
+
+#[test]
+fn aborts_on_no_progress_watchdog() {
+    struct ConstScale(i32);
+    impl Scale for ConstScale {
+        fn read(&mut self, _timeout: Duration) -> Result<i32, Box<dyn Error + Send + Sync>> {
+            Ok(self.0)
+        }
+    }
+    let safety = SafetyCfg {
+        max_run_ms: 60_000,
+        max_overshoot_g: 10.0,
+        no_progress_epsilon_g: 0.01,
+        no_progress_ms: 1,
+    };
+    let mut doser = Doser::builder()
+        .with_scale(ConstScale(0))
+        .with_motor(SpyMotor::default())
+        .with_filter(FilterCfg::default())
+        .with_control(ControlCfg {
+            slow_at_g: 1.0,
+            hysteresis_g: 100.0,
+            stable_ms: 10_000,
+            coarse_speed: 1200,
+            fine_speed: 250,
+        })
+        .with_safety(safety)
+        .with_timeouts(Timeouts { sensor_ms: 1 })
+        .with_target_grams(10.0)
+        .apply_calibration::<()>(None)
+        .build()
+        .expect("build doser");
+
+    // First step should run
+    assert!(matches!(doser.step().unwrap(), DosingStatus::Running));
+    // Wait to exceed the watchdog window
+    std::thread::sleep(Duration::from_millis(5));
+    // Next step should hit watchdog and abort (no progress)
+    match doser.step().unwrap() {
+        DosingStatus::Aborted(e) => assert!(format!("{e}").contains("no progress")),
+        other => panic!("expected Aborted, got {other:?}"),
     }
 }

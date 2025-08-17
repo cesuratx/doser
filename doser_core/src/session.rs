@@ -27,7 +27,7 @@ impl DosingSessionBuilder {
         let grams = self
             .grams
             .ok_or_else(|| DoserError::Config("grams not set".into()))?;
-        if !(0.1..=1000.0).contains(&grams) {
+        if !(0.1..=5000.0).contains(&grams) {
             return Err(DoserError::Config(format!("grams out of range: {grams}")));
         }
         Ok(DosingSession { grams })

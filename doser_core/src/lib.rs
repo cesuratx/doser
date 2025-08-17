@@ -6,7 +6,26 @@
 pub mod error;
 
 use crate::error::{DoserError, Result};
-use std::time::{Duration, Instant};
+use std::collections::VecDeque;
+use std::time::Duration;
+
+/// Testable clock abstraction returning monotonic milliseconds.
+pub trait Clock: Send + Sync {
+    fn now_ms(&self) -> u64;
+}
+
+/// System clock implementation.
+#[derive(Default)]
+pub struct SystemClock;
+impl Clock for SystemClock {
+    fn now_ms(&self) -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+}
 
 /// Simple linear calibration from raw scale counts to grams.
 /// grams = gain_g_per_count * (raw - zero_counts) + offset_g
@@ -97,6 +116,12 @@ pub struct SafetyCfg {
     pub max_run_ms: u64,
     /// Abort if weight exceeds target by more than this many grams.
     pub max_overshoot_g: f32,
+    /// Abort if weight doesn't change by at least this many grams
+    /// for at least `no_progress_ms` while motor is commanded to run.
+    /// Set to 0 to disable.
+    pub no_progress_epsilon_g: f32,
+    /// See `no_progress_epsilon_g`. 0 disables the watchdog.
+    pub no_progress_ms: u64,
 }
 
 impl Default for SafetyCfg {
@@ -104,6 +129,8 @@ impl Default for SafetyCfg {
         Self {
             max_run_ms: 60_000,   // 60s
             max_overshoot_g: 2.0, // 2g
+            no_progress_epsilon_g: 0.0,
+            no_progress_ms: 0,
         }
     }
 }
@@ -125,21 +152,29 @@ impl Default for Timeouts {
 pub struct Doser {
     scale: Box<dyn doser_traits::Scale>,
     motor: Box<dyn doser_traits::Motor>,
-    #[allow(dead_code)] // Informational for now; reserved for future filtering logic
     filter: FilterCfg,
     control: ControlCfg,
     safety: SafetyCfg,
     timeouts: Timeouts,
     calibration: Calibration,
     target_g: f32,
+    // Clock for deterministic time in tests
+    clock: Box<dyn Clock>,
 
     last_weight_g: f32,
-    settled_since: Option<Instant>,
+    settled_since_ms: Option<u64>,
     // Track when the dosing run started to enforce a max runtime
-    start_at: Instant,
+    start_ms: u64,
     // Buffers for filtering
-    ma_buf: Vec<f32>,
-    med_buf: Vec<f32>,
+    ma_buf: VecDeque<f32>,
+    med_buf: VecDeque<f32>,
+    // Motor lifecycle
+    motor_started: bool,
+    // Optional E-stop callback; if returns true, abort immediately
+    estop_check: Option<Box<dyn Fn() -> bool>>,
+    // No-progress watchdog
+    last_progress_w: f32,
+    last_progress_at_ms: u64,
 }
 
 impl Doser {
@@ -165,12 +200,16 @@ impl Doser {
 
     /// Reset per-run state (start time, settling window). Call before a new dose.
     pub fn begin(&mut self) {
-        self.start_at = Instant::now();
-        self.settled_since = None;
+        let now = self.clock.now_ms();
+        self.start_ms = now;
+        self.settled_since_ms = None;
         // Clear filter state for a fresh run
         self.ma_buf.clear();
         self.med_buf.clear();
         self.last_weight_g = 0.0;
+        self.motor_started = false;
+        self.last_progress_w = 0.0;
+        self.last_progress_at_ms = now;
     }
 
     /// Stop the motor (best-effort).
@@ -187,13 +226,12 @@ impl Doser {
 
         // Median prefilter over grams
         let after_median = if med_win > 1 {
-            self.med_buf.push(w);
+            self.med_buf.push_back(w);
             if self.med_buf.len() > med_win {
-                // remove oldest
-                self.med_buf.remove(0);
+                self.med_buf.pop_front();
             }
-            let mut tmp = self.med_buf.clone();
-            tmp.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let mut tmp: Vec<f32> = self.med_buf.iter().copied().collect();
+            tmp.sort_by(|a, b| a.total_cmp(b));
             let mid = tmp.len() / 2;
             if tmp.len() % 2 == 0 {
                 (tmp[mid - 1] + tmp[mid]) / 2.0
@@ -206,9 +244,9 @@ impl Doser {
 
         // Moving average over the median output
         if ma_win > 1 {
-            self.ma_buf.push(after_median);
+            self.ma_buf.push_back(after_median);
             if self.ma_buf.len() > ma_win {
-                self.ma_buf.remove(0);
+                self.ma_buf.pop_front();
             }
             let sum: f32 = self.ma_buf.iter().copied().sum();
             sum / (self.ma_buf.len() as f32)
@@ -223,11 +261,18 @@ impl Doser {
     /// - tracks settling window inside the hysteresis band
     /// - returns `Running`, `Complete`, or `Aborted(err)`
     pub fn step(&mut self) -> Result<DosingStatus> {
+        // E-stop check
+        if let Some(check) = &self.estop_check {
+            if check() {
+                let _ = self.motor_stop();
+                return Ok(DosingStatus::Aborted(DoserError::State("estop".into())));
+            }
+        }
+
         // 1) read current weight
         let timeout = Duration::from_millis(self.timeouts.sensor_ms);
         let raw = self.scale.read(timeout).map_err(|e| {
             let s = e.to_string();
-            // Heuristic mapping for timeouts
             if s.to_lowercase().contains("timeout") {
                 DoserError::Timeout
             } else {
@@ -243,8 +288,10 @@ impl Doser {
         let err = self.target_g - w;
         let abs_err = err.abs();
 
+        let now = self.clock.now_ms();
+
         // 1a) hard runtime cap (>= to allow deterministic tests with 0ms)
-        if self.start_at.elapsed().as_millis() as u64 >= self.safety.max_run_ms {
+        if now.saturating_sub(self.start_ms) >= self.safety.max_run_ms {
             let _ = self.motor_stop();
             return Ok(DosingStatus::Aborted(DoserError::State(
                 "max run time exceeded".into(),
@@ -259,21 +306,33 @@ impl Doser {
             )));
         }
 
-        // 2) inside hysteresis band? attempt to settle
-        if abs_err <= self.control.hysteresis_g {
-            // Stop motor while we settle to avoid further overshoot
-            let _ = self.motor_stop();
-            if self.settled_since.is_none() {
-                self.settled_since = Some(Instant::now());
+        // 1c) no-progress watchdog (disabled when thresholds are zero)
+        if self.safety.no_progress_ms > 0 && self.safety.no_progress_epsilon_g > 0.0 {
+            if (w - self.last_progress_w).abs() >= self.safety.no_progress_epsilon_g {
+                self.last_progress_w = w;
+                self.last_progress_at_ms = now;
+            } else if now.saturating_sub(self.last_progress_at_ms) >= self.safety.no_progress_ms {
+                let _ = self.motor_stop();
+                return Ok(DosingStatus::Aborted(DoserError::State(
+                    "no progress".into(),
+                )));
             }
-            let stable_for = self.settled_since.unwrap().elapsed();
-            if stable_for.as_millis() as u64 >= self.control.stable_ms {
+        }
+
+        // 2) Reached or exceeded target? Stop and settle (asymmetric completion)
+        if w >= self.target_g {
+            let _ = self.motor_stop();
+            if self.settled_since_ms.is_none() {
+                self.settled_since_ms = Some(now);
+            }
+            let stable_for_ms = now - self.settled_since_ms.unwrap();
+            if stable_for_ms >= self.control.stable_ms {
                 return Ok(DosingStatus::Complete);
             }
             return Ok(DosingStatus::Running);
         } else {
-            // left the band; reset settling timer
-            self.settled_since = None;
+            // Below target: not in completion zone; reset settle timer
+            self.settled_since_ms = None;
         }
 
         // 3) choose coarse or fine speed
@@ -282,6 +341,14 @@ impl Doser {
         } else {
             self.control.coarse_speed
         };
+
+        // Ensure motor is started before commanding speed
+        if !self.motor_started {
+            self.motor
+                .start()
+                .map_err(|e| DoserError::Hardware(e.to_string()))?;
+            self.motor_started = true;
+        }
 
         self.motor
             .set_speed(target_speed)
@@ -302,8 +369,11 @@ pub struct DoserBuilder {
     timeouts: Option<Timeouts>,
     calibration: Option<Calibration>,
     target_g: Option<f32>,
-    // keep for future use; no-op in this minimal core
     _calibration_loaded: bool,
+    // Optional E-stop
+    estop_check: Option<Box<dyn Fn() -> bool>>,
+    // Optional clock for tests
+    clock: Option<Box<dyn Clock>>,
 }
 
 impl DoserBuilder {
@@ -379,6 +449,18 @@ impl DoserBuilder {
         self
     }
 
+    /// Optional E-stop checker; return true to abort immediately.
+    pub fn with_estop_check<F: Fn() -> bool + 'static>(mut self, f: F) -> Self {
+        self.estop_check = Some(Box::new(f));
+        self
+    }
+
+    /// Inject a custom clock (tests).
+    pub fn with_clock<C: Clock + 'static>(mut self, c: C) -> Self {
+        self.clock = Some(Box::new(c));
+        self
+    }
+
     /// Validate and build the Doser.
     pub fn build(self) -> Result<Doser> {
         let scale = self
@@ -402,10 +484,13 @@ impl DoserBuilder {
         let safety = self.safety.unwrap_or_default();
         let timeouts = self.timeouts.unwrap_or_default();
         let calibration = self.calibration.unwrap_or_default();
+        let clock: Box<dyn Clock> = self.clock.unwrap_or_else(|| Box::new(SystemClock));
 
         // Capture capacities before moving filter
         let ma_cap = filter.ma_window.max(1);
         let med_cap = filter.median_window.max(1);
+
+        let now = clock.now_ms();
 
         Ok(Doser {
             scale,
@@ -416,11 +501,16 @@ impl DoserBuilder {
             timeouts,
             calibration,
             target_g,
+            clock,
             last_weight_g: 0.0,
-            settled_since: None,
-            start_at: Instant::now(),
-            ma_buf: Vec::with_capacity(ma_cap),
-            med_buf: Vec::with_capacity(med_cap),
+            settled_since_ms: None,
+            start_ms: now,
+            ma_buf: VecDeque::with_capacity(ma_cap),
+            med_buf: VecDeque::with_capacity(med_cap),
+            motor_started: false,
+            estop_check: self.estop_check,
+            last_progress_w: 0.0,
+            last_progress_at_ms: now,
         })
     }
 }

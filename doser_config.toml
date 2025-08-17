@@ -28,6 +28,9 @@ sample_ms = 100
 [safety]
 max_run_ms = 60000
 max_overshoot_g = 2.0
+# Abort if weight change < epsilon (g) for at least this many ms while motor runs (0 disables)
+no_progress_epsilon_g = 0.0
+no_progress_ms = 0
 
 [logging]
 file = "doser.log"

@@ -183,6 +183,49 @@ pub mod hardware {
             Ok(())
         }
     }
+
+    #[cfg(feature = "hardware")]
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    pub fn make_estop_checker(
+        pin: u8,
+        active_low: bool,
+        poll_ms: u64,
+    ) -> Result<Box<dyn Fn() -> bool + Send + Sync>, Box<dyn std::error::Error + Send + Sync>> {
+        use rppal::gpio::Gpio;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        use std::thread;
+        use std::time::Duration;
+
+        let gpio = Gpio::new()?;
+        let pin = gpio.get(pin)?.into_input();
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_bg = flag.clone();
+
+        thread::spawn(move || {
+            loop {
+                let level_low = pin.read() == rppal::gpio::Level::Low;
+                let active = if active_low { level_low } else { !level_low };
+                flag_bg.store(active, Ordering::Relaxed);
+                thread::sleep(Duration::from_millis(poll_ms.max(1)));
+            }
+        });
+
+        Ok(Box::new(move || flag.load(Ordering::Relaxed)))
+    }
+
+    #[cfg(feature = "hardware")]
+    #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
+    pub fn make_estop_checker(
+        _pin: u8,
+        _active_low: bool,
+        _poll_ms: u64,
+    ) -> Result<Box<dyn Fn() -> bool + Send + Sync>, Box<dyn std::error::Error + Send + Sync>> {
+        // Non-ARM platforms: return a stub that never trips.
+        Ok(Box::new(|| false))
+    }
 }
 
 // Re-exports for callers (CLI/tests) to pick the right backend easily.
@@ -191,3 +234,6 @@ pub use sim::{SimulatedMotor, SimulatedScale};
 
 #[cfg(feature = "hardware")]
 pub use hardware::{HardwareMotor, HardwareScale};
+
+#[cfg(feature = "hardware")]
+pub use hardware::make_estop_checker;

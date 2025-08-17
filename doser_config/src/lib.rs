@@ -31,9 +31,13 @@ pub struct Timeouts {
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(default)]
 pub struct Safety {
     pub max_run_ms: u64,
     pub max_overshoot_g: f32,
+    // Abort if weight change < epsilon for at least this many ms (0 disables)
+    pub no_progress_epsilon_g: f32,
+    pub no_progress_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
