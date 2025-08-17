@@ -1,9 +1,8 @@
 //! Integration tests aligned with the new CLI + core API.
 
+use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-use std::error::Error;
 use std::time::Duration;
 
 use doser_core::{ControlCfg, Doser, FilterCfg, Timeouts};

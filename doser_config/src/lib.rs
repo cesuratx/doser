@@ -40,10 +40,13 @@ pub struct Safety {
     pub no_progress_ms: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
 pub struct Logging {
     pub file: Option<String>,  // path to .log (JSON lines)
     pub level: Option<String>, // "info","debug"
+    /// Log rotation policy: "never" | "daily" | "hourly" (default: never)
+    pub rotation: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,6 +57,7 @@ pub struct Config {
     pub timeouts: Timeouts,
     #[serde(default)]
     pub safety: Safety,
+    #[serde(default)]
     pub logging: Logging,
 }
 

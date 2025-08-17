@@ -9,6 +9,9 @@ use crate::error::{DoserError, Result};
 use std::collections::VecDeque;
 use std::time::Duration;
 
+// For typed hardware error mapping
+use doser_hardware::error::HwError;
+
 /// Testable clock abstraction returning monotonic milliseconds.
 pub trait Clock: Send + Sync {
     fn now_ms(&self) -> u64;
@@ -175,6 +178,8 @@ pub struct Doser {
     // No-progress watchdog
     last_progress_w: f32,
     last_progress_at_ms: u64,
+    // Latch E-stop condition until begin() is called again
+    estop_latched: bool,
 }
 
 impl Doser {
@@ -210,13 +215,12 @@ impl Doser {
         self.motor_started = false;
         self.last_progress_w = 0.0;
         self.last_progress_at_ms = now;
+        self.estop_latched = false;
     }
 
     /// Stop the motor (best-effort).
     pub fn motor_stop(&mut self) -> Result<()> {
-        self.motor
-            .stop()
-            .map_err(|e| DoserError::Hardware(e.to_string()))
+        self.motor.stop().map_err(|e| map_hw_error_dyn(&*e))
     }
 
     fn apply_filter(&mut self, w: f32) -> f32 {
@@ -261,9 +265,16 @@ impl Doser {
     /// - tracks settling window inside the hysteresis band
     /// - returns `Running`, `Complete`, or `Aborted(err)`
     pub fn step(&mut self) -> Result<DosingStatus> {
+        // If previously estopped, keep aborting until reset via begin()
+        if self.estop_latched {
+            let _ = self.motor_stop();
+            return Ok(DosingStatus::Aborted(DoserError::State("estop".into())));
+        }
+
         // E-stop check
         if let Some(check) = &self.estop_check {
             if check() {
+                self.estop_latched = true;
                 let _ = self.motor_stop();
                 return Ok(DosingStatus::Aborted(DoserError::State("estop".into())));
             }
@@ -271,14 +282,10 @@ impl Doser {
 
         // 1) read current weight
         let timeout = Duration::from_millis(self.timeouts.sensor_ms);
-        let raw = self.scale.read(timeout).map_err(|e| {
-            let s = e.to_string();
-            if s.to_lowercase().contains("timeout") {
-                DoserError::Timeout
-            } else {
-                DoserError::Hardware(s)
-            }
-        })?;
+        let raw = self
+            .scale
+            .read(timeout)
+            .map_err(|e| map_hw_error_dyn(&*e))?;
 
         // Apply calibration (raw counts -> grams) and filtering
         let w_raw = self.calibration.to_grams(raw);
@@ -344,17 +351,32 @@ impl Doser {
 
         // Ensure motor is started before commanding speed
         if !self.motor_started {
-            self.motor
-                .start()
-                .map_err(|e| DoserError::Hardware(e.to_string()))?;
+            self.motor.start().map_err(|e| map_hw_error_dyn(&*e))?;
             self.motor_started = true;
         }
 
         self.motor
             .set_speed(target_speed)
-            .map_err(|e| DoserError::Hardware(e.to_string()))?;
+            .map_err(|e| map_hw_error_dyn(&*e))?;
 
         Ok(DosingStatus::Running)
+    }
+}
+
+// Map any error to a typed DoserError, with special handling for hardware errors.
+fn map_hw_error_dyn(e: &(dyn std::error::Error + 'static)) -> DoserError {
+    if let Some(hw) = e.downcast_ref::<HwError>() {
+        match hw {
+            HwError::Timeout => DoserError::Timeout,
+            other => DoserError::HardwareFault(other.to_string()),
+        }
+    } else {
+        let s = e.to_string();
+        if s.to_lowercase().contains("timeout") {
+            DoserError::Timeout
+        } else {
+            DoserError::Hardware(s)
+        }
     }
 }
 
@@ -486,6 +508,32 @@ impl DoserBuilder {
         let calibration = self.calibration.unwrap_or_default();
         let clock: Box<dyn Clock> = self.clock.unwrap_or_else(|| Box::new(SystemClock));
 
+        // Validate configs (non-panicking; return typed Config errors)
+        if control.hysteresis_g.is_sign_negative() {
+            return Err(DoserError::Config("hysteresis_g must be >= 0".into()));
+        }
+        if control.slow_at_g.is_sign_negative() {
+            return Err(DoserError::Config("slow_at_g must be >= 0".into()));
+        }
+        if control.coarse_speed == 0 || control.fine_speed == 0 {
+            return Err(DoserError::Config("motor speeds must be > 0".into()));
+        }
+        if timeouts.sensor_ms == 0 {
+            return Err(DoserError::Config("sensor_ms must be >= 1".into()));
+        }
+        if safety.max_overshoot_g.is_sign_negative() {
+            return Err(DoserError::Config("max_overshoot_g must be >= 0".into()));
+        }
+        if safety.no_progress_epsilon_g.is_sign_negative() {
+            return Err(DoserError::Config(
+                "no_progress_epsilon_g must be >= 0".into(),
+            ));
+        }
+        // no_progress_ms can be 0 to disable; stable_ms can be 0 to complete immediately
+        if filter.sample_rate_hz == 0 {
+            return Err(DoserError::Config("sample_rate_hz must be > 0".into()));
+        }
+
         // Capture capacities before moving filter
         let ma_cap = filter.ma_window.max(1);
         let med_cap = filter.median_window.max(1);
@@ -511,6 +559,14 @@ impl DoserBuilder {
             estop_check: self.estop_check,
             last_progress_w: 0.0,
             last_progress_at_ms: now,
+            estop_latched: false,
         })
+    }
+}
+
+// Ensure motor is stopped on drop as a safety net.
+impl Drop for Doser {
+    fn drop(&mut self) {
+        let _ = self.motor.stop();
     }
 }

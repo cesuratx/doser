@@ -4,7 +4,6 @@ use anyhow::Context;
 use clap::{ArgAction, Parser, Subcommand};
 use doser_config::{load_calibration_csv, Calibration, Config};
 use doser_core::{error::Result as CoreResult, Doser, DosingStatus};
-use doser_traits; // for trait names in function signatures
 
 use std::sync::OnceLock;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -12,7 +11,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 static FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
 /// Initialize tracing once for the whole app.
-fn init_tracing(json: bool, level: &str, file: Option<&str>) {
+fn init_tracing(json: bool, level: &str, file: Option<&str>, rotation: Option<&str>) {
     let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("info"));
 
     let base = tracing_subscriber::registry().with(filter);
@@ -25,8 +24,11 @@ fn init_tracing(json: bool, level: &str, file: Option<&str>) {
             if let Some(parent) = p.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let file_appender = tracing_appender::rolling::never(".", path);
-            // For rotation, consider: rolling::daily(dir, filename) or rolling::hourly(dir, filename)
+            let file_appender = match rotation.unwrap_or("never").to_ascii_lowercase().as_str() {
+                "daily" => tracing_appender::rolling::daily(".", path),
+                "hourly" => tracing_appender::rolling::hourly(".", path),
+                _ => tracing_appender::rolling::never(".", path),
+            };
             let (nb_writer, guard) = tracing_appender::non_blocking(file_appender);
             let _ = FILE_GUARD.set(guard);
             let file_layer = fmt::layer()
@@ -44,7 +46,11 @@ fn init_tracing(json: bool, level: &str, file: Option<&str>) {
             if let Some(parent) = p.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let file_appender = tracing_appender::rolling::never(".", path);
+            let file_appender = match rotation.unwrap_or("never").to_ascii_lowercase().as_str() {
+                "daily" => tracing_appender::rolling::daily(".", path),
+                "hourly" => tracing_appender::rolling::hourly(".", path),
+                _ => tracing_appender::rolling::never(".", path),
+            };
             let (nb_writer, guard) = tracing_appender::non_blocking(file_appender);
             let _ = FILE_GUARD.set(guard);
             let file_layer = fmt::layer()
@@ -107,7 +113,12 @@ fn main() -> anyhow::Result<()> {
     let cfg: Config =
         toml::from_str(&cfg_text).with_context(|| format!("parse config {:?}", cli.config))?;
 
-    init_tracing(cli.json, &cli.log_level, cfg.logging.file.as_deref());
+    init_tracing(
+        cli.json,
+        &cli.log_level,
+        cfg.logging.file.as_deref(),
+        cfg.logging.rotation.as_deref(),
+    );
 
     // 2) Load calibration if provided
     let calib: Option<Calibration> = match &cli.calibration {
@@ -139,18 +150,35 @@ fn main() -> anyhow::Result<()> {
     match cli.cmd {
         Commands::SelfCheck => {
             tracing::info!("self-check starting");
-            // Minimal probe: on hardware builds try a short read;
-            // on sim builds just succeed.
-            #[cfg(feature = "hardware")]
-            {
-                use doser_traits::Scale;
-                use std::time::Duration;
-                let mut hw_mut = hw; // need mutable to call read()
-                let _ = hw_mut
-                    .0
-                    .read(Duration::from_millis(cfg.timeouts.sample_ms))
-                    .context("scale read")?;
+            use doser_traits::{Motor, Scale};
+            use std::time::Duration;
+
+            // Move hw so we can probe it here; the process exits after SelfCheck.
+            let (mut scale, mut motor) = hw;
+
+            // Probe scale read with configured timeout
+            match scale.read(Duration::from_millis(cfg.timeouts.sample_ms)) {
+                Ok(_v) => tracing::info!("scale read ok"),
+                Err(e) => {
+                    tracing::error!(error = %e, "scale read failed");
+                    println!("SCALE_ERROR: {e}");
+                    return Ok(());
+                }
             }
+
+            // Probe motor lifecycle (non-destructive): start -> set_speed(0) -> stop
+            if let Err(e) = motor.start() {
+                tracing::error!(error = %e, "motor start failed");
+                println!("MOTOR_ERROR: {e}");
+                return Ok(());
+            }
+            let _ = motor.set_speed(0); // ignore errors here, stop will follow
+            if let Err(e) = motor.stop() {
+                tracing::error!(error = %e, "motor stop failed");
+                println!("MOTOR_ERROR: {e}");
+                return Ok(());
+            }
+
             tracing::info!("self-check ok");
             println!("OK");
             Ok(())

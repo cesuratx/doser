@@ -34,8 +34,8 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings"
         run: |
-          cargo build --workspace
-          cargo test --workspace
+          cargo build --workspace --no-default-features
+          cargo test --workspace --no-default-features
 
   test-hardware-feature:
     runs-on: ubuntu-latest
@@ -49,5 +49,5 @@ jobs:
           override: true
       - name: Check hardware feature compiles
         run: |
-          cargo build -p doser_cli --features hardware
-          cargo build -p doser_hardware --features hardware
+          cargo build -p doser_hardware --features hardware --no-default-features
+          cargo build -p doser_cli --features hardware --no-default-features

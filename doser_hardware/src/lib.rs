@@ -3,6 +3,12 @@
 //! Features:
 //! - `hardware`: enable Raspberry Pi GPIO/HX711-backed implementations.
 //! - (default) no `hardware` feature: use simulation types that satisfy the traits.
+//!
+//! Note: The `rppal` dependency is only enabled on ARM targets; on x86 CI we
+//!       still compile the hardware feature, but rppal-specific code is gated
+//!       by target_arch to allow builds to succeed.
+
+pub mod error;
 
 #[cfg(not(feature = "hardware"))]
 pub mod sim {

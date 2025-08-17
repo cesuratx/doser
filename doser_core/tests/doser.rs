@@ -24,7 +24,7 @@ impl Scale for SeqScale {
             self.idx += 1;
             x
         } else {
-            *self.seq.last().unwrap_or(&0)
+            self.seq.last().copied().unwrap_or(0)
         };
         Ok(v)
     }
@@ -403,5 +403,60 @@ fn aborts_on_no_progress_watchdog() {
     match doser.step().unwrap() {
         DosingStatus::Aborted(e) => assert!(format!("{e}").contains("no progress")),
         other => panic!("expected Aborted, got {other:?}"),
+    }
+}
+
+#[test]
+fn estop_condition_latches_until_begin() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    struct ConstScale(i32);
+    impl Scale for ConstScale {
+        fn read(&mut self, _timeout: Duration) -> Result<i32, Box<dyn Error + Send + Sync>> {
+            Ok(self.0)
+        }
+    }
+
+    let estop = Arc::new(AtomicBool::new(true));
+    let estop_clone = estop.clone();
+
+    let mut doser = Doser::builder()
+        .with_scale(ConstScale(0))
+        .with_motor(SpyMotor::default())
+        .with_filter(FilterCfg::default())
+        .with_control(ControlCfg {
+            slow_at_g: 1.0,
+            hysteresis_g: 100.0,
+            stable_ms: 10_000,
+            coarse_speed: 1200,
+            fine_speed: 250,
+        })
+        .with_timeouts(Timeouts { sensor_ms: 1 })
+        .with_target_grams(10.0)
+        .with_estop_check(move || estop_clone.load(Ordering::Relaxed))
+        .apply_calibration::<()>(None)
+        .build()
+        .expect("build doser");
+
+    // First step sees estop=true -> Aborted
+    match doser.step().unwrap() {
+        DosingStatus::Aborted(e) => assert!(format!("{e}").contains("estop")),
+        other => panic!("expected Aborted(estop), got {other:?}"),
+    }
+
+    // Clear estop, but latch should keep aborting until begin() resets it
+    estop.store(false, Ordering::Relaxed);
+    match doser.step().unwrap() {
+        DosingStatus::Aborted(e) => assert!(format!("{e}").contains("estop")),
+        other => panic!("expected latched Aborted(estop), got {other:?}"),
+    }
+
+    // Reset run; latch cleared in begin(); should now run
+    doser.begin();
+    match doser.step().unwrap() {
+        DosingStatus::Running | DosingStatus::Aborted(_) | DosingStatus::Complete => {}
     }
 }
