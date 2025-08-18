@@ -184,7 +184,7 @@ pub struct Doser {
 
 impl Doser {
     /// Start building a Doser.
-    pub fn builder() -> DoserBuilder {
+    pub fn builder() -> DoserBuilder<Missing, Missing, Missing> {
         DoserBuilder::default()
     }
 
@@ -380,9 +380,15 @@ fn map_hw_error_dyn(e: &(dyn std::error::Error + 'static)) -> DoserError {
     }
 }
 
+// Type-state markers for the builder
+pub struct Missing;
+pub struct Set;
+
+use std::marker::PhantomData;
+
 /// Builder for `Doser`. All fields are validated on `build()`.
 #[derive(Default)]
-pub struct DoserBuilder {
+pub struct DoserBuilder<S, M, T> {
     scale: Option<Box<dyn doser_traits::Scale>>,
     motor: Option<Box<dyn doser_traits::Motor>>,
     filter: Option<FilterCfg>,
@@ -396,21 +402,34 @@ pub struct DoserBuilder {
     estop_check: Option<Box<dyn Fn() -> bool>>,
     // Optional clock for tests
     clock: Option<Box<dyn Clock>>,
+    // Type-state markers
+    _s: PhantomData<S>,
+    _m: PhantomData<M>,
+    _t: PhantomData<T>,
 }
 
-impl DoserBuilder {
-    /// Supply a Scale implementation.
-    pub fn with_scale<S: doser_traits::Scale + 'static>(mut self, s: S) -> Self {
-        self.scale = Some(Box::new(s));
-        self
+impl Default for DoserBuilder<Missing, Missing, Missing> {
+    fn default() -> Self {
+        Self {
+            scale: None,
+            motor: None,
+            filter: None,
+            control: None,
+            safety: None,
+            timeouts: None,
+            calibration: None,
+            target_g: None,
+            _calibration_loaded: false,
+            estop_check: None,
+            clock: None,
+            _s: PhantomData,
+            _m: PhantomData,
+            _t: PhantomData,
+        }
     }
+}
 
-    /// Supply a Motor implementation.
-    pub fn with_motor<M: doser_traits::Motor + 'static>(mut self, m: M) -> Self {
-        self.motor = Some(Box::new(m));
-        self
-    }
-
+impl<S, M, T> DoserBuilder<S, M, T> {
     /// Supply filter config (optional).
     pub fn with_filter(mut self, f: FilterCfg) -> Self {
         self.filter = Some(f);
@@ -460,14 +479,8 @@ impl DoserBuilder {
 
     /// Optional no-op hook so the CLI can pass a calibration value without
     /// forcing a dependency on any config crate here.
-    pub fn apply_calibration<T>(mut self, _calib: Option<&T>) -> Self {
+    pub fn apply_calibration<U>(mut self, _calib: Option<&U>) -> Self {
         self._calibration_loaded = _calib.is_some();
-        self
-    }
-
-    /// Set the target grams.
-    pub fn with_target_grams(mut self, g: f32) -> Self {
-        self.target_g = Some(g);
         self
     }
 
@@ -483,7 +496,72 @@ impl DoserBuilder {
         self
     }
 
-    /// Validate and build the Doser.
+    /// Supply a Scale implementation. Marks Scale as Set in the type-state.
+    pub fn with_scale<N: doser_traits::Scale + 'static>(mut self, s: N) -> DoserBuilder<Set, M, T> {
+        self.scale = Some(Box::new(s));
+        DoserBuilder {
+            scale: self.scale,
+            motor: self.motor,
+            filter: self.filter,
+            control: self.control,
+            safety: self.safety,
+            timeouts: self.timeouts,
+            calibration: self.calibration,
+            target_g: self.target_g,
+            _calibration_loaded: self._calibration_loaded,
+            estop_check: self.estop_check,
+            clock: self.clock,
+            _s: PhantomData,
+            _m: PhantomData,
+            _t: PhantomData,
+        }
+    }
+
+    /// Supply a Motor implementation. Marks Motor as Set in the type-state.
+    pub fn with_motor<N: doser_traits::Motor + 'static>(mut self, m: N) -> DoserBuilder<S, Set, T> {
+        self.motor = Some(Box::new(m));
+        DoserBuilder {
+            scale: self.scale,
+            motor: self.motor,
+            filter: self.filter,
+            control: self.control,
+            safety: self.safety,
+            timeouts: self.timeouts,
+            calibration: self.calibration,
+            target_g: self.target_g,
+            _calibration_loaded: self._calibration_loaded,
+            estop_check: self.estop_check,
+            clock: self.clock,
+            _s: PhantomData,
+            _m: PhantomData,
+            _t: PhantomData,
+        }
+    }
+
+    /// Set the target grams. Marks Target as Set in the type-state.
+    pub fn with_target_grams(mut self, g: f32) -> DoserBuilder<S, M, Set> {
+        self.target_g = Some(g);
+        DoserBuilder {
+            scale: self.scale,
+            motor: self.motor,
+            filter: self.filter,
+            control: self.control,
+            safety: self.safety,
+            timeouts: self.timeouts,
+            calibration: self.calibration,
+            target_g: self.target_g,
+            _calibration_loaded: self._calibration_loaded,
+            estop_check: self.estop_check,
+            clock: self.clock,
+            _s: PhantomData,
+            _m: PhantomData,
+            _t: PhantomData,
+        }
+    }
+}
+
+impl DoserBuilder<Set, Set, Set> {
+    /// Validate and build the Doser. Only available when Scale, Motor, and Target are set.
     pub fn build(self) -> Result<Doser> {
         let scale = self
             .scale
@@ -529,7 +607,6 @@ impl DoserBuilder {
                 "no_progress_epsilon_g must be >= 0".into(),
             ));
         }
-        // no_progress_ms can be 0 to disable; stable_ms can be 0 to complete immediately
         if filter.sample_rate_hz == 0 {
             return Err(DoserError::Config("sample_rate_hz must be > 0".into()));
         }

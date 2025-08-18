@@ -144,6 +144,19 @@ cargo run --release -p doser_cli -- --config ./doser_config.toml --grams 18.5 \
 
 The core exposes a `Clock` trait (`fn now_ms() -> u64`). Tests inject a deterministic clock via `DoserBuilder::with_clock(...)` to advance time without sleeping.
 
+Type‑checked builder: The core uses a type‑state builder so `build()` is only available after providing scale, motor, and target grams. Typical usage remains simple:
+
+```rust
+let mut doser = doser_core::Doser::builder()
+    .with_scale(my_scale)
+    .with_motor(my_motor)
+    .with_filter(my_filter)
+    .with_control(my_control)
+    .with_timeouts(my_timeouts)
+    .with_target_grams(18.5)
+    .build()?;
+```
+
 ## Hardware Feature
 
 Simulation (no hardware) is the default. To enable real GPIO/HX711 and motor control on Raspberry Pi builds:

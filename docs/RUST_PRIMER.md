@@ -341,3 +341,40 @@ See also: [ARCHITECTURE](./ARCHITECTURE.md) for a deeper discussion.
 - CLI entrypoint: `../doser_cli/src/main.rs`
 - Examples: `../examples/`
 - Architecture doc: `./ARCHITECTURE.md`
+
+---
+
+## 25) Type‑State (Type‑Checked) Builder
+
+We use a type‑state builder so the compiler guarantees that required fields are provided before `build()` is available.
+
+- Idea: Encode progress in type parameters (`Missing` vs `Set`). Each setter flips a marker.
+- Result: `build()` only exists for `Builder<Set, Set, Set>` (scale, motor, target present).
+
+Mini example adapted to our Doser builder:
+
+```rust
+struct Missing; struct Set;
+struct Builder<S, M, T> { /* fields... */ _s: PhantomData<S>, _m: PhantomData<M>, _t: PhantomData<T> }
+
+impl<S, M, T> Builder<S, M, T> {
+    fn with_scale(self, s: ScaleImpl) -> Builder<Set, M, T> { /* ... */ }
+    fn with_motor(self, m: MotorImpl) -> Builder<S, Set, T> { /* ... */ }
+    fn with_target_grams(self, g: f32) -> Builder<S, M, Set> { /* ... */ }
+    // optional setters keep the markers unchanged
+}
+
+impl Builder<Set, Set, Set> {
+    fn build(self) -> Doser { /* validated construction */ }
+}
+```
+
+Why this helps here
+
+- Prevents constructing a `Doser` without hardware or target grams at compile time.
+- Keeps optional fields (filter, control, safety, timeouts, clock, E‑stop) flexible and order‑agnostic.
+
+Tradeoffs
+
+- Slightly more generic boilerplate and type signatures.
+- IDE type hints can be noisier, but method chaining remains ergonomic.

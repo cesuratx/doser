@@ -70,6 +70,7 @@ The `Doser` struct implements the dosing control loop. It is built via a `DoserB
 - Calibration (linear mapping counts→grams, plus tare counts).
 - Optional E‑stop checker callback.
 - Optional Clock (for deterministic time‑based tests).
+- Type‑state builder: compile‑time enforcement that scale, motor, and target grams are provided before `build()` is available; other setters remain optional and order‑agnostic.
 
 Important modules:
 
