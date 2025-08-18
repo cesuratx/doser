@@ -71,9 +71,9 @@ fn builder_accepts_defaults() {
     }
 }
 
-fn assert_is_config_err(err: DoserError) {
-    match err {
-        DoserError::Config(_) => {}
+fn assert_is_config_err(err: doser_core::error::Report) {
+    match err.downcast_ref::<DoserError>() {
+        Some(DoserError::Config(_)) => {}
         other => panic!("expected Config error, got: {other:?}"),
     }
 }

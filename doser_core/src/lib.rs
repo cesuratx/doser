@@ -6,8 +6,9 @@
 pub mod error;
 
 use crate::error::{DoserError, Result};
+use eyre::Context;
 use std::collections::VecDeque;
-use std::time::Duration;
+use std::time::Duration; // for .wrap_err on Results
 
 // For typed hardware error mapping
 use doser_hardware::error::HwError;
@@ -220,7 +221,10 @@ impl Doser {
 
     /// Stop the motor (best-effort).
     pub fn motor_stop(&mut self) -> Result<()> {
-        self.motor.stop().map_err(|e| map_hw_error_dyn(&*e))
+        self.motor
+            .stop()
+            .map_err(|e| eyre::Report::new(map_hw_error_dyn(&*e)))
+            .wrap_err("motor_stop")
     }
 
     fn apply_filter(&mut self, w: f32) -> f32 {
@@ -285,7 +289,8 @@ impl Doser {
         let raw = self
             .scale
             .read(timeout)
-            .map_err(|e| map_hw_error_dyn(&*e))?;
+            .map_err(|e| eyre::Report::new(map_hw_error_dyn(&*e)))
+            .wrap_err("reading scale")?;
 
         // Apply calibration (raw counts -> grams) and filtering
         let w_raw = self.calibration.to_grams(raw);
@@ -351,13 +356,17 @@ impl Doser {
 
         // Ensure motor is started before commanding speed
         if !self.motor_started {
-            self.motor.start().map_err(|e| map_hw_error_dyn(&*e))?;
+            self.motor
+                .start()
+                .map_err(|e| eyre::Report::new(map_hw_error_dyn(&*e)))
+                .wrap_err("motor start")?;
             self.motor_started = true;
         }
 
         self.motor
             .set_speed(target_speed)
-            .map_err(|e| map_hw_error_dyn(&*e))?;
+            .map_err(|e| eyre::Report::new(map_hw_error_dyn(&*e)))
+            .wrap_err("set_speed")?;
 
         Ok(DosingStatus::Running)
     }
@@ -565,18 +574,18 @@ impl DoserBuilder<Set, Set, Set> {
     pub fn build(self) -> Result<Doser> {
         let scale = self
             .scale
-            .ok_or_else(|| DoserError::Config("scale not provided".into()))?;
+            .ok_or_else(|| eyre::Report::new(DoserError::Config("scale not provided".into())))?;
         let motor = self
             .motor
-            .ok_or_else(|| DoserError::Config("motor not provided".into()))?;
-        let target_g = self
-            .target_g
-            .ok_or_else(|| DoserError::Config("target grams not provided".into()))?;
+            .ok_or_else(|| eyre::Report::new(DoserError::Config("motor not provided".into())))?;
+        let target_g = self.target_g.ok_or_else(|| {
+            eyre::Report::new(DoserError::Config("target grams not provided".into()))
+        })?;
 
         if !(0.1..=5000.0).contains(&target_g) {
-            return Err(DoserError::Config(format!(
+            return Err(eyre::Report::new(DoserError::Config(format!(
                 "target grams out of range: {target_g}"
-            )));
+            ))));
         }
 
         let filter = self.filter.unwrap_or_default();
@@ -588,27 +597,39 @@ impl DoserBuilder<Set, Set, Set> {
 
         // Validate configs (non-panicking; return typed Config errors)
         if control.hysteresis_g.is_sign_negative() {
-            return Err(DoserError::Config("hysteresis_g must be >= 0".into()));
+            return Err(eyre::Report::new(DoserError::Config(
+                "hysteresis_g must be >= 0".into(),
+            )));
         }
         if control.slow_at_g.is_sign_negative() {
-            return Err(DoserError::Config("slow_at_g must be >= 0".into()));
+            return Err(eyre::Report::new(DoserError::Config(
+                "slow_at_g must be >= 0".into(),
+            )));
         }
         if control.coarse_speed == 0 || control.fine_speed == 0 {
-            return Err(DoserError::Config("motor speeds must be > 0".into()));
+            return Err(eyre::Report::new(DoserError::Config(
+                "motor speeds must be > 0".into(),
+            )));
         }
         if timeouts.sensor_ms == 0 {
-            return Err(DoserError::Config("sensor_ms must be >= 1".into()));
+            return Err(eyre::Report::new(DoserError::Config(
+                "sensor_ms must be >= 1".into(),
+            )));
         }
         if safety.max_overshoot_g.is_sign_negative() {
-            return Err(DoserError::Config("max_overshoot_g must be >= 0".into()));
+            return Err(eyre::Report::new(DoserError::Config(
+                "max_overshoot_g must be >= 0".into(),
+            )));
         }
         if safety.no_progress_epsilon_g.is_sign_negative() {
-            return Err(DoserError::Config(
+            return Err(eyre::Report::new(DoserError::Config(
                 "no_progress_epsilon_g must be >= 0".into(),
-            ));
+            )));
         }
         if filter.sample_rate_hz == 0 {
-            return Err(DoserError::Config("sample_rate_hz must be > 0".into()));
+            return Err(eyre::Report::new(DoserError::Config(
+                "sample_rate_hz must be > 0".into(),
+            )));
         }
 
         // Capture capacities before moving filter

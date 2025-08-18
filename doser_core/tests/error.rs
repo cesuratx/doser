@@ -71,7 +71,10 @@ fn timeouts_map_to_dosererror_timeout() {
     // First step OK, second should error:
     let _ = doser.step().unwrap();
     let err = doser.step().expect_err("expected timeout error");
-    match err {
+    let de = err
+        .downcast_ref::<DoserError>()
+        .expect("expected typed DoserError in eyre::Report");
+    match de {
         DoserError::Timeout => {}
         other => panic!("unexpected error variant: {other:?}"),
     }
@@ -92,7 +95,10 @@ fn non_timeout_hardware_errors_map_to_dosererror_hardware() {
 
     let _ = doser.step().unwrap();
     let err = doser.step().expect_err("expected hardware error");
-    match err {
+    let de = err
+        .downcast_ref::<DoserError>()
+        .expect("expected typed DoserError in eyre::Report");
+    match de {
         DoserError::Hardware(_) => {}
         other => panic!("unexpected error variant: {other:?}"),
     }
@@ -140,7 +146,11 @@ fn typed_hw_timeout_maps_to_timeout() {
         .unwrap();
 
     let _ = doser.step().unwrap();
-    match doser.step().expect_err("expected timeout") {
+    let err = doser.step().expect_err("expected timeout");
+    let de = err
+        .downcast_ref::<DoserError>()
+        .expect("expected typed DoserError in eyre::Report");
+    match de {
         DoserError::Timeout => {}
         other => panic!("unexpected: {other:?}"),
     }
@@ -190,7 +200,11 @@ fn typed_hw_other_maps_to_hardware_fault() {
         .unwrap();
 
     let _ = doser.step().unwrap();
-    match doser.step().expect_err("expected hardware fault") {
+    let err = doser.step().expect_err("expected hardware fault");
+    let de = err
+        .downcast_ref::<DoserError>()
+        .expect("expected typed DoserError in eyre::Report");
+    match de {
         DoserError::HardwareFault(msg) => assert!(msg.contains("boom")),
         other => panic!("unexpected: {other:?}"),
     }

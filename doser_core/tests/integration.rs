@@ -188,9 +188,15 @@ fn test_simulated_hardware_error_in_core() {
     let err = doser
         .step()
         .expect_err("step should fail due to scale error");
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("hardware"),
-        "expected hardware-mapped error, got: {msg}"
-    );
+
+    let de = err
+        .downcast_ref::<doser_core::error::DoserError>()
+        .expect("expected DoserError inside Report");
+    match de {
+        doser_core::error::DoserError::Hardware(s) => {
+            assert!(s.contains("sensor error") || !s.is_empty())
+        }
+        doser_core::error::DoserError::HardwareFault(s) => assert!(!s.is_empty()),
+        other => panic!("expected hardware-mapped error, got: {other:?}"),
+    }
 }

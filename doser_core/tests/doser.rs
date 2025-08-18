@@ -106,8 +106,15 @@ fn propagates_scale_error_as_core_error() {
     let err = doser
         .step()
         .expect_err("step should error on scale failure");
-    let msg = format!("{err}");
-    assert!(msg.contains("hardware"), "unexpected error: {msg}");
+
+    // eyre::Report carries a typed source; verify it maps to our domain error
+    match err
+        .downcast_ref::<doser_core::error::DoserError>()
+        .expect("expected DoserError inside Report")
+    {
+        doser_core::error::DoserError::Hardware(s) => assert!(s.contains("boom")),
+        other => panic!("unexpected error variant: {other:?}"),
+    }
 }
 
 #[test]

@@ -10,6 +10,14 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 
 static FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
+fn humanize(e: &doser_core::error::Report) -> String {
+    let mut s = format!("{}", e);
+    if let Some(src) = e.source() {
+        s.push_str(&format!(" — cause: {}", src));
+    }
+    s
+}
+
 /// Initialize tracing once for the whole app.
 fn init_tracing(json: bool, level: &str, file: Option<&str>, rotation: Option<&str>) {
     let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("info"));
@@ -191,8 +199,13 @@ fn main() -> anyhow::Result<()> {
             grams,
             max_run_ms,
             max_overshoot_g,
-        } => run_dose(&cfg, calib.as_ref(), grams, max_run_ms, max_overshoot_g, hw)
-            .with_context(|| "dose failed"),
+        } => {
+            if let Err(e) = run_dose(&cfg, calib.as_ref(), grams, max_run_ms, max_overshoot_g, hw) {
+                println!("{}", humanize(&e));
+                std::process::exit(2);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -298,7 +311,7 @@ fn run_dose(
             DosingStatus::Aborted(e) => {
                 let _ = doser.motor_stop();
                 tracing::error!(error = %e, attempts, "dose aborted");
-                return Err(e);
+                return Err(doser_core::error::Report::new(e));
             }
         }
     }

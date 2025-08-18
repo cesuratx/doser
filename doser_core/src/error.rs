@@ -16,4 +16,5 @@ pub enum DoserError {
     Io(String),
 }
 
-pub type Result<T> = std::result::Result<T, DoserError>;
+pub type Result<T> = eyre::Result<T>;
+pub use eyre::Report;
