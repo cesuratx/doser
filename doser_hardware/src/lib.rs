@@ -9,7 +9,7 @@
 
 pub mod error;
 
-// Only compile the HX711 driver when the hardware feature is enabled.
+// Make the HX711 driver module available when hardware feature is enabled.
 #[cfg(feature = "hardware")]
 mod hx711;
 
@@ -82,6 +82,7 @@ pub mod sim {
 
 #[cfg(feature = "hardware")]
 pub mod hardware {
+    use crate::hx711::Hx711;
     use anyhow::{Context, Result};
     use doser_traits::{Motor, Scale};
     use rppal::gpio::{Gpio, InputPin, OutputPin};
@@ -95,8 +96,6 @@ pub mod hardware {
     use std::time::Duration;
     use tracing::{info, warn};
 
-    use crate::hx711::Hx711;
-
     /// Simple error wrapper to avoid unwraps in hardware paths.
     #[derive(Debug)]
     struct HwErr(&'static str);
@@ -107,25 +106,26 @@ pub mod hardware {
     }
     impl Error for HwErr {}
 
-    /// HX711-backed hardware scale.
+    /// Hardware scale backed by HX711.
     pub struct HardwareScale {
         hx: Hx711,
     }
+
     impl HardwareScale {
-        /// Open GPIO pins and construct the HX711 interface.
-        /// dt_pin: data pin (input), sck_pin: clock pin (output, starts low)
+        /// Create a new HX711-backed scale using DT and SCK GPIO pins.
         pub fn try_new(dt_pin: u8, sck_pin: u8) -> Result<Self> {
             let gpio = Gpio::new().context("open GPIO for HX711")?;
-            let dt: InputPin = gpio.get(dt_pin).context("open HX711 DT pin")?.into_input();
-            let sck: OutputPin = gpio
+            let dt = gpio.get(dt_pin).context("get HX711 DT pin")?.into_input();
+            let sck = gpio
                 .get(sck_pin)
-                .context("open HX711 SCK pin")?
+                .context("get HX711 SCK pin")?
                 .into_output_low();
-            // Channel A, gain=128 → 25 pulses after 24-bit read
-            let hx = Hx711::new(dt, sck, 25).context("init HX711")?;
+            // Channel A, gain = 128 uses 25 pulses after the 24-bit read.
+            let hx = Hx711::new(dt, sck, 25)?;
             Ok(Self { hx })
         }
-        /// Delegate to HX711 read with timeout; map error to boxed dyn error for the trait.
+
+        /// Read a raw 24-bit value from HX711 with timeout.
         fn read_raw_timeout(
             &mut self,
             timeout: Duration,
@@ -135,6 +135,7 @@ pub mod hardware {
                 .map_err(|e| -> Box<dyn Error + Send + Sync> { Box::new(e) })
         }
     }
+
     impl Scale for HardwareScale {
         fn read(&mut self, timeout: Duration) -> Result<i32, Box<dyn Error + Send + Sync>> {
             self.read_raw_timeout(timeout)

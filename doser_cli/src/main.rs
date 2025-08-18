@@ -127,7 +127,7 @@ fn main() -> anyhow::Result<()> {
                 load_calibration_csv(p).with_context(|| format!("parse calibration {:?}", p))?;
             Some(c)
         }
-        none => None,
+        None => None,
     };
 
     // 3) Build hardware (feature-gated) or sim
