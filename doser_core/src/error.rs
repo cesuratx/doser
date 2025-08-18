@@ -16,5 +16,17 @@ pub enum DoserError {
     Io(String),
 }
 
+#[derive(Debug, Error, Clone)]
+pub enum BuildError {
+    #[error("missing scale")]
+    MissingScale,
+    #[error("missing motor")]
+    MissingMotor,
+    #[error("missing target grams")]
+    MissingTarget,
+    #[error("invalid config: {0}")]
+    InvalidConfig(&'static str),
+}
+
 pub type Result<T> = eyre::Result<T>;
 pub use eyre::Report;
