@@ -4,7 +4,7 @@
 //!
 //! # Steps
 //!
-//! 1. Create a `DoserBuilder` to configure the dosing session.
+//! 1. Create a `Doser` via its builder to configure the dosing session.
 //! 2. Attach simulated scale and motor implementations.
 //! 3. Set the target dose in grams.
 //! 4. Build the dosing session and run it.
@@ -17,8 +17,10 @@
 //!
 //! Any configuration or runtime errors will be returned as an `eyre::Report`.
 
-use doser_core::builder::DoserBuilder;
-use doser_core::hardware::{SimMotor, SimScale};
+use doser_core::{ControlCfg, Doser, DosingStatus, FilterCfg, Timeouts};
+use doser_hardware::{SimulatedMotor as SimMotor, SimulatedScale as SimScale};
+use doser_traits::MonotonicClock;
+use std::time::Duration;
 
 /// Runs a simulated dosing session with a target of 18.5 grams.
 ///
@@ -45,69 +47,50 @@ use doser_core::hardware::{SimMotor, SimScale};
 /// - [Doser README](../../README.md)
 /// - [API Documentation](https://docs.rs/doser_core)
 fn main() -> Result<(), eyre::Report> {
-    // Step 1: Create a new dosing session builder
-    let mut builder = DoserBuilder::new();
+    // Local monotonic clock for timing in this example
+    let clock = MonotonicClock::new();
 
-    // Step 2: Attach simulated scale and motor
-    // SimScale implements the `Scale` trait for simulation purposes.
-    // SimMotor implements the `Motor` trait for simulation purposes.
-    builder.scale(Box::new(SimScale));
-    builder.motor(Box::new(SimMotor));
+    // Build a Doser with simulated hardware and pass a clock into the builder
+    let mut doser = Doser::builder()
+        .with_scale(SimScale::default())
+        .with_motor(SimMotor::default())
+        .with_filter(FilterCfg::default())
+        .with_control(ControlCfg::default())
+        .with_timeouts(Timeouts { sensor_ms: 10 })
+        // Simulated scale returns counts ≈ grams * 1000; convert to grams
+        .with_calibration_gain_offset(0.001, 0.0)
+        .with_target_grams(18.5)
+        .with_clock(Box::new(MonotonicClock::new()))
+        .build()?;
 
-    // Step 3: Set target dose in grams
-    builder.grams(18.5);
+    // Optional: start a new run
+    doser.begin();
 
-    // Step 4: Build and run the dosing session
-    // Returns an error if configuration is invalid or dosing fails.
-    let mut doser = builder.build()?;
+    // 50 ms tick
+    let tick = Duration::from_millis(50);
+    // Throttle prints to ~200 ms
+    let mut last_print = clock.now();
 
-    // Example: Real-time step-wise dosing loop (100Hz)
-    use std::time::{Duration, Instant};
-    let interval = Duration::from_millis(10); // 100Hz
-
-    // Mock status enum for demonstration
-    #[derive(PartialEq)]
-    enum DosingStatus {
-        Running,
-        Complete,
-        Error,
-    }
-
-    // Real-time, precise weight measurement with moving average filter
-    const WINDOW_SIZE: usize = 10;
-    let mut weight_window = [0.0f32; WINDOW_SIZE];
-    let mut idx = 0;
-    let mut cycles = 0;
-    let max_cycles = 100;
-    let mut status = DosingStatus::Running;
-    while status == DosingStatus::Running {
-        let start = Instant::now();
-        // Simulate reading weight from scale
-        let weight = SimScale.read_weight().unwrap_or(0.0);
-        weight_window[idx % WINDOW_SIZE] = weight;
-        idx += 1;
-        // Calculate moving average
-        let avg_weight: f32 = weight_window.iter().sum::<f32>() / WINDOW_SIZE as f32;
-        println!(
-            "Cycle {}: raw = {:.2}, avg = {:.2}",
-            cycles, weight, avg_weight
-        );
-
-        // Simulate dosing logic (replace with doser.step() in real code)
-        cycles += 1;
-        if cycles >= max_cycles {
-            status = DosingStatus::Complete;
+    loop {
+        match doser.step()? {
+            DosingStatus::Running => {
+                // Throttled print of the last observed weight
+                if clock.ms_since(last_print) >= 200 {
+                    println!("weight = {:.3} g", doser.last_weight());
+                    last_print = clock.now();
+                }
+            }
+            DosingStatus::Complete => {
+                println!("Dosing complete at {:.3} g", doser.last_weight());
+                break;
+            }
+            DosingStatus::Aborted(e) => {
+                println!("Dosing aborted: {e}");
+                break;
+            }
         }
-        let elapsed = start.elapsed();
-        if elapsed < interval {
-            std::thread::sleep(interval - elapsed);
-        }
+        clock.sleep(tick);
     }
-    // Optionally, handle completion or error
-    if status == DosingStatus::Complete {
-        println!("Dosing complete.");
-    } else if status == DosingStatus::Error {
-        println!("Dosing error.");
-    }
+
     Ok(())
 }

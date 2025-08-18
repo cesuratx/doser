@@ -7,34 +7,14 @@ pub mod error;
 
 use crate::error::BuildError;
 use crate::error::{DoserError, Result};
+use doser_traits::clock::{Clock, MonotonicClock};
 use eyre::WrapErr;
 use std::collections::VecDeque;
-use std::sync::OnceLock;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // For typed hardware error mapping
 use doser_hardware::error::HwError;
-
-// Monotonic clock base for SystemClock
-static START: OnceLock<Instant> = OnceLock::new();
-pub fn now_ms() -> u64 {
-    let start = START.get_or_init(Instant::now);
-    start.elapsed().as_millis() as u64
-}
-
-/// Testable clock abstraction returning monotonic milliseconds.
-pub trait Clock: Send + Sync {
-    fn now_ms(&self) -> u64;
-}
-
-/// System clock implementation.
-#[derive(Default)]
-pub struct SystemClock;
-impl Clock for SystemClock {
-    fn now_ms(&self) -> u64 {
-        now_ms()
-    }
-}
 
 /// Simple linear calibration from raw scale counts to grams.
 /// grams = gain_g_per_count * (raw - zero_counts) + offset_g
@@ -170,12 +150,14 @@ pub struct Doser {
     timeouts: Timeouts,
     calibration: Calibration,
     target_g: f32,
-    // Clock for deterministic time in tests
-    clock: Box<dyn Clock>,
+    // Unified clock for deterministic time in tests
+    pub(crate) clock: Arc<dyn Clock + Send + Sync>,
+    // Epoch Instant for computing monotonic milliseconds
+    epoch: Instant,
 
     last_weight_g: f32,
     settled_since_ms: Option<u64>,
-    // Track when the dosing run started to enforce a max runtime
+    // Track when the dosing run started to enforce a max runtime (ms since epoch at begin)
     start_ms: u64,
     // Buffers for filtering
     ma_buf: VecDeque<f32>,
@@ -227,7 +209,9 @@ impl Doser {
 
     /// Reset per-run state (start time, settling window). Call before a new dose.
     pub fn begin(&mut self) {
-        let now = self.clock.now_ms();
+        // Reset epoch; subsequent ms are measured from here
+        self.epoch = self.clock.now();
+        let now = self.clock.ms_since(self.epoch); // will be 0
         self.start_ms = now;
         self.settled_since_ms = None;
         // Clear filter state for a fresh run
@@ -328,7 +312,7 @@ impl Doser {
         let err = self.target_g - w;
         let abs_err = err.abs();
 
-        let now = self.clock.now_ms();
+        let now = self.clock.ms_since(self.epoch);
 
         // 1a) hard runtime cap (>= to allow deterministic tests with 0ms)
         if now.saturating_sub(self.start_ms) >= self.safety.max_run_ms {
@@ -440,8 +424,8 @@ pub struct DoserBuilder<S, M, T> {
     _calibration_loaded: bool,
     // Optional E-stop
     estop_check: Option<Box<dyn Fn() -> bool>>,
-    // Optional clock for tests
-    clock: Option<Box<dyn Clock>>,
+    // Optional clock for tests (accept Box here)
+    clock: Option<Box<dyn Clock + Send + Sync>>,
     // E-stop debounce configuration
     estop_debounce_n: Option<u8>,
     // Type-state markers
@@ -496,7 +480,10 @@ impl<S, M, T> DoserBuilder<S, M, T> {
         let safety = self.safety.unwrap_or_default();
         let timeouts = self.timeouts.unwrap_or_default();
         let calibration = self.calibration.unwrap_or_default();
-        let clock: Box<dyn Clock> = self.clock.unwrap_or_else(|| Box::new(SystemClock));
+        let clock: Arc<dyn Clock + Send + Sync> = match self.clock {
+            Some(b) => Arc::from(b),
+            None => Arc::new(MonotonicClock::new()),
+        };
         let estop_debounce_n = self.estop_debounce_n.unwrap_or(2);
 
         // Validate configs (non-panicking; return typed Config errors)
@@ -540,7 +527,9 @@ impl<S, M, T> DoserBuilder<S, M, T> {
         let ma_cap = filter.ma_window.max(1);
         let med_cap = filter.median_window.max(1);
 
-        let now = clock.now_ms();
+        // Establish epoch for monotonic timing
+        let epoch = clock.now();
+        let now = clock.ms_since(epoch); // 0
 
         Ok(Doser {
             scale,
@@ -552,6 +541,7 @@ impl<S, M, T> DoserBuilder<S, M, T> {
             calibration,
             target_g,
             clock,
+            epoch,
             last_weight_g: 0.0,
             settled_since_ms: None,
             start_ms: now,
@@ -568,7 +558,7 @@ impl<S, M, T> DoserBuilder<S, M, T> {
     }
 }
 
-// Chainable setters that do not affect type-state
+/// Chainable setters that do not affect type-state
 impl<S, M, T> DoserBuilder<S, M, T> {
     pub fn with_filter(mut self, filter: FilterCfg) -> Self {
         self.filter = Some(filter);
@@ -616,11 +606,9 @@ impl<S, M, T> DoserBuilder<S, M, T> {
         self.estop_debounce_n = Some(n.max(1));
         self
     }
-    pub fn with_clock<C>(mut self, clock: C) -> Self
-    where
-        C: Clock + 'static,
-    {
-        self.clock = Some(Box::new(clock));
+    /// Provide a custom clock implementation; defaults to MonotonicClock when not provided.
+    pub fn with_clock(mut self, clock: Box<dyn Clock + Send + Sync>) -> Self {
+        self.clock = Some(clock);
         self
     }
 

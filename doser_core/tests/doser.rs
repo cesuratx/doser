@@ -381,18 +381,30 @@ fn aborts_on_no_progress_watchdog() {
     }
     // Deterministic test clock
     #[derive(Clone)]
-    struct TestClock(Arc<AtomicU64>);
+    struct TestClock {
+        origin: std::time::Instant,
+        ms: Arc<AtomicU64>,
+    }
     impl TestClock {
         fn new() -> Self {
-            Self(Arc::new(AtomicU64::new(0)))
+            Self {
+                origin: std::time::Instant::now(),
+                ms: Arc::new(AtomicU64::new(0)),
+            }
         }
         fn advance(&self, ms: u64) {
-            self.0.fetch_add(ms, Ordering::Relaxed);
+            self.ms.fetch_add(ms, Ordering::Relaxed);
         }
     }
-    impl doser_core::Clock for TestClock {
-        fn now_ms(&self) -> u64 {
-            self.0.load(Ordering::Relaxed)
+    impl doser_traits::clock::Clock for TestClock {
+        fn now(&self) -> std::time::Instant {
+            self.origin + std::time::Duration::from_millis(self.ms.load(Ordering::Relaxed))
+        }
+        fn sleep(&self, d: std::time::Duration) {
+            let add = d.as_millis() as u64;
+            if add > 0 {
+                self.advance(add);
+            }
         }
     }
 
@@ -420,7 +432,7 @@ fn aborts_on_no_progress_watchdog() {
         .with_safety(safety)
         .with_timeouts(Timeouts { sensor_ms: 1 })
         .with_target_grams(10.0)
-        .with_clock(tclk.clone())
+        .with_clock(Box::new(tclk.clone()))
         .apply_calibration::<()>(None)
         .build()
         .unwrap_or_else(|e| panic!("build doser: {e}"));
@@ -441,17 +453,50 @@ fn aborts_on_no_progress_watchdog() {
 
 #[rstest]
 fn aborts_on_no_progress_when_below_epsilon_for_window() {
-    use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
     struct ConstScale(i32);
     impl Scale for ConstScale {
-        fn read(&mut self, _timeout: Duration) -> Result<i32, Box<dyn Error + Send + Sync>> { Ok(self.0) }
+        fn read(&mut self, _timeout: Duration) -> Result<i32, Box<dyn Error + Send + Sync>> {
+            Ok(self.0)
+        }
     }
     #[derive(Clone)]
-    struct TestClock(Arc<AtomicU64>);
-    impl TestClock { fn new() -> Self { Self(Arc::new(AtomicU64::new(0))) } fn advance(&self, ms: u64){ self.0.fetch_add(ms, Ordering::Relaxed);} }
-    impl doser_core::Clock for TestClock { fn now_ms(&self) -> u64 { self.0.load(Ordering::Relaxed) } }
+    struct TestClock {
+        origin: std::time::Instant,
+        ms: Arc<AtomicU64>,
+    }
+    impl TestClock {
+        fn new() -> Self {
+            Self {
+                origin: std::time::Instant::now(),
+                ms: Arc::new(AtomicU64::new(0)),
+            }
+        }
+        fn advance(&self, ms: u64) {
+            self.ms.fetch_add(ms, Ordering::Relaxed);
+        }
+    }
+    impl doser_traits::clock::Clock for TestClock {
+        fn now(&self) -> std::time::Instant {
+            self.origin + std::time::Duration::from_millis(self.ms.load(Ordering::Relaxed))
+        }
+        fn sleep(&self, d: std::time::Duration) {
+            let add = d.as_millis() as u64;
+            if add > 0 {
+                self.advance(add);
+            }
+        }
+    }
 
-    let safety = SafetyCfg { max_run_ms: 60_000, max_overshoot_g: 10.0, no_progress_epsilon_g: 0.02, no_progress_ms: 25 };
+    let safety = SafetyCfg {
+        max_run_ms: 60_000,
+        max_overshoot_g: 10.0,
+        no_progress_epsilon_g: 0.02,
+        no_progress_ms: 25,
+    };
     let tclk = TestClock::new();
     let mut doser = Doser::builder()
         .with_scale(ConstScale(0))
@@ -461,7 +506,7 @@ fn aborts_on_no_progress_when_below_epsilon_for_window() {
         .with_safety(safety)
         .with_timeouts(Timeouts { sensor_ms: 1 })
         .with_target_grams(10.0)
-        .with_clock(tclk.clone())
+        .with_clock(Box::new(tclk.clone()))
         .apply_calibration::<()>(None)
         .build()
         .unwrap();
@@ -469,8 +514,14 @@ fn aborts_on_no_progress_when_below_epsilon_for_window() {
     // First step starts running and initializes progress tracker
     assert!(matches!(doser.step().unwrap(), DosingStatus::Running));
     // Hover within epsilon repeatedly and advance time beyond window
-    for _ in 0..5 { let _ = doser.step().unwrap(); tclk.advance(5); }
-    match doser.step().unwrap() { DosingStatus::Aborted(e) => assert!(format!("{e}").contains("no progress")), other => panic!("expected Aborted, got {other:?}") }
+    for _ in 0..5 {
+        let _ = doser.step().unwrap();
+        tclk.advance(5);
+    }
+    match doser.step().unwrap() {
+        DosingStatus::Aborted(e) => assert!(format!("{e}").contains("no progress")),
+        other => panic!("expected Aborted, got {other:?}"),
+    }
 }
 
 #[rstest]

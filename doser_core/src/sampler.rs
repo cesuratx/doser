@@ -1,16 +1,9 @@
 use crossbeam_channel as xch;
 use doser_traits::Scale;
+use doser_traits::clock::Clock;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
-
-// Monotonic now_ms based on a fixed Instant origin
-use std::sync::OnceLock;
-static START: OnceLock<Instant> = OnceLock::new();
-fn now_ms() -> u64 {
-    let start = START.get_or_init(Instant::now);
-    start.elapsed().as_millis() as u64
-}
+use std::time::Duration;
 
 pub struct Sampler {
     rx: xch::Receiver<i32>,
@@ -18,28 +11,31 @@ pub struct Sampler {
 }
 
 impl Sampler {
-    pub fn spawn<S: Scale + Send + 'static>(mut scale: S, hz: u32, timeout: Duration) -> Self {
+    pub fn spawn<S: Scale + Send + 'static, C: Clock + Send + Sync + 'static>(
+        mut scale: S,
+        hz: u32,
+        timeout: Duration,
+        clock: C,
+    ) -> Self {
         let (tx, rx) = xch::bounded(1);
-        let last_ok = Arc::new(AtomicU64::new(now_ms()));
+        let last_ok = Arc::new(AtomicU64::new(0));
         let last_ok_clone = last_ok.clone();
+        let period = Duration::from_micros((1_000_000u64 / hz as u64) as u64);
+        let epoch = clock.now();
 
         std::thread::spawn(move || {
-            let period = Duration::from_micros((1_000_000u64 / hz as u64) as u64);
             loop {
-                let t0 = Instant::now();
                 match scale.read(timeout) {
                     Ok(v) => {
                         let _ = tx.send(v);
-                        last_ok_clone.store(now_ms(), Ordering::Relaxed);
+                        let now = clock.ms_since(epoch);
+                        last_ok_clone.store(now, Ordering::Relaxed);
                     }
                     Err(_) => {
                         // Optional: send special value or skip; controller has watchdog
                     }
                 }
-                let elapsed = t0.elapsed();
-                if elapsed < period {
-                    std::thread::sleep(period - elapsed);
-                }
+                clock.sleep(period);
             }
         });
 

@@ -3,6 +3,7 @@ use tracing::trace;
 
 use crate::error::{HwError, Result};
 use crate::util::wait_until_low_with_timeout;
+use doser_traits::clock::{Clock, MonotonicClock};
 
 pub struct Hx711 {
     dt: rppal::gpio::InputPin,
@@ -36,7 +37,13 @@ impl Hx711 {
         };
 
         // Wait for data ready (DT goes low) with micro-sleeps
-        wait_until_low_with_timeout(|| self.dt.is_high(), eff, Duration::from_micros(200))?;
+        let clock = MonotonicClock::new();
+        wait_until_low_with_timeout(
+            || self.dt.is_high(),
+            eff,
+            Duration::from_micros(200),
+            &clock,
+        )?;
 
         // Clock out 24 bits
         let mut value: i32 = 0;

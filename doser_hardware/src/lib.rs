@@ -88,6 +88,7 @@ pub mod sim {
 #[cfg(feature = "hardware")]
 pub mod hardware {
     use crate::hx711::Hx711;
+    use doser_traits::clock::MonotonicClock;
     use doser_traits::{Motor, Scale};
     use eyre::{Result, WrapErr};
     use rppal::gpio::{Gpio, OutputPin};
@@ -200,6 +201,7 @@ pub mod hardware {
             let sps_bg = sps.clone();
             // Move STEP into the background thread; not used elsewhere.
             let handle = thread::spawn(move || {
+                let clock = MonotonicClock::new();
                 loop {
                     if shutdown_rx.try_recv().is_ok() {
                         break;
@@ -220,7 +222,7 @@ pub mod hardware {
                         // Low hold
                         spin_sleep_us(half as u64);
                     } else {
-                        thread::sleep(Duration::from_millis(2));
+                        clock.sleep(Duration::from_millis(2));
                     }
                 }
             });
@@ -311,7 +313,8 @@ pub mod hardware {
 
     /// Sleep for microseconds using std; coarse but sufficient for <= 5 kHz.
     fn spin_sleep_us(us: u64) {
-        std::thread::sleep(Duration::from_micros(us));
+        // Use monotonic clock for consistency
+        MonotonicClock::new().sleep(Duration::from_micros(us));
     }
 
     /// E-stop checker: on ARM, read from a GPIO and expose as closure.
@@ -326,11 +329,12 @@ pub mod hardware {
         let flag = Arc::new(AtomicBool::new(false));
         let flag_bg = flag.clone();
         thread::spawn(move || {
+            let clock = MonotonicClock::new();
             loop {
                 let level_low = pin.read() == rppal::gpio::Level::Low;
                 let active = if active_low { level_low } else { !level_low };
                 flag_bg.store(active, Ordering::Relaxed);
-                thread::sleep(Duration::from_millis(poll_ms.max(1)));
+                clock.sleep(Duration::from_millis(poll_ms.max(1)));
             }
         });
         Ok(Box::new(move || flag.load(Ordering::Relaxed)))

@@ -217,9 +217,7 @@ impl Config {
         if self.safety.max_overshoot_g < 0.0 {
             eyre::bail!("safety.max_overshoot_g must be >= 0.0");
         }
-        if self.safety.no_progress_epsilon_g <= 0.0
-            || self.safety.no_progress_epsilon_g > 1.0
-        {
+        if self.safety.no_progress_epsilon_g <= 0.0 || self.safety.no_progress_epsilon_g > 1.0 {
             eyre::bail!("safety.no_progress_epsilon_g must be in (0.0, 1.0]");
         }
         if self.safety.no_progress_ms == 0 {
