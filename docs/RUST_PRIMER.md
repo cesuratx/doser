@@ -319,18 +319,22 @@ flowchart LR
     CFG[TOML config]
     CAL[Calibration CSV]
   end
-  ARGS --> B[doser_cli]
-  CFG --> B
-  CAL --> B
-  B --> C[Doser::builder]
-  C -->|injects| D[Filter/Control/Safety/Timeouts/Clock]
-  C -->|with_scale/with_motor| E{Backend}
+  ARGS --> CLI[doser_cli]
+  CFG --> CLI
+  CAL --> CLI
+  CLI --> B[Doser::builder]
+  B -->|injects| D[Filter/Control/Safety/Timeouts/Clock]
+  B -->|with_scale/with_motor| E{Backend}
   E -->|hardware| H[HardwareScale & HardwareMotor]
   E -->|simulation| S[SimulatedScale & SimulatedMotor]
-  C --> G[Doser]
-  G --> L[step(): read -> filter -> safety -> motor]
-  G --> R[DosingStatus: Running/Complete/Aborted]
-  B -->|logs| X[tracing: console + optional file]
+  B --> DOSER[Doser]
+  DOSER --> STEP[step()]
+  STEP --> READ[read]
+  READ --> FILT[filter]
+  FILT --> SAFE[safety]
+  SAFE --> MOTOR[motor]
+  DOSER --> STATUS[DosingStatus (Running/Complete/Aborted)]
+  CLI -->|logs| LOGS[tracing: console + optional file]
 ```
 
 See also: [ARCHITECTURE](./ARCHITECTURE.md) for a deeper discussion.

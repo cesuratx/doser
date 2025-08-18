@@ -46,11 +46,11 @@ flowchart LR
     SIM --> DOSER
 
     subgraph Loop
-      DOSER -->|step()| SCALE[Scale::read(timeout)]
-      SCALE --> DOSER
-      DOSER --> FILTER[Median + Moving Avg]
+      DOSER -->|step()| STEP[step()]
+      STEP --> SCALE[Scale::read(timeout)]
+      SCALE --> FILTER[Median + Moving Avg]
       FILTER --> SAFETY[Safety Guards<br/>(max_run, overshoot, watchdog, E‑stop)]
-      SAFETY -->|abort/complete| STATUS{DosingStatus}
+      SAFETY --> STATUS{DosingStatus}
       DOSER --> MOTOR[Motor::start/set_speed/stop]
       STATUS --> CLI
     end
