@@ -15,7 +15,6 @@ impl Hx711 {
         mut sck_pin: rppal::gpio::OutputPin,
         gain_pulses: u8,
     ) -> Result<Self> {
-        dt_pin.set_pullup(); // if desired
         sck_pin.set_low(); // clock idle low
         Ok(Self {
             dt: dt_pin,
