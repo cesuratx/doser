@@ -48,6 +48,10 @@ pub mod sim {
 
     impl Scale for SimulatedScale {
         fn read(&mut self, _timeout: Duration) -> Result<i32, Box<dyn Error + Send + Sync>> {
+            // Test hook: allow simulating a timeout-style error via env var in integration tests.
+            if std::env::var("DOSER_TEST_SIM_TIMEOUT").ok().as_deref() == Some("1") {
+                return Err("sensor timeout".into());
+            }
             // Convert grams → a pretend "raw" reading. Core can treat this as grams if desired.
             Ok((self.grams * 1000.0) as i32)
         }
