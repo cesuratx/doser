@@ -140,17 +140,21 @@ fn main() -> anyhow::Result<()> {
 
     // 3) Build hardware (feature-gated) or sim
     #[cfg(feature = "hardware")]
-    let hw = {
+    let hw: (Box<dyn doser_traits::Scale>, Box<dyn doser_traits::Motor>) = {
         use doser_hardware::{HardwareMotor, HardwareScale};
-        let scale =
-            HardwareScale::try_new(cfg.pins.hx711_dt, cfg.pins.hx711_sck).context("open HX711")?;
+        let scale = HardwareScale::try_new_with_timeout(
+            cfg.pins.hx711_dt,
+            cfg.pins.hx711_sck,
+            cfg.hardware.sensor_read_timeout_ms,
+        )
+        .context("open HX711")?;
         let motor = HardwareMotor::try_new_with_en(
             cfg.pins.motor_step,
             cfg.pins.motor_dir,
             cfg.pins.motor_en,
         )
-        .context("open motor")?;
-        (scale, motor)
+        .context("open motor pins")?;
+        (Box::new(scale), Box::new(motor))
     };
 
     #[cfg(not(feature = "hardware"))]

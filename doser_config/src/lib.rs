@@ -50,6 +50,13 @@ pub struct Logging {
     pub rotation: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct Hardware {
+    /// Max time to wait for HX711 data-ready (DT low) before failing
+    pub sensor_read_timeout_ms: u64,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub pins: Pins,
@@ -60,6 +67,8 @@ pub struct Config {
     pub safety: Safety,
     #[serde(default)]
     pub logging: Logging,
+    #[serde(default)]
+    pub hardware: Hardware,
 }
 
 pub fn load_toml(s: &str) -> Result<Config, toml::de::Error> {

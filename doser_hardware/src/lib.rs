@@ -8,6 +8,7 @@
 //!       feature is active. This lets CI on x86 build without pulling GPIO libs.
 
 pub mod error;
+pub mod util;
 
 // Make the HX711 driver module available when hardware feature is enabled.
 #[cfg(feature = "hardware")]
@@ -111,7 +112,28 @@ pub mod hardware {
                 .context("get HX711 SCK pin")?
                 .into_output_low();
             // Channel A, gain = 128 uses 25 pulses after the 24-bit read.
-            let hx = Hx711::new(dt, sck, 25)?;
+            let hx = Hx711::new(dt, sck, 25, Duration::from_millis(150))?;
+            Ok(Self { hx })
+        }
+
+        /// Create HX711-backed scale with explicit data-ready timeout (ms).
+        pub fn try_new_with_timeout(
+            dt_pin: u8,
+            sck_pin: u8,
+            data_ready_timeout_ms: u64,
+        ) -> Result<Self> {
+            let gpio = Gpio::new().context("open GPIO for HX711")?;
+            let dt = gpio.get(dt_pin).context("get HX711 DT pin")?.into_input();
+            let sck = gpio
+                .get(sck_pin)
+                .context("get HX711 SCK pin")?
+                .into_output_low();
+            let drt = if data_ready_timeout_ms == 0 {
+                150
+            } else {
+                data_ready_timeout_ms
+            };
+            let hx = Hx711::new(dt, sck, 25, Duration::from_millis(drt))?;
             Ok(Self { hx })
         }
 

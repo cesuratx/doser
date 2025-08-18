@@ -6,6 +6,8 @@ pub enum HwError {
     Gpio(String),
     #[error("scale timeout")]
     Timeout,
+    #[error("hx711 data-ready timeout")]
+    DataReadyTimeout,
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

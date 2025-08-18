@@ -377,6 +377,7 @@ fn map_hw_error_dyn(e: &(dyn std::error::Error + 'static)) -> DoserError {
     if let Some(hw) = e.downcast_ref::<HwError>() {
         match hw {
             HwError::Timeout => DoserError::Timeout,
+            HwError::DataReadyTimeout => DoserError::Timeout,
             other => DoserError::HardwareFault(other.to_string()),
         }
     } else {
