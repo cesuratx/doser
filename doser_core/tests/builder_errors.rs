@@ -1,7 +1,8 @@
-use doser_core::{Doser};
+use doser_core::Doser;
 use doser_core::error::BuildError;
+use rstest::rstest;
 
-#[test]
+#[rstest]
 fn builder_missing_scale_yields_typed_build_error() {
     let err = Doser::builder()
         // missing with_scale()

@@ -1,6 +1,7 @@
 use doser_core::error::BuildError;
 use doser_core::{ControlCfg, Doser, FilterCfg, Timeouts};
 use doser_traits::{Motor, Scale};
+use rstest::rstest;
 use std::error::Error;
 use std::time::Duration;
 
@@ -26,7 +27,7 @@ impl Motor for DummyMotor {
     }
 }
 
-#[test]
+#[rstest]
 fn builder_validates_target_range() {
     // Too small
     let err = match Doser::builder()
@@ -53,7 +54,7 @@ fn builder_validates_target_range() {
     assert_is_config_err(err);
 }
 
-#[test]
+#[rstest]
 fn builder_accepts_defaults() {
     let res = Doser::builder()
         .with_scale(DummyScale::default())
@@ -71,7 +72,7 @@ fn builder_accepts_defaults() {
     }
 }
 
-#[test]
+#[rstest]
 fn builder_missing_scale_yields_build_error() {
     // Intentionally omit with_scale()
     let err = Doser::builder()

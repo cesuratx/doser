@@ -1,36 +1,49 @@
-use doser_config::{load_calibration_csv, Calibration, CalibrationRow};
+use std::fs::File;
+use std::io::Write;
 
-#[test]
+use doser_config::{load_calibration_csv, Calibration, CalibrationRow};
+use rstest::rstest;
+use tempfile::tempdir;
+
+#[rstest]
 fn calibration_from_rows_happy_path() {
     let rows = vec![
         CalibrationRow {
-            raw: 842913,
+            raw: 100,
             grams: 0.0,
         },
         CalibrationRow {
-            raw: 1024913,
+            raw: 200,
             grams: 100.0,
         },
     ];
-    let c = Calibration::from_rows(rows).expect("calibration compute");
-    assert!(c.scale_factor.is_finite());
+    let c = Calibration::from_rows(rows).unwrap_or_else(|e| panic!("from_rows: {e}"));
+    assert!(c.scale_factor > 0.0);
 }
 
-#[test]
+#[rstest]
 fn csv_with_missing_header_errors() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir().unwrap();
     let path = dir.path().join("bad_headers.csv");
-    std::fs::write(&path, "raw,value\n1,2\n").unwrap();
+
+    let mut f = File::create(&path).unwrap();
+    writeln!(f, "raw,value").unwrap();
+    writeln!(f, "100,0.0").unwrap();
+    writeln!(f, "200,1.0").unwrap();
+
     let err = load_calibration_csv(&path).expect_err("should error on bad headers");
     assert!(format!("{}", err).contains("headers 'raw,grams'"));
 }
 
-#[test]
+#[rstest]
 fn csv_with_non_numeric_errors() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("bad_value.csv");
-    // grams is non-numeric
-    std::fs::write(&path, "raw,grams\n123,abc\n456,100\n").unwrap();
-    let err = load_calibration_csv(&path).expect_err("should error on bad value");
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("bad_numeric.csv");
+
+    let mut f = File::create(&path).unwrap();
+    writeln!(f, "raw,grams").unwrap();
+    writeln!(f, "abc,xyz").unwrap();
+
+    let err = load_calibration_csv(&path).expect_err("should error on non-numeric");
     assert!(format!("{}", err).contains("invalid CSV row"));
 }

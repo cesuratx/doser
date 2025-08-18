@@ -1,5 +1,6 @@
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
+use rstest::rstest;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -49,7 +50,7 @@ sensor_read_timeout_ms = 100
     path
 }
 
-#[test]
+#[rstest]
 fn cli_rejects_out_of_range_epsilon() {
     let dir = tempdir().unwrap();
     let path = write_valid_config(&dir);
@@ -60,14 +61,12 @@ fn cli_rejects_out_of_range_epsilon() {
 
     let mut cmd = Command::cargo_bin("doser_cli").unwrap();
     cmd.arg("--config").arg(&path).arg("self-check");
-    cmd.assert()
-        .failure()
-        .stdout(predicate::str::contains(
-            "Configuration is invalid or incomplete",
-        ));
+    cmd.assert().failure().stdout(predicate::str::contains(
+        "Configuration is invalid or incomplete",
+    ));
 }
 
-#[test]
+#[rstest]
 fn cli_reports_calibration_bad_header() {
     let dir = tempdir().unwrap();
     let cfg = write_valid_config(&dir);
@@ -80,7 +79,11 @@ fn cli_reports_calibration_bad_header() {
     writeln!(f, "200,1.0").unwrap();
 
     let mut cmd = Command::cargo_bin("doser_cli").unwrap();
-    cmd.arg("--config").arg(&cfg).arg("--calibration").arg(&bad_csv).arg("self-check");
+    cmd.arg("--config")
+        .arg(&cfg)
+        .arg("--calibration")
+        .arg(&bad_csv)
+        .arg("self-check");
     cmd.assert()
         .failure()
         .stdout(predicate::str::contains("headers 'raw,grams'"));

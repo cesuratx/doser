@@ -7,8 +7,9 @@ use std::time::Duration;
 
 use doser_hardware::error::HwError;
 use doser_hardware::util::wait_until_low_with_timeout;
+use rstest::rstest;
 
-#[test]
+#[rstest]
 fn wait_until_low_success_path() {
     let high = Arc::new(AtomicBool::new(true));
     let high_bg = high.clone();
@@ -26,7 +27,7 @@ fn wait_until_low_success_path() {
     assert!(res.is_ok(), "expected success, got {res:?}");
 }
 
-#[test]
+#[rstest]
 fn wait_until_low_timeout_path() {
     let high = Arc::new(AtomicBool::new(true));
 

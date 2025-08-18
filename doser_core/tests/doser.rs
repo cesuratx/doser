@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use doser_core::{ControlCfg, Doser, DosingStatus, FilterCfg, SafetyCfg, Timeouts};
 use doser_traits::{Motor, Scale};
+use rstest::rstest;
 
 /// Scale that returns a fixed sequence, then repeats the last value.
 struct SeqScale {
@@ -48,7 +49,7 @@ impl Motor for SpyMotor {
     }
 }
 
-#[test]
+#[rstest]
 fn completes_when_in_band_and_settled() {
     // Target exactly present in the sequence -> completes immediately when hit.
     let scale = SeqScale::new([10, 15, 17, 18]);
@@ -72,10 +73,10 @@ fn completes_when_in_band_and_settled() {
         .with_target_grams(18.0) // exact hit in sequence
         .apply_calibration::<()>(None)
         .build()
-        .expect("build doser");
+        .unwrap_or_else(|e| panic!("build doser: {e}"));
 
     for _ in 0..100 {
-        match doser.step().expect("step ok") {
+        match doser.step().unwrap_or_else(|e| panic!("step ok: {e}")) {
             DosingStatus::Running => continue,
             DosingStatus::Complete => return, // success
             DosingStatus::Aborted(e) => panic!("aborted: {e}"),
@@ -84,7 +85,7 @@ fn completes_when_in_band_and_settled() {
     panic!("did not complete within 100 steps");
 }
 
-#[test]
+#[rstest]
 fn propagates_scale_error_as_core_error() {
     struct ErrScale;
     impl Scale for ErrScale {
@@ -102,7 +103,7 @@ fn propagates_scale_error_as_core_error() {
         .with_target_grams(10.0)
         .apply_calibration::<()>(None)
         .build()
-        .expect("build doser");
+        .unwrap_or_else(|e| panic!("build doser: {e}"));
 
     let err = doser
         .step()
@@ -118,7 +119,7 @@ fn propagates_scale_error_as_core_error() {
     }
 }
 
-#[test]
+#[rstest]
 fn stops_immediately_when_target_crossed() {
     // Sequence crosses target (overshoot). Should Complete immediately when w >= target if stable_ms == 0.
     let scale = SeqScale::new([5, 9, 10, 11]);
@@ -134,16 +135,25 @@ fn stops_immediately_when_target_crossed() {
         .with_target_grams(10.0)
         .apply_calibration::<()>(None)
         .build()
-        .expect("build doser");
+        .unwrap_or_else(|e| panic!("build doser: {e}"));
 
     // Steps until we cross 10g.
-    assert!(matches!(doser.step().unwrap(), DosingStatus::Running)); // 5
-    assert!(matches!(doser.step().unwrap(), DosingStatus::Running)); // 9
+    assert!(matches!(
+        doser.step().unwrap_or_else(|e| panic!("step: {e}")),
+        DosingStatus::Running
+    )); // 5
+    assert!(matches!(
+        doser.step().unwrap_or_else(|e| panic!("step: {e}")),
+        DosingStatus::Running
+    )); // 9
     // At 10, inside hysteresis and stable_ms==0 => Complete
-    assert!(matches!(doser.step().unwrap(), DosingStatus::Complete)); // 10
+    assert!(matches!(
+        doser.step().unwrap_or_else(|e| panic!("step: {e}")),
+        DosingStatus::Complete
+    )); // 10
 }
 
-#[test]
+#[rstest]
 fn aborts_on_excessive_overshoot() {
     // Configure small overshoot threshold to trigger abort when we jump past target.
     let safety = SafetyCfg {
@@ -163,20 +173,26 @@ fn aborts_on_excessive_overshoot() {
         .with_target_grams(10.0)
         .apply_calibration::<()>(None)
         .build()
-        .expect("build doser");
+        .unwrap_or_else(|e| panic!("build doser: {e}"));
 
     // 8 -> running
-    assert!(matches!(doser.step().unwrap(), DosingStatus::Running));
+    assert!(matches!(
+        doser.step().unwrap_or_else(|e| panic!("step: {e}")),
+        DosingStatus::Running
+    ));
     // 9 -> running
-    assert!(matches!(doser.step().unwrap(), DosingStatus::Running));
+    assert!(matches!(
+        doser.step().unwrap_or_else(|e| panic!("step: {e}")),
+        DosingStatus::Running
+    ));
     // 11 -> abort due to overshoot guard
-    match doser.step().unwrap() {
+    match doser.step().unwrap_or_else(|e| panic!("step: {e}")) {
         DosingStatus::Aborted(e) => assert!(format!("{e}").contains("overshoot")),
         other => panic!("expected Aborted, got {other:?}"),
     }
 }
 
-#[test]
+#[rstest]
 fn aborts_on_max_runtime() {
     // Use 0ms runtime to trigger immediately after begin().
     let safety = SafetyCfg {
@@ -195,16 +211,16 @@ fn aborts_on_max_runtime() {
         .with_target_grams(1.0)
         .apply_calibration::<()>(None)
         .build()
-        .expect("build doser");
+        .unwrap_or_else(|e| panic!("build doser: {e}"));
 
     doser.begin();
-    match doser.step().unwrap() {
+    match doser.step().unwrap_or_else(|e| panic!("step: {e}")) {
         DosingStatus::Aborted(e) => assert!(format!("{e}").contains("max run time")),
         other => panic!("expected Aborted, got {other:?}"),
     }
 }
 
-#[test]
+#[rstest]
 fn calibration_converts_counts_to_grams() {
     // gain 0.5 g/count, zero at 0, offset 0 => raw 10 -> 5g
     let scale = SeqScale::new([10]);
@@ -222,15 +238,15 @@ fn calibration_converts_counts_to_grams() {
         .with_target_grams(100.0)
         .apply_calibration::<()>(None)
         .build()
-        .expect("build doser");
+        .unwrap_or_else(|e| panic!("build doser: {e}"));
 
-    match doser.step().unwrap() {
+    match doser.step().unwrap_or_else(|e| panic!("step: {e}")) {
         DosingStatus::Running | DosingStatus::Complete | DosingStatus::Aborted(_) => {}
     }
     assert!((doser.last_weight() - 5.0).abs() < 1e-6);
 }
 
-#[test]
+#[rstest]
 fn tare_zero_counts_shifts_baseline() {
     // zero_counts=100, gain 1 => raw 100 -> 0g; raw 105 -> 5g
     let mut doser = Doser::builder()
@@ -247,7 +263,7 @@ fn tare_zero_counts_shifts_baseline() {
         .with_target_grams(1000.0)
         .apply_calibration::<()>(None)
         .build()
-        .expect("build doser");
+        .unwrap_or_else(|e| panic!("build doser: {e}"));
 
     let _ = doser.step();
     assert!((doser.last_weight() - 0.0).abs() < 1e-6);
@@ -255,7 +271,7 @@ fn tare_zero_counts_shifts_baseline() {
     assert!((doser.last_weight() - 5.0).abs() < 1e-6);
 }
 
-#[test]
+#[rstest]
 fn median_filter_suppresses_spike() {
     // Sequence with a spike at the third reading; median_window=3 should suppress it.
     struct SeqScale {
@@ -303,13 +319,13 @@ fn median_filter_suppresses_spike() {
         .with_target_grams(1000.0)
         .apply_calibration::<()>(None)
         .build()
-        .expect("build doser");
+        .unwrap_or_else(|e| panic!("build doser: {e}"));
 
     // Step through first two zeros
-    let _ = doser.step().unwrap();
-    let _ = doser.step().unwrap();
+    let _ = doser.step().unwrap_or_else(|e| panic!("step: {e}"));
+    let _ = doser.step().unwrap_or_else(|e| panic!("step: {e}"));
     // Third reading is 1000, but median of [0,0,1000] = 0 => last_weight should remain ~0
-    let _ = doser.step().unwrap();
+    let _ = doser.step().unwrap_or_else(|e| panic!("step: {e}"));
     assert!(
         doser.last_weight().abs() < 1e-3,
         "median filter did not suppress spike: {}",
@@ -317,7 +333,7 @@ fn median_filter_suppresses_spike() {
     );
 }
 
-#[test]
+#[rstest]
 fn requires_time_to_settle_when_stable_ms_positive() {
     // When stable_ms > 0, entering the hysteresis band should not complete immediately.
     let scale = SeqScale::new([9, 10, 10, 10]);
@@ -337,18 +353,21 @@ fn requires_time_to_settle_when_stable_ms_positive() {
         .with_target_grams(10.0)
         .apply_calibration::<()>(None)
         .build()
-        .expect("build doser");
+        .unwrap_or_else(|e| panic!("build doser: {e}"));
 
     // First read 9 -> Running
-    assert!(matches!(doser.step().unwrap(), DosingStatus::Running));
+    assert!(matches!(
+        doser.step().unwrap_or_else(|e| panic!("step: {e}")),
+        DosingStatus::Running
+    ));
     // Now in-band at 10, but stable_ms is large, so should still be Running (not Complete)
-    match doser.step().unwrap() {
+    match doser.step().unwrap_or_else(|e| panic!("step: {e}")) {
         DosingStatus::Running => {}
         other => panic!("expected Running before stable_ms elapsed, got {other:?}"),
     }
 }
 
-#[test]
+#[rstest]
 fn aborts_on_no_progress_watchdog() {
     use std::sync::{
         Arc,
@@ -404,20 +423,23 @@ fn aborts_on_no_progress_watchdog() {
         .with_clock(tclk.clone())
         .apply_calibration::<()>(None)
         .build()
-        .expect("build doser");
+        .unwrap_or_else(|e| panic!("build doser: {e}"));
 
     // First step should run
-    assert!(matches!(doser.step().unwrap(), DosingStatus::Running));
+    assert!(matches!(
+        doser.step().unwrap_or_else(|e| panic!("step: {e}")),
+        DosingStatus::Running
+    ));
     // Advance virtual time to exceed the watchdog window
     tclk.advance(10);
     // Next step should hit watchdog and abort (no progress)
-    match doser.step().unwrap() {
+    match doser.step().unwrap_or_else(|e| panic!("step: {e}")) {
         DosingStatus::Aborted(e) => assert!(format!("{e}").contains("no progress")),
         other => panic!("expected Aborted, got {other:?}"),
     }
 }
 
-#[test]
+#[rstest]
 fn estop_condition_latches_until_begin() {
     use std::sync::{
         Arc,
@@ -451,24 +473,24 @@ fn estop_condition_latches_until_begin() {
         .with_estop_check(move || estop_clone.load(Ordering::Relaxed))
         .apply_calibration::<()>(None)
         .build()
-        .expect("build doser");
+        .unwrap_or_else(|e| panic!("build doser: {e}"));
 
     // First step sees estop=true -> Aborted
-    match doser.step().unwrap() {
+    match doser.step().unwrap_or_else(|e| panic!("step: {e}")) {
         DosingStatus::Aborted(e) => assert!(format!("{e}").contains("estop")),
         other => panic!("expected Aborted(estop), got {other:?}"),
     }
 
     // Clear estop, but latch should keep aborting until begin() resets it
     estop.store(false, Ordering::Relaxed);
-    match doser.step().unwrap() {
+    match doser.step().unwrap_or_else(|e| panic!("step: {e}")) {
         DosingStatus::Aborted(e) => assert!(format!("{e}").contains("estop")),
         other => panic!("expected latched Aborted(estop), got {other:?}"),
     }
 
     // Reset run; latch cleared in begin(); should now run
     doser.begin();
-    match doser.step().unwrap() {
+    match doser.step().unwrap_or_else(|e| panic!("step: {e}")) {
         DosingStatus::Running | DosingStatus::Aborted(_) | DosingStatus::Complete => {}
     }
 }

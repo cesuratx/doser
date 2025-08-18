@@ -1,4 +1,6 @@
-#[test]
+use rstest::rstest;
+
+#[rstest]
 fn placeholder_noop() {
     // CSV header validation is covered in doser_config crate tests and CLI integration.
     assert!(true);

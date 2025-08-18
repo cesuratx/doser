@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use doser_core::{ControlCfg, Doser, DosingStatus, FilterCfg, Timeouts};
 use doser_traits::{Motor, Scale};
+use rstest::rstest;
 
 /// Scale that returns a constant below-target value
 struct ConstScale(i32);
@@ -30,7 +31,7 @@ impl Motor for SpyMotor {
     }
 }
 
-#[test]
+#[rstest]
 fn aborts_immediately_on_estop() {
     // E-stop flag toggled externally simulates GPIO read.
     let estop = Arc::new(AtomicBool::new(false));
@@ -48,14 +49,14 @@ fn aborts_immediately_on_estop() {
         .expect("doser build");
 
     // First step: no estop -> Running
-    match doser.step().unwrap() {
+    match doser.step().unwrap_or_else(|e| panic!("step 1: {e}")) {
         DosingStatus::Running => {}
         other => panic!("expected Running, got {other:?}"),
     }
 
     // Trip estop and expect Aborted at next step
     estop.store(true, Ordering::Relaxed);
-    match doser.step().unwrap() {
+    match doser.step().unwrap_or_else(|e| panic!("step 2: {e}")) {
         DosingStatus::Aborted(e) => assert!(format!("{e}").contains("estop")),
         other => panic!("expected Aborted, got {other:?}"),
     }

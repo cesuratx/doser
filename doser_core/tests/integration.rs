@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use doser_core::{ControlCfg, Doser, FilterCfg, Timeouts};
 use doser_traits::{Motor, Scale};
+use rstest::rstest;
 use std::fs;
 
 fn bin_path() -> PathBuf {
@@ -75,8 +76,8 @@ fn ensure_exists(p: &Path) {
     }
 }
 
-#[test]
-fn test_cli_missing_arguments_prints_help() {
+#[rstest]
+fn cli_missing_arguments_prints_help() {
     let exe = bin_path();
     ensure_exists(&exe);
 
@@ -94,17 +95,23 @@ fn test_cli_missing_arguments_prints_help() {
     );
 }
 
-#[test]
-fn test_cli_simulated_dosing_prints_summary() {
+#[rstest]
+#[case(false)]
+#[case(true)]
+fn cli_self_check_prints_ok(#[case] json: bool) {
     // With no `hardware` feature, the CLI uses simulated scale/motor.
     let exe = bin_path();
     ensure_exists(&exe);
     let cfg = write_temp_config();
 
-    let out = Command::new(&exe)
-        .args(["--config", &cfg.to_string_lossy(), "self-check"])
-        .output()
-        .expect("spawn doser_cli dose");
+    let mut cmd = Command::new(&exe);
+    cmd.arg("--config").arg(cfg.as_os_str());
+    if json {
+        cmd.arg("--json");
+    }
+    cmd.arg("self-check");
+
+    let out = cmd.output().expect("spawn doser_cli self-check");
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -112,34 +119,6 @@ fn test_cli_simulated_dosing_prints_summary() {
     assert!(
         out.status.success(),
         "CLI exited with non-zero status.\nSTDOUT:\n{}\n\nSTDERR:\n{}\n",
-        stdout,
-        stderr
-    );
-    assert!(
-        stdout.contains("OK"),
-        "Expected OK from self-check; got:\n{}\n",
-        stdout
-    );
-}
-
-#[test]
-fn test_cli_json_logging_layer_initializes() {
-    // Ensure `--json` doesn’t crash and still prints the summary.
-    let exe = bin_path();
-    ensure_exists(&exe);
-    let cfg = write_temp_config();
-
-    let out = Command::new(&exe)
-        .args(["--config", &cfg.to_string_lossy(), "--json", "self-check"])
-        .output()
-        .expect("spawn doser_cli dose --json");
-
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-
-    assert!(
-        out.status.success(),
-        "CLI (json) exited non-zero.\nSTDOUT:\n{}\n\nSTDERR:\n{}\n",
         stdout,
         stderr
     );
@@ -172,8 +151,8 @@ impl Motor for NopMotor {
     }
 }
 
-#[test]
-fn test_simulated_hardware_error_in_core() {
+#[rstest]
+fn simulated_hardware_error_in_core() {
     let mut doser = Doser::builder()
         .with_scale(ErrScale)
         .with_motor(NopMotor::default())
@@ -183,7 +162,7 @@ fn test_simulated_hardware_error_in_core() {
         .with_target_grams(5.0)
         .apply_calibration::<()>(None)
         .build()
-        .expect("build should succeed");
+        .unwrap_or_else(|e| panic!("build should succeed: {e}"));
 
     let err = doser
         .step()

@@ -1,10 +1,11 @@
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
+use rstest::rstest;
 use std::fs;
 use std::process::Command;
 use tempfile::tempdir;
 
-#[test]
+#[rstest]
 fn hx711_timeout_bubbles_to_cli() {
     let dir = tempdir().unwrap();
     let toml = r#"
@@ -46,8 +47,12 @@ sensor_read_timeout_ms = 50
 
     let mut cmd = Command::cargo_bin("doser_cli").unwrap();
     cmd.env("DOSER_TEST_SIM_TIMEOUT", "1");
-    cmd.arg("--config").arg(&cfg).arg("dose").arg("--grams").arg("0.5");
-    cmd.assert()
-        .failure()
-        .stdout(predicate::str::contains("What happened: Scale read timed out"));
+    cmd.arg("--config")
+        .arg(&cfg)
+        .arg("dose")
+        .arg("--grams")
+        .arg("0.5");
+    cmd.assert().failure().stdout(predicate::str::contains(
+        "What happened: Scale read timed out",
+    ));
 }

@@ -277,6 +277,7 @@ dependencies = [
  "doser_traits",
  "eyre",
  "predicates",
+ "rstest",
  "tempfile",
  "toml 0.8.23",
  "tracing",
@@ -290,6 +291,7 @@ version = "0.1.0"
 dependencies = [
  "csv",
  "eyre",
+ "rstest",
  "serde",
  "tempfile",
  "toml 0.8.23",
@@ -317,6 +319,7 @@ dependencies = [
  "anyhow",
  "doser_traits",
  "rppal",
+ "rstest",
  "thiserror 1.0.69",
  "tracing",
 ]

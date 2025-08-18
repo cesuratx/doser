@@ -13,3 +13,6 @@ rppal = { version = "0.17", optional = true }
 [features]
 default = []
 hardware = ["rppal"]
+
+[dev-dependencies]
+rstest = "0.18"
