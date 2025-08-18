@@ -2,11 +2,13 @@ use std::time::{Duration, Instant};
 use tracing::trace;
 
 use crate::error::{HwError, Result};
+use crate::util::wait_until_low_with_timeout;
 
 pub struct Hx711 {
     dt: rppal::gpio::InputPin,
     sck: rppal::gpio::OutputPin,
     gain_pulses: u8, // 25, 26, 27 based on gain/channel
+    data_ready_timeout: Duration,
 }
 
 impl Hx711 {
@@ -14,25 +16,27 @@ impl Hx711 {
         dt_pin: rppal::gpio::InputPin,
         mut sck_pin: rppal::gpio::OutputPin,
         gain_pulses: u8,
+        data_ready_timeout: Duration,
     ) -> Result<Self> {
         sck_pin.set_low(); // clock idle low
         Ok(Self {
             dt: dt_pin,
             sck: sck_pin,
             gain_pulses,
+            data_ready_timeout,
         })
     }
 
     pub fn read_with_timeout(&mut self, timeout: Duration) -> Result<i32> {
-        let deadline = Instant::now() + timeout;
+        // Use the smaller of the per-call timeout and configured data-ready timeout
+        let eff = if timeout < self.data_ready_timeout {
+            timeout
+        } else {
+            self.data_ready_timeout
+        };
 
-        // Wait for data ready (DT goes low)
-        while self.dt.is_high() {
-            if Instant::now() >= deadline {
-                return Err(HwError::Timeout);
-            }
-            std::thread::sleep(Duration::from_micros(200));
-        }
+        // Wait for data ready (DT goes low) with micro-sleeps
+        wait_until_low_with_timeout(|| self.dt.is_high(), eff, Duration::from_micros(200))?;
 
         // Clock out 24 bits
         let mut value: i32 = 0;

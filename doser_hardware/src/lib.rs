@@ -8,6 +8,7 @@
 //!       feature is active. This lets CI on x86 build without pulling GPIO libs.
 
 pub mod error;
+pub mod util;
 
 // Make the HX711 driver module available when hardware feature is enabled.
 #[cfg(feature = "hardware")]
@@ -47,6 +48,10 @@ pub mod sim {
 
     impl Scale for SimulatedScale {
         fn read(&mut self, _timeout: Duration) -> Result<i32, Box<dyn Error + Send + Sync>> {
+            // Test hook: allow simulating a timeout-style error via env var in integration tests.
+            if std::env::var("DOSER_TEST_SIM_TIMEOUT").ok().as_deref() == Some("1") {
+                return Err("sensor timeout".into());
+            }
             // Convert grams → a pretend "raw" reading. Core can treat this as grams if desired.
             Ok((self.grams * 1000.0) as i32)
         }
@@ -83,8 +88,8 @@ pub mod sim {
 #[cfg(feature = "hardware")]
 pub mod hardware {
     use crate::hx711::Hx711;
-    use anyhow::{Context, Result};
     use doser_traits::{Motor, Scale};
+    use eyre::{Result, WrapErr};
     use rppal::gpio::{Gpio, OutputPin};
     use std::error::Error;
     use std::sync::{
@@ -104,14 +109,35 @@ pub mod hardware {
     impl HardwareScale {
         /// Create a new HX711-backed scale using DT and SCK GPIO pins.
         pub fn try_new(dt_pin: u8, sck_pin: u8) -> Result<Self> {
-            let gpio = Gpio::new().context("open GPIO for HX711")?;
-            let dt = gpio.get(dt_pin).context("get HX711 DT pin")?.into_input();
+            let gpio = Gpio::new().wrap_err("open GPIO for HX711")?;
+            let dt = gpio.get(dt_pin).wrap_err("get HX711 DT pin")?.into_input();
             let sck = gpio
                 .get(sck_pin)
-                .context("get HX711 SCK pin")?
+                .wrap_err("get HX711 SCK pin")?
                 .into_output_low();
             // Channel A, gain = 128 uses 25 pulses after the 24-bit read.
-            let hx = Hx711::new(dt, sck, 25)?;
+            let hx = Hx711::new(dt, sck, 25, Duration::from_millis(150))?;
+            Ok(Self { hx })
+        }
+
+        /// Create HX711-backed scale with explicit data-ready timeout (ms).
+        pub fn try_new_with_timeout(
+            dt_pin: u8,
+            sck_pin: u8,
+            data_ready_timeout_ms: u64,
+        ) -> Result<Self> {
+            let gpio = Gpio::new().wrap_err("open GPIO for HX711")?;
+            let dt = gpio.get(dt_pin).wrap_err("get HX711 DT pin")?.into_input();
+            let sck = gpio
+                .get(sck_pin)
+                .wrap_err("get HX711 SCK pin")?
+                .into_output_low();
+            let drt = if data_ready_timeout_ms == 0 {
+                150
+            } else {
+                data_ready_timeout_ms
+            };
+            let hx = Hx711::new(dt, sck, 25, Duration::from_millis(drt))?;
             Ok(Self { hx })
         }
 
@@ -154,15 +180,15 @@ pub mod hardware {
         /// Create a motor from GPIO pin numbers with an optional enable pin.
         /// Note: On A4988/DRV8825, EN is active-low (low = enabled). We default to disabled (high).
         pub fn try_new_with_en(step_pin: u8, dir_pin: u8, en_pin: Option<u8>) -> Result<Self> {
-            let gpio = Gpio::new().context("open GPIO")?;
+            let gpio = Gpio::new().wrap_err("open GPIO")?;
             let mut step = gpio
                 .get(step_pin)
-                .context("get STEP pin")?
+                .wrap_err("get STEP pin")?
                 .into_output_low();
-            let dir = gpio.get(dir_pin).context("get DIR pin")?.into_output_low();
+            let dir = gpio.get(dir_pin).wrap_err("get DIR pin")?.into_output_low();
 
             let en = match en_pin {
-                Some(pin) => Some(gpio.get(pin).context("get EN pin")?.into_output_high()), // high = disabled
+                Some(pin) => Some(gpio.get(pin).wrap_err("get EN pin")?.into_output_high()), // high = disabled
                 None => None,
             };
 
@@ -295,8 +321,8 @@ pub mod hardware {
         poll_ms: u64,
     ) -> Result<Box<dyn Fn() -> bool + Send + Sync>> {
         use std::sync::atomic::AtomicBool;
-        let gpio = Gpio::new().context("open GPIO")?;
-        let pin = gpio.get(pin).context("get E-STOP pin")?.into_input();
+        let gpio = Gpio::new().wrap_err("open GPIO")?;
+        let pin = gpio.get(pin).wrap_err("get E-STOP pin")?.into_input();
         let flag = Arc::new(AtomicBool::new(false));
         let flag_bg = flag.clone();
         thread::spawn(move || {

@@ -16,4 +16,17 @@ pub enum DoserError {
     Io(String),
 }
 
-pub type Result<T> = std::result::Result<T, DoserError>;
+#[derive(Debug, Error, Clone)]
+pub enum BuildError {
+    #[error("missing scale")]
+    MissingScale,
+    #[error("missing motor")]
+    MissingMotor,
+    #[error("missing target grams")]
+    MissingTarget,
+    #[error("invalid config: {0}")]
+    InvalidConfig(&'static str),
+}
+
+pub type Result<T> = eyre::Result<T>;
+pub use eyre::Report;

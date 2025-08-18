@@ -7,9 +7,11 @@ edition = "2024"
 doser_traits = { path = "../doser_traits" }
 thiserror = "1"
 tracing = "0.1"
-anyhow = "1"
 rppal = { version = "0.17", optional = true }
 
 [features]
 default = []
 hardware = ["rppal"]
+
+[dev-dependencies]
+rstest = "0.18"

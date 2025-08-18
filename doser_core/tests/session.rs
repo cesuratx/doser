@@ -1,6 +1,7 @@
-use doser_core::error::DoserError;
+use doser_core::error::BuildError;
 use doser_core::{ControlCfg, Doser, FilterCfg, Timeouts};
 use doser_traits::{Motor, Scale};
+use rstest::rstest;
 use std::error::Error;
 use std::time::Duration;
 
@@ -26,7 +27,7 @@ impl Motor for DummyMotor {
     }
 }
 
-#[test]
+#[rstest]
 fn builder_validates_target_range() {
     // Too small
     let err = match Doser::builder()
@@ -53,7 +54,7 @@ fn builder_validates_target_range() {
     assert_is_config_err(err);
 }
 
-#[test]
+#[rstest]
 fn builder_accepts_defaults() {
     let res = Doser::builder()
         .with_scale(DummyScale::default())
@@ -71,9 +72,24 @@ fn builder_accepts_defaults() {
     }
 }
 
-fn assert_is_config_err(err: DoserError) {
-    match err {
-        DoserError::Config(_) => {}
-        other => panic!("expected Config error, got: {other:?}"),
+#[rstest]
+fn builder_missing_scale_yields_build_error() {
+    // Intentionally omit with_scale()
+    let err = Doser::builder()
+        .with_motor(DummyMotor::default())
+        .with_target_grams(10.0)
+        .try_build()
+        .expect_err("expected build error due to missing scale");
+
+    match err.downcast_ref::<BuildError>() {
+        Some(BuildError::MissingScale) => {}
+        other => panic!("expected MissingScale, got: {other:?}"),
+    }
+}
+
+fn assert_is_config_err(err: doser_core::error::Report) {
+    match err.downcast_ref::<BuildError>() {
+        Some(BuildError::InvalidConfig(_)) => {}
+        other => panic!("expected InvalidConfig build error, got: {other:?}"),
     }
 }

@@ -1,7 +1,4 @@
-use crate::{
-    Doser, DosingStatus,
-    error::{DoserError, Result},
-};
+use crate::{Doser, DosingStatus, error::Result};
 
 pub struct DefaultDosingStrategy {
     pub max_attempts: u32,
@@ -24,7 +21,7 @@ impl DefaultDosingStrategy {
                 DosingStatus::Running => { /* keep going */ }
                 DosingStatus::Aborted(e) => {
                     let _ = doser.motor_stop();
-                    return Err(e);
+                    return Err(eyre::eyre!(e.to_string()));
                 }
             }
             if attempts >= self.max_attempts {

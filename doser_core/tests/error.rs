@@ -4,6 +4,7 @@ use std::time::Duration;
 use doser_core::error::DoserError;
 use doser_core::{ControlCfg, Doser, FilterCfg, Timeouts};
 use doser_traits::{Motor, Scale};
+use rstest::rstest;
 
 /// A scale that returns OK once, then errors — to exercise error at a non-first step.
 struct FlakyScaleTimeout {
@@ -49,7 +50,7 @@ impl Motor for NopMotor {
     }
 }
 
-#[test]
+#[rstest]
 fn timeouts_map_to_dosererror_timeout() {
     let mut doser = Doser::builder()
         .with_scale(FlakyScaleTimeout { ok_sent: false })
@@ -61,23 +62,27 @@ fn timeouts_map_to_dosererror_timeout() {
             stable_ms: 0,
             coarse_speed: 1000,
             fine_speed: 200,
+            epsilon_g: 0.0,
         })
         .with_timeouts(Timeouts { sensor_ms: 10 })
         .with_target_grams(0.5)
         .apply_calibration::<()>(None)
         .build()
-        .unwrap();
+        .unwrap_or_else(|e| panic!("build: {e}"));
 
     // First step OK, second should error:
-    let _ = doser.step().unwrap();
+    let _ = doser.step().unwrap_or_else(|e| panic!("step1: {e}"));
     let err = doser.step().expect_err("expected timeout error");
-    match err {
+    let de = err
+        .downcast_ref::<DoserError>()
+        .expect("expected typed DoserError in eyre::Report");
+    match de {
         DoserError::Timeout => {}
         other => panic!("unexpected error variant: {other:?}"),
     }
 }
 
-#[test]
+#[rstest]
 fn non_timeout_hardware_errors_map_to_dosererror_hardware() {
     let mut doser = Doser::builder()
         .with_scale(FlakyScaleOtherErr { ok_sent: false })
@@ -88,17 +93,20 @@ fn non_timeout_hardware_errors_map_to_dosererror_hardware() {
         .with_target_grams(0.5)
         .apply_calibration::<()>(None)
         .build()
-        .unwrap();
+        .unwrap_or_else(|e| panic!("build: {e}"));
 
-    let _ = doser.step().unwrap();
+    let _ = doser.step().unwrap_or_else(|e| panic!("step1: {e}"));
     let err = doser.step().expect_err("expected hardware error");
-    match err {
+    let de = err
+        .downcast_ref::<DoserError>()
+        .expect("expected typed DoserError in eyre::Report");
+    match de {
         DoserError::Hardware(_) => {}
         other => panic!("unexpected error variant: {other:?}"),
     }
 }
 
-#[test]
+#[rstest]
 fn typed_hw_timeout_maps_to_timeout() {
     #[derive(Default)]
     struct NopMotor;
@@ -137,16 +145,20 @@ fn typed_hw_timeout_maps_to_timeout() {
         .with_target_grams(0.5)
         .apply_calibration::<()>(None)
         .build()
-        .unwrap();
+        .unwrap_or_else(|e| panic!("build: {e}"));
 
-    let _ = doser.step().unwrap();
-    match doser.step().expect_err("expected timeout") {
+    let _ = doser.step().unwrap_or_else(|e| panic!("step1: {e}"));
+    let err = doser.step().expect_err("expected timeout");
+    let de = err
+        .downcast_ref::<DoserError>()
+        .expect("expected typed DoserError in eyre::Report");
+    match de {
         DoserError::Timeout => {}
         other => panic!("unexpected: {other:?}"),
     }
 }
 
-#[test]
+#[rstest]
 fn typed_hw_other_maps_to_hardware_fault() {
     #[derive(Default)]
     struct NopMotor;
@@ -187,10 +199,14 @@ fn typed_hw_other_maps_to_hardware_fault() {
         .with_target_grams(0.5)
         .apply_calibration::<()>(None)
         .build()
-        .unwrap();
+        .unwrap_or_else(|e| panic!("build: {e}"));
 
-    let _ = doser.step().unwrap();
-    match doser.step().expect_err("expected hardware fault") {
+    let _ = doser.step().unwrap_or_else(|e| panic!("step1: {e}"));
+    let err = doser.step().expect_err("expected hardware fault");
+    let de = err
+        .downcast_ref::<DoserError>()
+        .expect("expected typed DoserError in eyre::Report");
+    match de {
         DoserError::HardwareFault(msg) => assert!(msg.contains("boom")),
         other => panic!("unexpected: {other:?}"),
     }

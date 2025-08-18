@@ -1,3 +1,4 @@
+use crate::error::BuildError;
 use crate::error::{DoserError, Result};
 
 pub struct DosingSessionBuilder {
@@ -26,9 +27,11 @@ impl DosingSessionBuilder {
     pub fn build(self) -> Result<DosingSession> {
         let grams = self
             .grams
-            .ok_or_else(|| DoserError::Config("grams not set".into()))?;
+            .ok_or_else(|| eyre::Report::new(BuildError::MissingTarget))?;
         if !(0.1..=5000.0).contains(&grams) {
-            return Err(DoserError::Config(format!("grams out of range: {grams}")));
+            return Err(eyre::Report::new(BuildError::InvalidConfig(
+                "grams out of range",
+            )));
         }
         Ok(DosingSession { grams })
     }
