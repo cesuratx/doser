@@ -11,4 +11,4 @@ eyre = "0.6"
 
 [dev-dependencies]
 tempfile = "3"
-rstest = "0.18"
+rstest = "0.23"

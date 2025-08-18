@@ -14,4 +14,4 @@ eyre = "0.6.12"
 tracing = "0.1"
 
 [dev-dependencies]
-rstest = "0.18"
+rstest = "0.23"

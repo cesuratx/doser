@@ -1,6 +1,7 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::error::{HwError, Result};
+use doser_traits::clock::Clock;
 
 /// Wait until the provided `is_high` predicate becomes false (i.e., line goes low),
 /// or a timeout expires. Sleeps in small intervals to avoid CPU spinning.
@@ -8,13 +9,15 @@ pub fn wait_until_low_with_timeout(
     mut is_high: impl FnMut() -> bool,
     timeout: Duration,
     poll_interval: Duration,
+    clock: &dyn Clock,
 ) -> Result<()> {
-    let deadline = Instant::now() + timeout;
+    let start = clock.now();
     while is_high() {
-        if Instant::now() >= deadline {
+        // Abort on timeout
+        if clock.ms_since(start) >= timeout.as_millis() as u64 {
             return Err(HwError::DataReadyTimeout);
         }
-        std::thread::sleep(poll_interval);
+        clock.sleep(poll_interval);
     }
     Ok(())
 }

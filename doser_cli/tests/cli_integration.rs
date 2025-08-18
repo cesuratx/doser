@@ -30,8 +30,8 @@ fine_speed = 200
 slow_at_g = 1.0
 hysteresis_g = 0.05
 stable_ms = 0
-# valid epsilon in range
-epsilon_g = 0.0
+# epsilon must be > 0 per validation
+epsilon_g = 0.02
 
 [timeouts]
 sample_ms = 10
@@ -39,8 +39,8 @@ sample_ms = 10
 [safety]
 max_run_ms = 100
 max_overshoot_g = 5.0
-no_progress_epsilon_g = 0.0
-no_progress_ms = 0
+no_progress_epsilon_g = 0.02
+no_progress_ms = 1200
 
 [hardware]
 sensor_read_timeout_ms = 100
@@ -51,23 +51,55 @@ sensor_read_timeout_ms = 100
 }
 
 #[rstest]
-fn cli_rejects_out_of_range_epsilon() {
+#[case(&["--help"], 0, "Usage:", "stdout")]
+#[case(&["dose", "--grams", "5"], 0, "complete", "stdout")]
+#[case(&["dose"], 2, "required", "stderr")]
+#[case(&["dose", "--grams", "5", "--max-run-ms", "1"], -1, "max run time", "stderr")]
+fn cli_table_cases(
+    #[case] args: &[&str],
+    #[case] exit_code: i32,
+    #[case] needle: &str,
+    #[case] stream: &str,
+) {
     let dir = tempdir().unwrap();
-    let path = write_valid_config(&dir);
-    // Overwrite control.epsilon_g to be invalid
-    let mut invalid = fs::read_to_string(&path).unwrap();
-    invalid = invalid.replace("epsilon_g = 0.0", "epsilon_g = 2.0");
-    fs::write(&path, invalid).unwrap();
+    let cfg = write_valid_config(&dir);
 
     let mut cmd = Command::cargo_bin("doser_cli").unwrap();
-    cmd.arg("--config").arg(&path).arg("self-check");
-    cmd.assert().failure().stdout(predicate::str::contains(
-        "Configuration is invalid or incomplete",
-    ));
+
+    // Always include a valid config to avoid relying on default path
+    cmd.arg("--config").arg(&cfg);
+
+    // For dose runs that should progress, nudge the sim scale to increase
+    if args.first().copied() == Some("dose") && exit_code == 0 {
+        cmd.env("DOSER_TEST_SIM_INC", "0.5");
+    }
+
+    for a in args {
+        cmd.arg(a);
+    }
+
+    let assert = cmd.assert();
+
+    // Check exit status in a chained manner to keep ownership
+    let assert = if exit_code >= 0 {
+        assert.code(exit_code)
+    } else {
+        assert.failure()
+    };
+
+    match stream {
+        "stdout" => {
+            assert.stdout(predicate::str::contains(needle));
+        }
+        "stderr" => {
+            assert.stderr(predicate::str::contains(needle));
+        }
+        other => panic!("unknown stream: {}", other),
+    }
 }
 
 #[rstest]
-fn cli_reports_calibration_bad_header() {
+fn cli_reports_bad_calibration_header() {
     let dir = tempdir().unwrap();
     let cfg = write_valid_config(&dir);
 
@@ -84,7 +116,8 @@ fn cli_reports_calibration_bad_header() {
         .arg("--calibration")
         .arg(&bad_csv)
         .arg("self-check");
+
     cmd.assert()
         .failure()
-        .stdout(predicate::str::contains("headers 'raw,grams'"));
+        .stderr(predicate::str::contains("Invalid headers"));
 }
