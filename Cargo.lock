@@ -241,6 +241,7 @@ name = "doser_config"
 version = "0.1.0"
 dependencies = [
  "csv",
+ "eyre",
  "serde",
  "toml 0.8.23",
 ]

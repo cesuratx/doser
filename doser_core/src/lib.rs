@@ -100,6 +100,8 @@ pub struct ControlCfg {
     pub coarse_speed: u32,
     /// Fine motor speed for the final approach
     pub fine_speed: u32,
+    /// Additional tolerance below target (grams) to consider completion zone
+    pub epsilon_g: f32,
 }
 
 impl Default for ControlCfg {
@@ -110,6 +112,7 @@ impl Default for ControlCfg {
             stable_ms: 250,
             coarse_speed: 1200,
             fine_speed: 250,
+            epsilon_g: 0.0,
         }
     }
 }
@@ -343,7 +346,7 @@ impl Doser {
         }
 
         // 2) Reached or exceeded target? Stop and settle (asymmetric completion)
-        if w >= self.target_g {
+        if w + self.control.epsilon_g >= self.target_g {
             let _ = self.motor_stop();
             if self.settled_since_ms.is_none() {
                 self.settled_since_ms = Some(now);

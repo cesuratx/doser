@@ -60,6 +60,7 @@ fn completes_when_in_band_and_settled() {
         stable_ms: 0,      // complete immediately when in-band
         coarse_speed: 1200,
         fine_speed: 250,
+        epsilon_g: 0.0,
     };
 
     let mut doser = Doser::builder()
@@ -296,6 +297,7 @@ fn median_filter_suppresses_spike() {
             stable_ms: 0,
             coarse_speed: 1,
             fine_speed: 1,
+            epsilon_g: 0.0,
         })
         .with_timeouts(Timeouts { sensor_ms: 1 })
         .with_target_grams(1000.0)
@@ -329,6 +331,7 @@ fn requires_time_to_settle_when_stable_ms_positive() {
             stable_ms: 10_000,
             coarse_speed: 1200,
             fine_speed: 250,
+            epsilon_g: 0.0,
         })
         .with_timeouts(Timeouts { sensor_ms: 1 })
         .with_target_grams(10.0)
@@ -393,6 +396,7 @@ fn aborts_on_no_progress_watchdog() {
             stable_ms: 10_000,
             coarse_speed: 1200,
             fine_speed: 250,
+            epsilon_g: 0.0,
         })
         .with_safety(safety)
         .with_timeouts(Timeouts { sensor_ms: 1 })
@@ -440,6 +444,7 @@ fn estop_condition_latches_until_begin() {
             stable_ms: 10_000,
             coarse_speed: 1200,
             fine_speed: 250,
+            epsilon_g: 0.0,
         })
         .with_timeouts(Timeouts { sensor_ms: 1 })
         .with_target_grams(10.0)

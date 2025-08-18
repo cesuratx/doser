@@ -121,6 +121,10 @@ fn main() -> anyhow::Result<()> {
     let cfg: Config =
         toml::from_str(&cfg_text).with_context(|| format!("parse config {:?}", cli.config))?;
 
+    // Validate configuration with clear errors
+    cfg.validate()
+        .map_err(|e| anyhow::anyhow!("invalid configuration: {}", e))?;
+
     init_tracing(
         cli.json,
         &cli.log_level,
@@ -239,6 +243,8 @@ fn run_dose(
         slow_at_g: _cfg.control.slow_at_g,
         hysteresis_g: _cfg.control.hysteresis_g,
         stable_ms: _cfg.control.stable_ms,
+        // new: control epsilon
+        epsilon_g: _cfg.control.epsilon_g,
     };
     let timeouts = doser_core::Timeouts {
         sensor_ms: _cfg.timeouts.sample_ms,

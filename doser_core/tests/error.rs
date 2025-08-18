@@ -61,6 +61,7 @@ fn timeouts_map_to_dosererror_timeout() {
             stable_ms: 0,
             coarse_speed: 1000,
             fine_speed: 200,
+            epsilon_g: 0.0,
         })
         .with_timeouts(Timeouts { sensor_ms: 10 })
         .with_target_grams(0.5)
