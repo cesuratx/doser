@@ -64,6 +64,11 @@ fn humanize(err: &eyre::Report) -> String {
         return "What happened: Configuration is invalid or incomplete.\nLikely causes: Missing [pins] (hx711_dt, hx711_sck, motor_step, motor_dir, ...), or out-of-range values.\nHow to fix: Edit the TOML config and try again.".to_string();
     }
 
+    // Calibration CSV header special-case
+    if lower.contains("calibration csv must have headers") {
+        return "Invalid headers in calibration CSV. Expected 'raw,grams'.".to_string();
+    }
+
     // Generic fallback
     let mut cause = String::new();
     if let Some(src) = err.source() {
@@ -168,7 +173,7 @@ enum Commands {
 
 fn main() -> eyre::Result<()> {
     if let Err(e) = real_main() {
-        println!("{}", humanize(&e));
+        eprintln!("{}", humanize(&e));
         std::process::exit(2);
     }
     Ok(())

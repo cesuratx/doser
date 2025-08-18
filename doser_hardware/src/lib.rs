@@ -52,8 +52,15 @@ pub mod sim {
             if std::env::var("DOSER_TEST_SIM_TIMEOUT").ok().as_deref() == Some("1") {
                 return Err("sensor timeout".into());
             }
-            // Convert grams → a pretend "raw" reading. Core can treat this as grams if desired.
-            Ok((self.grams * 1000.0) as i32)
+            // Optional test hook: increment grams per read to simulate progress
+            if let Ok(inc) = std::env::var("DOSER_TEST_SIM_INC") {
+                if let Ok(delta) = inc.parse::<f32>() {
+                    self.grams = (self.grams + delta).max(0.0);
+                }
+            }
+            // For the sim, return a raw value equal to grams so default core calibration
+            // (gain=1, offset=0) interprets it as grams directly.
+            Ok(self.grams as i32)
         }
     }
 

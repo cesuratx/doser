@@ -34,4 +34,4 @@ hardware = ["doser_hardware/hardware"]
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
-rstest = "0.18"
+rstest = "0.23"
