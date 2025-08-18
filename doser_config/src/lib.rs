@@ -1,5 +1,20 @@
 use serde::Deserialize;
 
+/// Calibration CSV schema.
+///
+/// Expected headers:
+/// raw,grams
+///
+/// Example:
+/// raw,grams
+/// 842913,0.0
+/// 1024913,100.0
+#[derive(Debug, Deserialize, Clone, Copy)]
+pub struct CalibrationRow {
+    pub raw: i64,
+    pub grams: f32,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Pins {
     pub hx711_dt: u8,
@@ -106,34 +121,63 @@ pub struct Calibration {
     pub scale_factor: f32,
 }
 
-pub fn load_calibration_csv(path: &std::path::Path) -> std::io::Result<Calibration> {
+impl Calibration {
+    /// Build Calibration from at least two rows: grams ~= gain * (raw - offset)
+    pub fn from_rows(rows: Vec<CalibrationRow>) -> eyre::Result<Self> {
+        if rows.len() < 2 {
+            eyre::bail!("calibration requires at least two rows, got {}", rows.len());
+        }
+        let r1 = rows[0];
+        let r2 = rows[1];
+        if (r2.raw - r1.raw) == 0 {
+            eyre::bail!("calibration rows have identical raw values; cannot compute scale factor");
+        }
+        let dr = (r2.raw - r1.raw) as f32;
+        let dg = r2.grams - r1.grams;
+        let gain = dg / dr; // grams per count
+        if !gain.is_finite() || gain == 0.0 {
+            eyre::bail!("calibration produced invalid gain: {}", gain);
+        }
+        let offset_f = r1.raw as f32 - (r1.grams / gain);
+        let offset_i32 = offset_f.round() as i32;
+        Ok(Calibration {
+            offset: offset_i32,
+            scale_factor: gain,
+        })
+    }
+}
+
+pub fn load_calibration_csv(path: &std::path::Path) -> eyre::Result<Calibration> {
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(true)
-        .from_path(path)?;
-    let mut offset = None;
-    let mut scale_factor = None;
+        .from_path(path)
+        .map_err(|e| eyre::eyre!("open calibration CSV {:?}: {}", path, e))?;
 
-    for rec in rdr.deserialize::<(String, String, String)>() {
-        let (kind, key, value) = rec?;
-        if kind == "scale" && key == "offset" {
-            offset = Some(
-                value
-                    .parse::<i32>()
-                    .map_err(|_| std::io::ErrorKind::InvalidData)?,
-            );
-        } else if kind == "scale" && key == "scale_factor" {
-            scale_factor = Some(
-                value
-                    .parse::<f32>()
-                    .map_err(|_| std::io::ErrorKind::InvalidData)?,
-            );
+    // Enforce exact headers
+    let headers = rdr
+        .headers()
+        .map_err(|e| eyre::eyre!("read CSV headers {:?}: {}", path, e))?
+        .clone();
+    let expected = ["raw", "grams"];
+    let actual: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
+    if actual != expected {
+        eyre::bail!(
+            "calibration CSV must have headers 'raw,grams', got: {}",
+            actual.join(",")
+        );
+    }
+
+    let mut rows = Vec::new();
+    for (idx, rec) in rdr.deserialize::<CalibrationRow>().enumerate() {
+        match rec {
+            Ok(row) => rows.push(row),
+            Err(e) => {
+                eyre::bail!("invalid CSV row {}: {}", idx + 2, e);
+            }
         }
     }
 
-    Ok(Calibration {
-        offset: offset.ok_or(std::io::ErrorKind::InvalidData)?,
-        scale_factor: scale_factor.ok_or(std::io::ErrorKind::InvalidData)?,
-    })
+    Calibration::from_rows(rows)
 }
 
 impl Config {

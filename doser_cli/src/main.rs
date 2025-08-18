@@ -1,9 +1,9 @@
 use std::{fs, path::PathBuf};
 
-use anyhow::Context;
 use clap::{ArgAction, Parser, Subcommand};
 use doser_config::{load_calibration_csv, Calibration, Config};
 use doser_core::{error::Result as CoreResult, Doser, DosingStatus};
+use eyre::WrapErr;
 
 use std::sync::OnceLock;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -109,18 +109,17 @@ enum Commands {
     SelfCheck,
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> eyre::Result<()> {
     let cli = Cli::parse();
 
     // 1) Load typed config from TOML (for logging.file)
-    let cfg_text =
-        fs::read_to_string(&cli.config).with_context(|| format!("read config {:?}", cli.config))?;
+    let cfg_text = fs::read_to_string(&cli.config)
+        .wrap_err_with(|| format!("read config {:?}", cli.config))?;
     let cfg: Config =
-        toml::from_str(&cfg_text).with_context(|| format!("parse config {:?}", cli.config))?;
+        toml::from_str(&cfg_text).wrap_err_with(|| format!("parse config {:?}", cli.config))?;
 
     // Validate configuration with clear errors
-    cfg.validate()
-        .map_err(|e| anyhow::anyhow!("invalid configuration: {}", e))?;
+    cfg.validate().wrap_err("invalid configuration")?;
 
     init_tracing(
         cli.json,
@@ -132,8 +131,8 @@ fn main() -> anyhow::Result<()> {
     // 2) Load calibration if provided
     let calib: Option<Calibration> = match &cli.calibration {
         Some(p) => {
-            let c =
-                load_calibration_csv(p).with_context(|| format!("parse calibration {:?}", p))?;
+            let c = load_calibration_csv(p)
+                .map_err(|e| eyre::eyre!("parse calibration {:?}: {}", p, e))?;
             Some(c)
         }
         None => None,
@@ -148,13 +147,13 @@ fn main() -> anyhow::Result<()> {
             cfg.pins.hx711_sck,
             cfg.hardware.sensor_read_timeout_ms,
         )
-        .context("open HX711")?;
+        .wrap_err("open HX711")?;
         let motor = HardwareMotor::try_new_with_en(
             cfg.pins.motor_step,
             cfg.pins.motor_dir,
             cfg.pins.motor_en,
         )
-        .context("open motor pins")?;
+        .wrap_err("open motor pins")?;
         (Box::new(scale), Box::new(motor))
     };
 
