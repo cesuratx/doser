@@ -83,8 +83,9 @@ pub mod hardware {
     use rppal::gpio::{Gpio, OutputPin};
     use std::error::Error;
     use std::sync::{
+        Arc,
         atomic::{AtomicBool, AtomicU32, Ordering},
-        mpsc, Arc,
+        mpsc,
     };
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
@@ -107,7 +108,10 @@ pub mod hardware {
             // TODO: integrate actual HX711 driver
             Ok(Self)
         }
-        fn read_raw_timeout(&mut self, _timeout: Duration) -> Result<i32, Box<dyn Error + Send + Sync>> {
+        fn read_raw_timeout(
+            &mut self,
+            _timeout: Duration,
+        ) -> Result<i32, Box<dyn Error + Send + Sync>> {
             Ok(0)
         }
     }
@@ -131,11 +135,17 @@ pub mod hardware {
         /// Create a motor from GPIO pin numbers. EN is optional (active-low enable).
         pub fn try_new(step_pin: u8, dir_pin: u8) -> Result<Self> {
             let gpio = Gpio::new().context("open GPIO")?;
-            let mut step = gpio.get(step_pin).context("get STEP pin")?.into_output_low();
+            let mut step = gpio
+                .get(step_pin)
+                .context("get STEP pin")?
+                .into_output_low();
             let dir = gpio.get(dir_pin).context("get DIR pin")?.into_output_low();
 
             // Optional enable pin: read from env or leave None; adjust as you wire config.
-            let en = match std::env::var("DOSER_EN_PIN").ok().and_then(|s| s.parse::<u8>().ok()) {
+            let en = match std::env::var("DOSER_EN_PIN")
+                .ok()
+                .and_then(|s| s.parse::<u8>().ok())
+            {
                 Some(en_pin) => Some(gpio.get(en_pin).context("get EN pin")?.into_output_high()), // high = disabled
                 None => None,
             };
@@ -149,7 +159,9 @@ pub mod hardware {
             // Move STEP into the background thread; not used elsewhere.
             let handle = thread::spawn(move || {
                 loop {
-                    if shutdown_rx.try_recv().is_ok() { break; }
+                    if shutdown_rx.try_recv().is_ok() {
+                        break;
+                    }
                     let is_running = running_bg.load(Ordering::Relaxed);
                     let sps_val = sps_bg.load(Ordering::Relaxed).clamp(0, 5_000);
                     if is_running && sps_val > 0 {
@@ -186,13 +198,21 @@ pub mod hardware {
 
         /// Set direction: true = clockwise (DIR high), false = counterclockwise (DIR low)
         pub fn set_direction(&mut self, clockwise: bool) {
-            if clockwise { let _ = self.dir.set_high(); } else { let _ = self.dir.set_low(); }
+            if clockwise {
+                let _ = self.dir.set_high();
+            } else {
+                let _ = self.dir.set_low();
+            }
         }
 
         /// Enable or disable the driver (active-low enable pin, if present)
         pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
             if let Some(en) = self.en.as_mut() {
-                if enabled { en.set_low(); } else { en.set_high(); }
+                if enabled {
+                    en.set_low();
+                } else {
+                    en.set_high();
+                }
             }
             Ok(())
         }
@@ -217,7 +237,8 @@ pub mod hardware {
 
     impl Motor for HardwareMotor {
         fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-            self.set_enabled(true).map_err(|e| Box::<dyn Error + Send + Sync>::from(e))?;
+            self.set_enabled(true)
+                .map_err(|e| Box::<dyn Error + Send + Sync>::from(e))?;
             self.running.store(true, Ordering::Relaxed);
             info!("motor started");
             Ok(())
@@ -242,7 +263,9 @@ pub mod hardware {
 
     /// Very small spin to make edges clean.
     #[inline(always)]
-    fn spin_delay_min() { std::hint::spin_loop(); }
+    fn spin_delay_min() {
+        std::hint::spin_loop();
+    }
 
     /// Sleep for microseconds using std; coarse but sufficient for <= 5 kHz.
     fn spin_sleep_us(us: u64) {
@@ -260,11 +283,13 @@ pub mod hardware {
         let pin = gpio.get(pin).context("get E-STOP pin")?.into_input();
         let flag = Arc::new(AtomicBool::new(false));
         let flag_bg = flag.clone();
-        thread::spawn(move || loop {
-            let level_low = pin.read() == rppal::gpio::Level::Low;
-            let active = if active_low { level_low } else { !level_low };
-            flag_bg.store(active, Ordering::Relaxed);
-            thread::sleep(Duration::from_millis(poll_ms.max(1)));
+        thread::spawn(move || {
+            loop {
+                let level_low = pin.read() == rppal::gpio::Level::Low;
+                let active = if active_low { level_low } else { !level_low };
+                flag_bg.store(active, Ordering::Relaxed);
+                thread::sleep(Duration::from_millis(poll_ms.max(1)));
+            }
         });
         Ok(Box::new(move || flag.load(Ordering::Relaxed)))
     }
