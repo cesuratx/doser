@@ -9,6 +9,10 @@
 
 pub mod error;
 
+// Only compile the HX711 driver when the hardware feature is enabled.
+#[cfg(feature = "hardware")]
+mod hx711;
+
 #[cfg(not(feature = "hardware"))]
 pub mod sim {
     use doser_traits::{Motor, Scale};
@@ -80,7 +84,7 @@ pub mod sim {
 pub mod hardware {
     use anyhow::{Context, Result};
     use doser_traits::{Motor, Scale};
-    use rppal::gpio::{Gpio, OutputPin};
+    use rppal::gpio::{Gpio, InputPin, OutputPin};
     use std::error::Error;
     use std::sync::{
         Arc,
@@ -88,8 +92,10 @@ pub mod hardware {
         mpsc,
     };
     use std::thread::{self, JoinHandle};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     use tracing::{info, warn};
+
+    use crate::hx711::Hx711;
 
     /// Simple error wrapper to avoid unwraps in hardware paths.
     #[derive(Debug)]
@@ -101,18 +107,32 @@ pub mod hardware {
     }
     impl Error for HwErr {}
 
-    /// Hardware scale backed by HX711 (skeleton).
-    pub struct HardwareScale;
+    /// HX711-backed hardware scale.
+    pub struct HardwareScale {
+        hx: Hx711,
+    }
     impl HardwareScale {
-        pub fn try_new(_dt_pin: u8, _sck_pin: u8) -> Result<Self> {
-            // TODO: integrate actual HX711 driver
-            Ok(Self)
+        /// Open GPIO pins and construct the HX711 interface.
+        /// dt_pin: data pin (input), sck_pin: clock pin (output, starts low)
+        pub fn try_new(dt_pin: u8, sck_pin: u8) -> Result<Self> {
+            let gpio = Gpio::new().context("open GPIO for HX711")?;
+            let dt: InputPin = gpio.get(dt_pin).context("open HX711 DT pin")?.into_input();
+            let sck: OutputPin = gpio
+                .get(sck_pin)
+                .context("open HX711 SCK pin")?
+                .into_output_low();
+            // Channel A, gain=128 → 25 pulses after 24-bit read
+            let hx = Hx711::new(dt, sck, 25).context("init HX711")?;
+            Ok(Self { hx })
         }
+        /// Delegate to HX711 read with timeout; map error to boxed dyn error for the trait.
         fn read_raw_timeout(
             &mut self,
-            _timeout: Duration,
+            timeout: Duration,
         ) -> Result<i32, Box<dyn Error + Send + Sync>> {
-            Ok(0)
+            self.hx
+                .read_with_timeout(timeout)
+                .map_err(|e| -> Box<dyn Error + Send + Sync> { Box::new(e) })
         }
     }
     impl Scale for HardwareScale {
@@ -132,8 +152,17 @@ pub mod hardware {
     }
 
     impl HardwareMotor {
-        /// Create a motor from GPIO pin numbers. EN is optional (active-low enable).
+        /// Create a motor from GPIO pin numbers. EN is taken from the DOSER_EN_PIN env var if present.
         pub fn try_new(step_pin: u8, dir_pin: u8) -> Result<Self> {
+            let en_env = std::env::var("DOSER_EN_PIN")
+                .ok()
+                .and_then(|s| s.parse::<u8>().ok());
+            Self::try_new_with_en(step_pin, dir_pin, en_env)
+        }
+
+        /// Create a motor from GPIO pin numbers with an optional enable pin.
+        /// Note: On A4988/DRV8825, EN is active-low (low = enabled). We default to disabled (high).
+        pub fn try_new_with_en(step_pin: u8, dir_pin: u8, en_pin: Option<u8>) -> Result<Self> {
             let gpio = Gpio::new().context("open GPIO")?;
             let mut step = gpio
                 .get(step_pin)
@@ -141,12 +170,8 @@ pub mod hardware {
                 .into_output_low();
             let dir = gpio.get(dir_pin).context("get DIR pin")?.into_output_low();
 
-            // Optional enable pin: read from env or leave None; adjust as you wire config.
-            let en = match std::env::var("DOSER_EN_PIN")
-                .ok()
-                .and_then(|s| s.parse::<u8>().ok())
-            {
-                Some(en_pin) => Some(gpio.get(en_pin).context("get EN pin")?.into_output_high()), // high = disabled
+            let en = match en_pin {
+                Some(pin) => Some(gpio.get(pin).context("get EN pin")?.into_output_high()), // high = disabled
                 None => None,
             };
 

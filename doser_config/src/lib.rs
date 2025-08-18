@@ -6,6 +6,7 @@ pub struct Pins {
     pub hx711_sck: u8,
     pub motor_step: u8,
     pub motor_dir: u8,
+    pub motor_en: Option<u8>,
     pub estop_in: Option<u8>,
 }
 
