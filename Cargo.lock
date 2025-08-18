@@ -264,6 +264,7 @@ dependencies = [
 name = "doser_hardware"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "doser_traits",
  "rppal",
  "thiserror 1.0.69",

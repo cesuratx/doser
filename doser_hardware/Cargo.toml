@@ -7,10 +7,9 @@ edition = "2024"
 doser_traits = { path = "../doser_traits" }
 thiserror = "1"
 tracing = "0.1"
+anyhow = "1"
+rppal = { version = "0.17", optional = true }
 
 [features]
-# Hardware feature flips on hardware-backed modules, but rppal is only pulled on ARM targets.
-hardware = []
-
-[target.'cfg(any(target_arch = "arm", target_arch = "aarch64"))'.dependencies]
-rppal = "0.17"
+default = []
+hardware = ["rppal"]
