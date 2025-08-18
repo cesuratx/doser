@@ -7,6 +7,8 @@ hx711_sck = 6
 # Stepper pins
 motor_step = 13
 motor_dir = 19
+# Optional enable (active-low). Uncomment and set if wired.
+# motor_en = 18
 # Optional E-Stop input
 estop_in = 26
 

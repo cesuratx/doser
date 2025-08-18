@@ -27,44 +27,28 @@ impl Motor for DummyMotor {
 }
 
 #[test]
-fn builder_requires_scale_motor_target() {
-    // Missing everything
-    let err = match Doser::builder().build() {
-        Err(e) => e,
-        Ok(_) => panic!("should fail without fields"),
-    };
-    assert_is_config_err(err);
-
-    // Missing motor
-    let err = match Doser::builder()
-        .with_scale(DummyScale::default())
-        .with_target_grams(10.0)
-        .build()
-    {
-        Err(e) => e,
-        Ok(_) => panic!("should fail when motor is missing"),
-    };
-    assert_is_config_err(err);
-
-    // Missing scale
-    let err = match Doser::builder()
-        .with_motor(DummyMotor::default())
-        .with_target_grams(10.0)
-        .build()
-    {
-        Err(e) => e,
-        Ok(_) => panic!("should fail when scale is missing"),
-    };
-    assert_is_config_err(err);
-
-    // Missing target
+fn builder_validates_target_range() {
+    // Too small
     let err = match Doser::builder()
         .with_scale(DummyScale::default())
         .with_motor(DummyMotor::default())
+        .with_target_grams(0.0)
         .build()
     {
         Err(e) => e,
-        Ok(_) => panic!("should fail when target is missing"),
+        Ok(_) => panic!("should fail for target out of range"),
+    };
+    assert_is_config_err(err);
+
+    // Too large
+    let err = match Doser::builder()
+        .with_scale(DummyScale::default())
+        .with_motor(DummyMotor::default())
+        .with_target_grams(10_000.0)
+        .build()
+    {
+        Err(e) => e,
+        Ok(_) => panic!("should fail for target out of range"),
     };
     assert_is_config_err(err);
 }

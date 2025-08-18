@@ -4,11 +4,14 @@
 //! - `hardware`: enable Raspberry Pi GPIO/HX711-backed implementations.
 //! - (default) no `hardware` feature: use simulation types that satisfy the traits.
 //!
-//! Note: The `rppal` dependency is only enabled on ARM targets; on x86 CI we
-//!       still compile the hardware feature, but rppal-specific code is gated
-//!       by target_arch to allow builds to succeed.
+//! Note: The `rppal` dependency is optional and only enabled when the `hardware`
+//!       feature is active. This lets CI on x86 build without pulling GPIO libs.
 
 pub mod error;
+
+// Make the HX711 driver module available when hardware feature is enabled.
+#[cfg(feature = "hardware")]
+mod hx711;
 
 #[cfg(not(feature = "hardware"))]
 pub mod sim {
@@ -79,137 +82,233 @@ pub mod sim {
 
 #[cfg(feature = "hardware")]
 pub mod hardware {
+    use crate::hx711::Hx711;
+    use anyhow::{Context, Result};
     use doser_traits::{Motor, Scale};
+    use rppal::gpio::{Gpio, InputPin, OutputPin};
     use std::error::Error;
-    use std::fmt::{Display, Formatter};
-    use std::time::{Duration, Instant};
-
-    // Bring in rppal for actual GPIO when you wire it up.
-    // use rppal::gpio::{Gpio, InputPin, OutputPin};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+        mpsc,
+    };
+    use std::thread::{self, JoinHandle};
+    use std::time::Duration;
+    use tracing::{info, warn};
 
     /// Simple error wrapper to avoid unwraps in hardware paths.
     #[derive(Debug)]
-    struct HwErr(String);
-    impl Display for HwErr {
-        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    struct HwErr(&'static str);
+    impl std::fmt::Display for HwErr {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(f, "hardware error: {}", self.0)
         }
     }
     impl Error for HwErr {}
 
-    /// Hardware scale backed by HX711 (skeleton).
-    /// Fill in pin types and HX711 driver hookup inside.
+    /// Hardware scale backed by HX711.
     pub struct HardwareScale {
-        // dt: InputPin,
-        // sck: OutputPin,
-        // gain_pulses: u8,
-        // offset: i32,
-        // scale_factor: f32,
+        hx: Hx711,
     }
 
     impl HardwareScale {
-        /// Fallible constructor — never unwrap.
-        pub fn try_new(
-            _dt_pin: u8,
-            _sck_pin: u8,
-            // _gain_pulses: u8,
-        ) -> Result<Self, Box<dyn Error + Send + Sync>> {
-            // let gpio = Gpio::new().map_err(|e| HwErr(format!("gpio: {e}")))?;
-            // let dt = gpio.get(_dt_pin).map_err(|e| HwErr(format!("dt pin: {e}")))?.into_input();
-            // let sck = gpio.get(_sck_pin).map_err(|e| HwErr(format!("sck pin: {e}")))?.into_output();
-            Ok(Self {
-                // dt,
-                // sck,
-                // gain_pulses: _gain_pulses,
-                // offset: 0,
-                // scale_factor: 1.0,
-            })
+        /// Create a new HX711-backed scale using DT and SCK GPIO pins.
+        pub fn try_new(dt_pin: u8, sck_pin: u8) -> Result<Self> {
+            let gpio = Gpio::new().context("open GPIO for HX711")?;
+            let dt = gpio.get(dt_pin).context("get HX711 DT pin")?.into_input();
+            let sck = gpio
+                .get(sck_pin)
+                .context("get HX711 SCK pin")?
+                .into_output_low();
+            // Channel A, gain = 128 uses 25 pulses after the 24-bit read.
+            let hx = Hx711::new(dt, sck, 25)?;
+            Ok(Self { hx })
         }
 
-        /// Example of a timed raw read. Replace body with your HX711 read logic.
+        /// Read a raw 24-bit value from HX711 with timeout.
         fn read_raw_timeout(
             &mut self,
             timeout: Duration,
         ) -> Result<i32, Box<dyn Error + Send + Sync>> {
-            let _deadline = Instant::now() + timeout;
-            // Wait for DRDY (DT low), then clock out 24 bits, sign-extend.
-            // For now, return a stub value so the type-check passes:
-            Ok(0)
+            self.hx
+                .read_with_timeout(timeout)
+                .map_err(|e| -> Box<dyn Error + Send + Sync> { Box::new(e) })
         }
     }
 
     impl Scale for HardwareScale {
         fn read(&mut self, timeout: Duration) -> Result<i32, Box<dyn Error + Send + Sync>> {
-            // If you keep a scale_factor/offset internally, apply here; otherwise
-            // return raw i32 and let core interpret it.
             self.read_raw_timeout(timeout)
         }
     }
 
-    /// Hardware motor backed by your step/dir driver (skeleton).
+    /// Raspberry Pi step/dir motor driver with optional enable pin.
     pub struct HardwareMotor {
-        // step: OutputPin,
-        // dir: OutputPin,
-        running: bool,
-        speed_sps: u32,
+        dir: OutputPin,
+        en: Option<OutputPin>,
+        running: Arc<AtomicBool>,
+        sps: Arc<AtomicU32>,
+        handle: Option<JoinHandle<()>>,
+        shutdown_tx: mpsc::Sender<()>,
     }
 
     impl HardwareMotor {
-        /// Fallible constructor — never unwrap.
-        pub fn try_new(_step_pin: u8, _dir_pin: u8) -> Result<Self, Box<dyn Error + Send + Sync>> {
-            // let gpio = Gpio::new().map_err(|e| HwErr(format!("gpio: {e}")))?;
-            // let step = gpio.get(_step_pin).map_err(|e| HwErr(format!("step pin: {e}")))?.into_output();
-            // let dir  = gpio.get(_dir_pin ).map_err(|e| HwErr(format!("dir pin: {e}")))?.into_output();
-            Ok(Self {
-                // step,
-                // dir,
-                running: false,
-                speed_sps: 0,
-            })
+        /// Create a motor from GPIO pin numbers. EN is taken from the DOSER_EN_PIN env var if present.
+        pub fn try_new(step_pin: u8, dir_pin: u8) -> Result<Self> {
+            let en_env = std::env::var("DOSER_EN_PIN")
+                .ok()
+                .and_then(|s| s.parse::<u8>().ok());
+            Self::try_new_with_en(step_pin, dir_pin, en_env)
+        }
+
+        /// Create a motor from GPIO pin numbers with an optional enable pin.
+        /// Note: On A4988/DRV8825, EN is active-low (low = enabled). We default to disabled (high).
+        pub fn try_new_with_en(step_pin: u8, dir_pin: u8, en_pin: Option<u8>) -> Result<Self> {
+            let gpio = Gpio::new().context("open GPIO")?;
+            let mut step = gpio
+                .get(step_pin)
+                .context("get STEP pin")?
+                .into_output_low();
+            let dir = gpio.get(dir_pin).context("get DIR pin")?.into_output_low();
+
+            let en = match en_pin {
+                Some(pin) => Some(gpio.get(pin).context("get EN pin")?.into_output_high()), // high = disabled
+                None => None,
+            };
+
+            let running = Arc::new(AtomicBool::new(false));
+            let sps = Arc::new(AtomicU32::new(0));
+            let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
+
+            let running_bg = running.clone();
+            let sps_bg = sps.clone();
+            // Move STEP into the background thread; not used elsewhere.
+            let handle = thread::spawn(move || {
+                loop {
+                    if shutdown_rx.try_recv().is_ok() {
+                        break;
+                    }
+                    let is_running = running_bg.load(Ordering::Relaxed);
+                    let sps_val = sps_bg.load(Ordering::Relaxed).clamp(0, 5_000);
+                    if is_running && sps_val > 0 {
+                        let period_us = 1_000_000u32 / sps_val; // total period in microseconds
+                        let half = (period_us / 2).max(1);
+                        // Rising edge
+                        let _ = step.set_high();
+                        spin_delay_min();
+                        // High hold
+                        spin_sleep_us(half as u64);
+                        // Falling edge
+                        let _ = step.set_low();
+                        spin_delay_min();
+                        // Low hold
+                        spin_sleep_us(half as u64);
+                    } else {
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                }
+            });
+
+            let mut motor = Self {
+                dir,
+                en,
+                running,
+                sps,
+                handle: Some(handle),
+                shutdown_tx,
+            };
+            // Default: disabled
+            let _ = motor.set_enabled(false);
+            Ok(motor)
+        }
+
+        /// Set direction: true = clockwise (DIR high), false = counterclockwise (DIR low)
+        pub fn set_direction(&mut self, clockwise: bool) {
+            if clockwise {
+                let _ = self.dir.set_high();
+            } else {
+                let _ = self.dir.set_low();
+            }
+        }
+
+        /// Enable or disable the driver (active-low enable pin, if present)
+        pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
+            if let Some(en) = self.en.as_mut() {
+                if enabled {
+                    en.set_low();
+                } else {
+                    en.set_high();
+                }
+            }
+            Ok(())
+        }
+
+        /// Set speed in steps-per-second; worker thread reads this atomically.
+        pub fn set_speed_sps(&mut self, sps: u32) {
+            self.sps.store(sps, Ordering::Relaxed);
+        }
+    }
+
+    impl Drop for HardwareMotor {
+        fn drop(&mut self) {
+            let _ = self.shutdown_tx.send(());
+            self.running.store(false, Ordering::Relaxed);
+            if let Some(h) = self.handle.take() {
+                let _ = h.join();
+            }
+            // Disable on drop
+            let _ = self.set_enabled(false);
         }
     }
 
     impl Motor for HardwareMotor {
         fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-            // Enable your driver if needed
-            self.running = true;
+            self.set_enabled(true)
+                .map_err(|e| Box::<dyn Error + Send + Sync>::from(e))?;
+            self.running.store(true, Ordering::Relaxed);
+            info!("motor started");
             Ok(())
         }
 
         fn set_speed(&mut self, sps: u32) -> Result<(), Box<dyn Error + Send + Sync>> {
-            // Program your stepper pulse timing here
-            self.speed_sps = sps;
+            let clamped = sps.clamp(0, 5_000);
+            if clamped == 0 {
+                warn!("requested 0 sps; motor will idle");
+            }
+            self.set_speed_sps(clamped);
             Ok(())
         }
 
         fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-            // Disable driver / stop pulsing
-            self.speed_sps = 0;
-            self.running = false;
+            self.running.store(false, Ordering::Relaxed);
+            self.set_speed_sps(0);
+            info!("motor stopped");
             Ok(())
         }
     }
 
-    #[cfg(feature = "hardware")]
-    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    /// Very small spin to make edges clean.
+    #[inline(always)]
+    fn spin_delay_min() {
+        std::hint::spin_loop();
+    }
+
+    /// Sleep for microseconds using std; coarse but sufficient for <= 5 kHz.
+    fn spin_sleep_us(us: u64) {
+        std::thread::sleep(Duration::from_micros(us));
+    }
+
+    /// E-stop checker: on ARM, read from a GPIO and expose as closure.
     pub fn make_estop_checker(
         pin: u8,
         active_low: bool,
         poll_ms: u64,
-    ) -> Result<Box<dyn Fn() -> bool + Send + Sync>, Box<dyn std::error::Error + Send + Sync>> {
-        use rppal::gpio::Gpio;
-        use std::sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        };
-        use std::thread;
-        use std::time::Duration;
-
-        let gpio = Gpio::new()?;
-        let pin = gpio.get(pin)?.into_input();
+    ) -> Result<Box<dyn Fn() -> bool + Send + Sync>> {
+        use std::sync::atomic::AtomicBool;
+        let gpio = Gpio::new().context("open GPIO")?;
+        let pin = gpio.get(pin).context("get E-STOP pin")?.into_input();
         let flag = Arc::new(AtomicBool::new(false));
         let flag_bg = flag.clone();
-
         thread::spawn(move || {
             loop {
                 let level_low = pin.read() == rppal::gpio::Level::Low;
@@ -218,19 +317,7 @@ pub mod hardware {
                 thread::sleep(Duration::from_millis(poll_ms.max(1)));
             }
         });
-
         Ok(Box::new(move || flag.load(Ordering::Relaxed)))
-    }
-
-    #[cfg(feature = "hardware")]
-    #[cfg(not(any(target_arch = "arm", target_arch = "aarch64")))]
-    pub fn make_estop_checker(
-        _pin: u8,
-        _active_low: bool,
-        _poll_ms: u64,
-    ) -> Result<Box<dyn Fn() -> bool + Send + Sync>, Box<dyn std::error::Error + Send + Sync>> {
-        // Non-ARM platforms: return a stub that never trips.
-        Ok(Box::new(|| false))
     }
 }
 
@@ -239,7 +326,4 @@ pub mod hardware {
 pub use sim::{SimulatedMotor, SimulatedScale};
 
 #[cfg(feature = "hardware")]
-pub use hardware::{HardwareMotor, HardwareScale};
-
-#[cfg(feature = "hardware")]
-pub use hardware::make_estop_checker;
+pub use hardware::{HardwareMotor, HardwareScale, make_estop_checker};

@@ -136,8 +136,12 @@ fn main() -> anyhow::Result<()> {
         use doser_hardware::{HardwareMotor, HardwareScale};
         let scale =
             HardwareScale::try_new(cfg.pins.hx711_dt, cfg.pins.hx711_sck).context("open HX711")?;
-        let motor = HardwareMotor::try_new(cfg.pins.motor_step, cfg.pins.motor_dir)
-            .context("open motor")?;
+        let motor = HardwareMotor::try_new_with_en(
+            cfg.pins.motor_step,
+            cfg.pins.motor_dir,
+            cfg.pins.motor_en,
+        )
+        .context("open motor")?;
         (scale, motor)
     };
 
