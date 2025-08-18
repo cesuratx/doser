@@ -49,7 +49,7 @@ pub struct Timeouts {
     pub sample_ms: u64,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct Safety {
     pub max_run_ms: u64,
@@ -57,6 +57,17 @@ pub struct Safety {
     // Abort if weight change < epsilon for at least this many ms (0 disables)
     pub no_progress_epsilon_g: f32,
     pub no_progress_ms: u64,
+}
+
+impl Default for Safety {
+    fn default() -> Self {
+        Self {
+            max_run_ms: 0,
+            max_overshoot_g: 0.0,
+            no_progress_epsilon_g: 0.02,
+            no_progress_ms: 1200,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -206,8 +217,13 @@ impl Config {
         if self.safety.max_overshoot_g < 0.0 {
             eyre::bail!("safety.max_overshoot_g must be >= 0.0");
         }
-        if self.safety.no_progress_epsilon_g < 0.0 || self.safety.no_progress_epsilon_g > 1.0 {
-            eyre::bail!("safety.no_progress_epsilon_g must be in [0.0, 1.0]");
+        if self.safety.no_progress_epsilon_g <= 0.0
+            || self.safety.no_progress_epsilon_g > 1.0
+        {
+            eyre::bail!("safety.no_progress_epsilon_g must be in (0.0, 1.0]");
+        }
+        if self.safety.no_progress_ms == 0 {
+            eyre::bail!("safety.no_progress_ms must be >= 1");
         }
         if self.safety.no_progress_ms > 24 * 60 * 60 * 1000 {
             eyre::bail!("safety.no_progress_ms is unreasonably large (>24h)");

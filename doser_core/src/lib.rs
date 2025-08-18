@@ -7,12 +7,20 @@ pub mod error;
 
 use crate::error::BuildError;
 use crate::error::{DoserError, Result};
-use eyre::Context;
+use eyre::WrapErr;
 use std::collections::VecDeque;
-use std::time::Duration; // for .wrap_err on Results
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 // For typed hardware error mapping
 use doser_hardware::error::HwError;
+
+// Monotonic clock base for SystemClock
+static START: OnceLock<Instant> = OnceLock::new();
+pub fn now_ms() -> u64 {
+    let start = START.get_or_init(Instant::now);
+    start.elapsed().as_millis() as u64
+}
 
 /// Testable clock abstraction returning monotonic milliseconds.
 pub trait Clock: Send + Sync {
@@ -24,11 +32,7 @@ pub trait Clock: Send + Sync {
 pub struct SystemClock;
 impl Clock for SystemClock {
     fn now_ms(&self) -> u64 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64
+        now_ms()
     }
 }
 
@@ -178,13 +182,16 @@ pub struct Doser {
     med_buf: VecDeque<f32>,
     // Motor lifecycle
     motor_started: bool,
-    // Optional E-stop callback; if returns true, abort immediately
+    // Optional E-stop callback; if returns true, abort immediately (after debounce)
     estop_check: Option<Box<dyn Fn() -> bool>>,
     // No-progress watchdog
     last_progress_w: f32,
     last_progress_at_ms: u64,
     // Latch E-stop condition until begin() is called again
     estop_latched: bool,
+    // Debounce config and counter
+    estop_debounce_n: u8,
+    estop_count: u8,
 }
 
 impl core::fmt::Debug for Doser {
@@ -231,6 +238,7 @@ impl Doser {
         self.last_progress_w = 0.0;
         self.last_progress_at_ms = now;
         self.estop_latched = false;
+        self.estop_count = 0;
     }
 
     /// Stop the motor (best-effort).
@@ -239,6 +247,21 @@ impl Doser {
             .stop()
             .map_err(|e| eyre::Report::new(map_hw_error_dyn(&*e)))
             .wrap_err("motor_stop")
+    }
+
+    /// Poll the E-stop input with debounce; returns true if latched.
+    fn poll_estop(&mut self) -> bool {
+        if let Some(check) = &self.estop_check {
+            if check() {
+                self.estop_count = self.estop_count.saturating_add(1);
+                if self.estop_count >= self.estop_debounce_n {
+                    self.estop_latched = true;
+                }
+            } else {
+                self.estop_count = 0;
+            }
+        }
+        self.estop_latched
     }
 
     fn apply_filter(&mut self, w: f32) -> f32 {
@@ -284,18 +307,9 @@ impl Doser {
     /// - returns `Running`, `Complete`, or `Aborted(err)`
     pub fn step(&mut self) -> Result<DosingStatus> {
         // If previously estopped, keep aborting until reset via begin()
-        if self.estop_latched {
+        if self.estop_latched || self.poll_estop() {
             let _ = self.motor_stop();
             return Ok(DosingStatus::Aborted(DoserError::State("estop".into())));
-        }
-
-        // E-stop check
-        if let Some(check) = &self.estop_check {
-            if check() {
-                self.estop_latched = true;
-                let _ = self.motor_stop();
-                return Ok(DosingStatus::Aborted(DoserError::State("estop".into())));
-            }
         }
 
         // 1) read current weight
@@ -351,9 +365,11 @@ impl Doser {
             if self.settled_since_ms.is_none() {
                 self.settled_since_ms = Some(now);
             }
-            let stable_for_ms = now - self.settled_since_ms.unwrap();
-            if stable_for_ms >= self.control.stable_ms {
-                return Ok(DosingStatus::Complete);
+            if let Some(since) = self.settled_since_ms {
+                let stable_for_ms = now.saturating_sub(since);
+                if stable_for_ms >= self.control.stable_ms {
+                    return Ok(DosingStatus::Complete);
+                }
             }
             return Ok(DosingStatus::Running);
         } else {
@@ -426,6 +442,8 @@ pub struct DoserBuilder<S, M, T> {
     estop_check: Option<Box<dyn Fn() -> bool>>,
     // Optional clock for tests
     clock: Option<Box<dyn Clock>>,
+    // E-stop debounce configuration
+    estop_debounce_n: Option<u8>,
     // Type-state markers
     _s: PhantomData<S>,
     _m: PhantomData<M>,
@@ -446,6 +464,7 @@ impl Default for DoserBuilder<Missing, Missing, Missing> {
             _calibration_loaded: false,
             estop_check: None,
             clock: None,
+            estop_debounce_n: None,
             _s: PhantomData,
             _m: PhantomData,
             _t: PhantomData,
@@ -478,6 +497,7 @@ impl<S, M, T> DoserBuilder<S, M, T> {
         let timeouts = self.timeouts.unwrap_or_default();
         let calibration = self.calibration.unwrap_or_default();
         let clock: Box<dyn Clock> = self.clock.unwrap_or_else(|| Box::new(SystemClock));
+        let estop_debounce_n = self.estop_debounce_n.unwrap_or(2);
 
         // Validate configs (non-panicking; return typed Config errors)
         if control.hysteresis_g.is_sign_negative() {
@@ -507,7 +527,7 @@ impl<S, M, T> DoserBuilder<S, M, T> {
         }
         if safety.no_progress_epsilon_g.is_sign_negative() {
             return Err(eyre::Report::new(BuildError::InvalidConfig(
-                "no_progress_epsilon_g must be >= 0",
+                "no_progress_epsilon_g must be > 0",
             )));
         }
         if filter.sample_rate_hz == 0 {
@@ -542,6 +562,8 @@ impl<S, M, T> DoserBuilder<S, M, T> {
             last_progress_w: 0.0,
             last_progress_at_ms: now,
             estop_latched: false,
+            estop_debounce_n,
+            estop_count: 0,
         })
     }
 }
@@ -590,6 +612,10 @@ impl<S, M, T> DoserBuilder<S, M, T> {
         self.estop_check = Some(Box::new(f));
         self
     }
+    pub fn with_estop_debounce(mut self, n: u8) -> Self {
+        self.estop_debounce_n = Some(n.max(1));
+        self
+    }
     pub fn with_clock<C>(mut self, clock: C) -> Self
     where
         C: Clock + 'static,
@@ -619,6 +645,7 @@ impl<M, T> DoserBuilder<Missing, M, T> {
             _calibration_loaded,
             estop_check,
             clock,
+            estop_debounce_n,
             _s: _,
             _m: _,
             _t: _,
@@ -635,6 +662,7 @@ impl<M, T> DoserBuilder<Missing, M, T> {
             _calibration_loaded,
             estop_check,
             clock,
+            estop_debounce_n,
             _s: PhantomData,
             _m: PhantomData,
             _t: PhantomData,
@@ -656,6 +684,7 @@ impl<S, T> DoserBuilder<S, Missing, T> {
             _calibration_loaded,
             estop_check,
             clock,
+            estop_debounce_n,
             _s: _,
             _m: _,
             _t: _,
@@ -672,6 +701,7 @@ impl<S, T> DoserBuilder<S, Missing, T> {
             _calibration_loaded,
             estop_check,
             clock,
+            estop_debounce_n,
             _s: PhantomData,
             _m: PhantomData,
             _t: PhantomData,
@@ -693,6 +723,7 @@ impl<S, M> DoserBuilder<S, M, Missing> {
             _calibration_loaded,
             estop_check,
             clock,
+            estop_debounce_n,
             _s: _,
             _m: _,
             _t: _,
@@ -709,6 +740,7 @@ impl<S, M> DoserBuilder<S, M, Missing> {
             _calibration_loaded,
             estop_check,
             clock,
+            estop_debounce_n,
             _s: PhantomData,
             _m: PhantomData,
             _t: PhantomData,

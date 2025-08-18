@@ -39,8 +39,8 @@ sample_ms = 10
 [safety]
 max_run_ms = 100
 max_overshoot_g = 5.0
-no_progress_epsilon_g = 0.0
-no_progress_ms = 0
+no_progress_epsilon_g = 0.02
+no_progress_ms = 1200
 
 [hardware]
 sensor_read_timeout_ms = 100

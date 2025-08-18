@@ -440,6 +440,40 @@ fn aborts_on_no_progress_watchdog() {
 }
 
 #[rstest]
+fn aborts_on_no_progress_when_below_epsilon_for_window() {
+    use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
+    struct ConstScale(i32);
+    impl Scale for ConstScale {
+        fn read(&mut self, _timeout: Duration) -> Result<i32, Box<dyn Error + Send + Sync>> { Ok(self.0) }
+    }
+    #[derive(Clone)]
+    struct TestClock(Arc<AtomicU64>);
+    impl TestClock { fn new() -> Self { Self(Arc::new(AtomicU64::new(0))) } fn advance(&self, ms: u64){ self.0.fetch_add(ms, Ordering::Relaxed);} }
+    impl doser_core::Clock for TestClock { fn now_ms(&self) -> u64 { self.0.load(Ordering::Relaxed) } }
+
+    let safety = SafetyCfg { max_run_ms: 60_000, max_overshoot_g: 10.0, no_progress_epsilon_g: 0.02, no_progress_ms: 25 };
+    let tclk = TestClock::new();
+    let mut doser = Doser::builder()
+        .with_scale(ConstScale(0))
+        .with_motor(SpyMotor::default())
+        .with_filter(FilterCfg::default())
+        .with_control(ControlCfg::default())
+        .with_safety(safety)
+        .with_timeouts(Timeouts { sensor_ms: 1 })
+        .with_target_grams(10.0)
+        .with_clock(tclk.clone())
+        .apply_calibration::<()>(None)
+        .build()
+        .unwrap();
+
+    // First step starts running and initializes progress tracker
+    assert!(matches!(doser.step().unwrap(), DosingStatus::Running));
+    // Hover within epsilon repeatedly and advance time beyond window
+    for _ in 0..5 { let _ = doser.step().unwrap(); tclk.advance(5); }
+    match doser.step().unwrap() { DosingStatus::Aborted(e) => assert!(format!("{e}").contains("no progress")), other => panic!("expected Aborted, got {other:?}") }
+}
+
+#[rstest]
 fn estop_condition_latches_until_begin() {
     use std::sync::{
         Arc,
@@ -470,6 +504,7 @@ fn estop_condition_latches_until_begin() {
         })
         .with_timeouts(Timeouts { sensor_ms: 1 })
         .with_target_grams(10.0)
+        .with_estop_debounce(1)
         .with_estop_check(move || estop_clone.load(Ordering::Relaxed))
         .apply_calibration::<()>(None)
         .build()

@@ -4,6 +4,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+// Monotonic now_ms based on a fixed Instant origin
+use std::sync::OnceLock;
+static START: OnceLock<Instant> = OnceLock::new();
+fn now_ms() -> u64 {
+    let start = START.get_or_init(Instant::now);
+    start.elapsed().as_millis() as u64
+}
+
 pub struct Sampler {
     rx: xch::Receiver<i32>,
     last_ok: Arc<AtomicU64>,
@@ -42,14 +50,6 @@ impl Sampler {
         self.rx.try_iter().last()
     }
     pub fn stalled_for(&self, now_ms: u64) -> u64 {
-        now_ms - self.last_ok.load(Ordering::Relaxed)
+        now_ms.saturating_sub(self.last_ok.load(Ordering::Relaxed))
     }
-}
-
-pub fn now_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
 }
