@@ -36,8 +36,7 @@ flowchart LR
 
     subgraph Runtime
       CLI -->|builds| BUILDER[Doser::builder()]
-      BUILDER -->|with_scale/with_motor| HWSEL{Hardware?
-      (feature flag)}
+      BUILDER -->|with_scale/with_motor| HWSEL{Hardware?<br/>(feature flag)}
       HWSEL -->|hardware| HW[HardwareScale & HardwareMotor]
       HWSEL -->|simulation| SIM[SimulatedScale & SimulatedMotor]
       BUILDER -->|with_filter/with_control/with_safety/with_timeouts/with_calibration| DOSER[Doser]
@@ -50,8 +49,7 @@ flowchart LR
       DOSER -->|step()| SCALE[Scale::read(timeout)]
       SCALE --> DOSER
       DOSER --> FILTER[Median + Moving Avg]
-      FILTER --> SAFETY[Safety Guards
-        (max_run, overshoot, watchdog, E‑stop)]
+      FILTER --> SAFETY[Safety Guards<br/>(max_run, overshoot, watchdog, E‑stop)]
       SAFETY -->|abort/complete| STATUS{DosingStatus}
       DOSER --> MOTOR[Motor::start/set_speed/stop]
       STATUS --> CLI

@@ -315,9 +315,13 @@ A compact view of how crates and components interact during a dose.
 ```mermaid
 flowchart LR
   subgraph Inputs
-    A[CLI args]\nTOML config\nCalibration CSV
+    ARGS[CLI args]
+    CFG[TOML config]
+    CAL[Calibration CSV]
   end
-  A --> B[doser_cli]
+  ARGS --> B[doser_cli]
+  CFG --> B
+  CAL --> B
   B --> C[Doser::builder]
   C -->|injects| D[Filter/Control/Safety/Timeouts/Clock]
   C -->|with_scale/with_motor| E{Backend}
