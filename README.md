@@ -16,8 +16,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```bash
 git clone https://github.com/cesuratx/doser.git
 cd doser
-# An example typed config is in etc/doser_config.toml
-cargo run --release --bin doser_cli -- --grams 18.5
+# Use the provided typed config at ./doser_config.toml
+cargo run --release -p doser_cli -- --config ./doser_config.toml --grams 18.5
 ```
 
 Optional flags:
@@ -25,15 +25,35 @@ Optional flags:
 - --json to log as JSON lines
 - --max-run-ms and --max-overshoot-g to override safety at runtime
 
+### Hardware Self-Check and Dose (Raspberry Pi)
+
+Hardware support is feature-gated and intended for Raspberry Pi (Linux). On macOS, only simulation builds.
+
+```bash
+# On Raspberry Pi
+cargo run --release -p doser_cli --features hardware -- \
+  --config ./doser_config.toml SelfCheck
+
+# Run a real dose
+cargo run --release -p doser_cli --features hardware -- \
+  --config ./doser_config.toml Dose --grams 5
+```
+
+Notes:
+
+- If you have an enable (EN) pin on the stepper driver, set `pins.motor_en` in the TOML or export `DOSER_EN_PIN` in the environment. EN is handled as active-low (low = enabled).
+- An optional E‑stop input can be configured via `pins.estop_in` (active-low by default in the CLI wiring).
+
 ## Overview
 
 Doser is a robust, safe dosing system with hardware abstraction and a simulation mode. Core features:
 
-- Safety guards (max runtime, overshoot)
+- Safety guards (max runtime, overshoot, no-progress watchdog, E‑stop latch)
 - Calibration and tare
 - Median + moving-average filtering
 - Hysteresis + settle time near target
 - Typed TOML configuration + CLI overrides
+- Hardware: HX711-backed scale and step/dir motor driver (feature-gated), plus simulation backends
 
 Crates:
 
@@ -45,7 +65,7 @@ Crates:
 
 ## Configuration (TOML)
 
-Default path: etc/doser_config.toml (the CLI uses this by default; override with --config FILE)
+Default path used above: ./doser_config.toml
 
 ```toml
 [pins]
@@ -55,7 +75,9 @@ hx711_sck = 6
 # Stepper pins
 motor_step = 13
 motor_dir = 19
-# Optional E-Stop input
+# Optional enable (active-low); if omitted, can also set env DOSER_EN_PIN
+motor_en = 21
+# Optional E-Stop input (active-low)
 estop_in = 26
 
 [filter]
@@ -76,16 +98,21 @@ sample_ms = 100
 [safety]
 max_run_ms = 60000
 max_overshoot_g = 2.0
+# Abort if weight change < epsilon for at least this many ms (0 disables)
+no_progress_epsilon_g = 0.05
+no_progress_ms = 2000
 
 [logging]
 file = "doser.log"
 level = "info"
+# Log rotation policy: "never" | "daily" | "hourly"
+rotation = "never"
 ```
 
 Notes:
 
 - Missing [safety] values fall back to safe defaults; CLI flags take precedence.
-- On macOS, only the simulation backend is built. Hardware is feature-gated.
+- On macOS, the hardware feature will not compile; build hardware on Raspberry Pi with `--features hardware`.
 
 ## Calibration (CSV)
 
@@ -100,7 +127,8 @@ scale,scale_factor,1.0
 Use with the CLI:
 
 ```bash
-cargo run --release --bin doser_cli -- --grams 18.5 --calibration etc/calibration.csv
+cargo run --release -p doser_cli -- --config ./doser_config.toml --grams 18.5 \
+  --calibration ./calibration.csv
 ```
 
 - offset is the tare baseline in raw counts
@@ -110,35 +138,25 @@ cargo run --release --bin doser_cli -- --grams 18.5 --calibration etc/calibratio
 
 - Console: pretty or JSON (`--json`).
 - File: when `logging.file` is set in the TOML, a non-blocking log appender writes JSON/pretty entries to that file in addition to the console. The log writer is kept alive for process lifetime.
-- Rotation: you can switch to daily or hourly rotation by using `tracing_appender::rolling::daily(dir, file)` or `...::hourly(dir, file)` in the CLI. Ensure the directory exists (e.g., create it with `std::fs::create_dir_all`).
+- Rotation: choose `never` (default), `daily`, or `hourly` via `logging.rotation`.
 
 ## Deterministic time in tests
 
-The core exposes a `Clock` (`fn now_ms() -> u64`). `DoserBuilder::with_clock(...)` lets tests inject a deterministic clock and advance time without sleeping. Example sketch:
-
-```rust
-#[derive(Clone)]
-struct TestClock(std::sync::Arc<std::sync::atomic::AtomicU64>);
-impl TestClock { fn new() -> Self { Self(Default::default()) } fn advance(&self, ms: u64) { self.0.fetch_add(ms, std::sync::atomic::Ordering::Relaxed); } }
-impl doser_core::Clock for TestClock { fn now_ms(&self) -> u64 { self.0.load(std::sync::atomic::Ordering::Relaxed) } }
-
-let clk = TestClock::new();
-let mut d = doser_core::Doser::builder()
-    // ... hardware, configs ...
-    .with_clock(clk.clone())
-    .build()?;
-assert!(matches!(d.step()?, doser_core::DosingStatus::Running));
-clk.advance(1000);
-// subsequent step observes the elapsed time
-```
+The core exposes a `Clock` trait (`fn now_ms() -> u64`). Tests inject a deterministic clock via `DoserBuilder::with_clock(...)` to advance time without sleeping.
 
 ## Hardware Feature
 
-Simulation (no hardware) is the default. To enable real GPIO/I2C on Raspberry Pi builds:
+Simulation (no hardware) is the default. To enable real GPIO/HX711 and motor control on Raspberry Pi builds:
 
 ```bash
-cargo run --release --bin doser_cli --features hardware -- --grams 18.5
+cargo run --release -p doser_cli --features hardware -- --config ./doser_config.toml --grams 18.5
 ```
+
+Under the hood:
+
+- HardwareScale wraps the HX711 driver and performs timed reads.
+- HardwareMotor runs a background thread toggling the STEP pin up to ~5 kHz, with optional active-low EN control.
+- `make_estop_checker` provides a polled GPIO-backed E‑stop closure.
 
 ## Testing
 

@@ -4,6 +4,8 @@ This primer explains the Rust language features and idioms used in this reposito
 
 If you’re new to Rust, keep The Rust Book handy: https://doc.rust-lang.org/book/
 
+Note: For a system-level overview and diagrams, see [ARCHITECTURE](./ARCHITECTURE.md).
+
 ---
 
 ## 1) Crates, Modules, Workspaces, and Features
@@ -207,3 +209,135 @@ Tip: Prefer dependency injection (traits, clocks) to isolate time and I/O in tes
 ---
 
 With these building blocks, you should be able to navigate the code, understand the tradeoffs, and add features with confidence.
+
+---
+
+## 20) Design Patterns Used in This Codebase
+
+This section maps familiar software design patterns to concrete spots in the repo so you can recognize and extend them confidently.
+
+- Adapter
+
+  - What: Wrap one interface and present another.
+  - Where: `doser_hardware::hardware::HardwareScale` wraps an `Hx711` driver and implements `doser_traits::Scale`. `HardwareMotor` wraps GPIO (rppal) and implements `doser_traits::Motor`.
+  - Why: Keeps `doser_core` hardware-agnostic; lets us swap real vs simulated hardware without touching the control loop.
+
+- Builder
+
+  - What: Stepwise construction with validation at `build()`.
+  - Where: `Doser::builder()` with `.with_scale()`, `.with_motor()`, `.with_filter()`, `.with_control()`, `.with_safety()`, `.with_timeouts()`, `.with_target_grams()`, optional `.with_estop_check()`, `.with_clock()`.
+  - Why: Encourages immutable config and makes invalid states unrepresentable via early validation.
+
+- Dependency Injection (DI)
+
+  - What: Supply dependencies from the outside, not hardcoded.
+  - Where: `Scale`, `Motor`, `Clock`, and E‑stop checker closure are injected into `Doser` via the builder.
+  - Why: Improves testability (simulation + test clock) and portability (hardware feature gating).
+
+- Factory
+
+  - What: A function constructs and returns a ready-to-use object/closure.
+  - Where: `doser_hardware::hardware::make_estop_checker(pin, active_low, poll_ms)` builds a polled GPIO checker and returns `Box<dyn Fn() -> bool + Send + Sync>`.
+  - Why: Encapsulates platform details (GPIO) behind a simple call.
+
+- Facade
+
+  - What: A thin orchestrator that hides subsystem complexity.
+  - Where: `doser_cli` parses config/args, initializes logging, selects hardware vs simulation, wires E‑stop, and runs the dose.
+  - Why: Gives end-users a simple entry point without exposing internal crates.
+
+- State Machine (lightweight)
+
+  - What: Logic progresses through states with explicit transitions.
+  - Where: `Doser::step()` returns `DosingStatus::{Running, Complete, Aborted(..)}` and manages settle windows, latching E‑stop, and watchdogs.
+  - Why: Clear control flow that is easy to test and reason about.
+
+- Strategy (extensibility point)
+
+  - What: Pluggable algorithms under a common interface.
+  - Where: The current controller uses parameterized coarse/fine speeds and hysteresis. The examples show how to plug in alternative strategies by driving `Doser::step()` yourself. A dedicated `DosingStrategy` trait can be added later if multiple algorithms must coexist.
+  - Why: Allows experimenting with different dosing approaches without invasive changes.
+
+- RAII / Drop Safety Net
+
+  - What: Resources clean up themselves on scope exit.
+  - Where: `Doser` and `HardwareMotor` attempt to stop the motor in `Drop`. `HardwareMotor` also joins its worker thread and disables EN (active‑low) on drop.
+  - Why: Provides a safety backstop during errors or early returns.
+
+- Feature/Plugin Toggle (compile-time)
+
+  - What: Compile-time switches to include/exclude implementations.
+  - Where: `#[cfg(feature = "hardware")]` gates hardware code; simulation is the default. `rppal` is an optional dependency pulled only with the `hardware` feature.
+  - Why: Keeps CI/platforms without GPIO building cleanly while enabling real hardware on Raspberry Pi.
+
+- Layered Logging
+
+  - What: Compose multiple sinks/encoders.
+  - Where: `doser_cli::init_tracing` builds console (pretty/JSON) and optional file layers with rotation, using a non-blocking writer and a global guard.
+  - Why: Production-friendly logging without blocking the control loop.
+
+- Error Typing and Mapping
+  - What: Single domain error surface plus mapping.
+  - Where: `doser_core::DoserError` is the domain error; hardware errors are mapped into it so callers don’t depend on platform details.
+  - Why: Predictable behavior in both code and tests.
+
+## 21) Concurrency Patterns in HardwareMotor
+
+- Worker Thread + Atomics
+
+  - `HardwareMotor` spawns a background thread that owns the STEP pin and generates pulses. Control signals (`running`, `sps`) are shared via `Arc<AtomicBool>` / `Arc<AtomicU32>`.
+  - The main thread sets direction and optional enable (active‑low), and adjusts `sps` via atomics. A channel provides a shutdown signal on drop.
+
+- Practical Notes
+  - Move non-clonable GPIO pins (like STEP) into the worker thread; keep DIR/EN on the main thread for control.
+  - Clamp step rate to a safe upper bound (~5 kHz here) and use coarse sleeps (`std::thread::sleep(Duration::from_micros(..))`) rather than busy loops.
+  - Treat EN as active‑low (low = enabled) for common drivers (A4988/DRV8825). Default to disabled on startup and disable on drop.
+
+## 22) Testing Patterns Used
+
+- Deterministic Time
+
+  - Inject a test clock implementing `doser_core::Clock` to advance time deterministically in unit tests.
+
+- Simulation-First
+
+  - Most tests use `SimulatedScale`/`SimulatedMotor`, keeping CI fast and platform-independent.
+
+- Health Check CLI
+  - `SelfCheck` subcommand probes scale read and motor start/stop without moving the mechanism, suitable for bring-up and automation.
+
+---
+
+## 23) Visual Overview (Primer)
+
+A compact view of how crates and components interact during a dose.
+
+```mermaid
+flowchart LR
+  subgraph Inputs
+    A[CLI args]\nTOML config\nCalibration CSV
+  end
+  A --> B[doser_cli]
+  B --> C[Doser::builder]
+  C -->|injects| D[Filter/Control/Safety/Timeouts/Clock]
+  C -->|with_scale/with_motor| E{Backend}
+  E -->|hardware| H[HardwareScale & HardwareMotor]
+  E -->|simulation| S[SimulatedScale & SimulatedMotor]
+  C --> G[Doser]
+  G --> L[step(): read -> filter -> safety -> motor]
+  G --> R[DosingStatus: Running/Complete/Aborted]
+  B -->|logs| X[tracing: console + optional file]
+```
+
+See also: [ARCHITECTURE](./ARCHITECTURE.md) for a deeper discussion.
+
+---
+
+## 24) Handy Cross‑links
+
+- Traits: `../doser_traits/src/lib.rs`
+- Core controller: `../doser_core/src/lib.rs`
+- Hardware backends: `../doser_hardware/src/lib.rs`
+- CLI entrypoint: `../doser_cli/src/main.rs`
+- Examples: `../examples/`
+- Architecture doc: `./ARCHITECTURE.md`
