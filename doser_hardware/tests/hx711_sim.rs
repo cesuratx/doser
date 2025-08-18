@@ -4,11 +4,12 @@ use std::time::Duration;
 
 use doser_hardware::hardware::HardwareScale;
 use rppal::gpio::{Gpio, Level};
+use rstest::rstest;
 
 // NOTE: These tests are pseudo-simulated and will only work when running on hardware with loopback wiring
 // or a GPIO mocking layer. They demonstrate the structure requested: success path and timeout path.
 
-#[test]
+#[rstest]
 fn hx711_wait_success_path() {
     // This is a placeholder structure; on real hardware, DT must be externally driven low.
     // We simply ensure that read_with_timeout returns either Ok or a timeout, not busy-spinning.
@@ -21,7 +22,7 @@ fn hx711_wait_success_path() {
     let _ = sc.read(Duration::from_millis(50)); // may fail on non-wired rigs; we don't assert here
 }
 
-#[test]
+#[rstest]
 fn hx711_wait_timeout_path() {
     // With no wiring pulling DT low, the call should time out quickly and not spin CPU.
     let dt_pin = 5u8; // adjust
