@@ -24,39 +24,43 @@ Support files:
 
 ```mermaid
 flowchart LR
-    subgraph User
-      CMD[CLI args]
-      CFGT[Config TOML]
-      CALCSV[Calibration CSV]
-    end
 
-    CMD --> CLI["doser_cli"]
-    CFGT --> CLI
-    CALCSV --> CLI
+  subgraph User
+    CMD["CLI args"]
+    CFGT["Config TOML"]
+    CALCSV["Calibration CSV"]
+  end
 
-    subgraph Runtime
-      CLI -->|builds| BUILDER[Doser::builder()]
-      BUILDER -->|with_scale/with_motor| HWSEL{Hardware?<br/>(feature flag)}
-      HWSEL -->|hardware| HW[HardwareScale & HardwareMotor]
-      HWSEL -->|simulation| SIM[SimulatedScale & SimulatedMotor]
-      BUILDER -->|with_filter/with_control/with_safety/with_timeouts/with_calibration| DOSER[Doser]
-    end
+  CMD --> CLI["doser_cli"]
+  CFGT --> CLI
+  CALCSV --> CLI
 
-    HW --> DOSER
-    SIM --> DOSER
+  subgraph Runtime
+    direction LR
+    CLI -->|builds| BUILDER
+    BUILDER["Doser::builder()"]
+    BUILDER -->|with_scale / with_motor| HWSEL{"Hardware?<br/>(feature flag)"}
+    HWSEL -->|hardware| HW["HardwareScale & HardwareMotor"]
+    HWSEL -->|simulation| SIM["SimulatedScale & SimulatedMotor"]
+    BUILDER -->|with_filter / with_control / with_safety / with_timeouts / with_calibration| DOSER["Doser"]
+  end
 
-    subgraph Loop
-      DOSER -->|step()| STEP[step()]
-      STEP --> SCALE[Scale::read(timeout)]
-      SCALE --> FILTER[Median + Moving Avg]
-      FILTER --> SAFETY[Safety Guards<br/>(max_run, overshoot, watchdog, E‑stop)]
-      SAFETY --> STATUS{DosingStatus}
-      DOSER --> MOTOR[Motor::start/set_speed/stop]
-      STATUS --> CLI
-    end
+  HW --> DOSER
+  SIM --> DOSER
 
-    CLI --> LOG[tracing: console + optional file]
-    CLI --> OUT[stdout summary]
+  subgraph Loop
+    direction LR
+    DOSER -->|step()| STEP["step()"]
+    STEP --> SCALE["Scale::read(timeout)"]
+    SCALE --> FILTER["Median + Moving Avg"]
+    FILTER --> SAFETY["Safety Guards<br/>(max_run, overshoot, watchdog, E-stop)"]
+    SAFETY --> STATUS["DosingStatus"]
+    DOSER --> MOTOR["Motor::start / set_speed / stop"]
+    STATUS --> CLI
+  end
+
+  CLI -->|logs| LOG["tracing: console + optional file"]
+  CLI --> OUT["stdout summary"]
 ```
 
 ## Core (doser_core)
