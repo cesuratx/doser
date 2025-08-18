@@ -85,7 +85,7 @@ pub mod hardware {
     use crate::hx711::Hx711;
     use anyhow::{Context, Result};
     use doser_traits::{Motor, Scale};
-    use rppal::gpio::{Gpio, InputPin, OutputPin};
+    use rppal::gpio::{Gpio, OutputPin};
     use std::error::Error;
     use std::sync::{
         Arc,
@@ -95,16 +95,6 @@ pub mod hardware {
     use std::thread::{self, JoinHandle};
     use std::time::Duration;
     use tracing::{info, warn};
-
-    /// Simple error wrapper to avoid unwraps in hardware paths.
-    #[derive(Debug)]
-    struct HwErr(&'static str);
-    impl std::fmt::Display for HwErr {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "hardware error: {}", self.0)
-        }
-    }
-    impl Error for HwErr {}
 
     /// Hardware scale backed by HX711.
     pub struct HardwareScale {

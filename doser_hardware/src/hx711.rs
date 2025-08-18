@@ -11,7 +11,7 @@ pub struct Hx711 {
 
 impl Hx711 {
     pub fn new(
-        mut dt_pin: rppal::gpio::InputPin,
+        dt_pin: rppal::gpio::InputPin,
         mut sck_pin: rppal::gpio::OutputPin,
         gain_pulses: u8,
     ) -> Result<Self> {

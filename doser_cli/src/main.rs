@@ -132,7 +132,7 @@ fn main() -> anyhow::Result<()> {
 
     // 3) Build hardware (feature-gated) or sim
     #[cfg(feature = "hardware")]
-    let mut hw = {
+    let hw = {
         use doser_hardware::{HardwareMotor, HardwareScale};
         let scale =
             HardwareScale::try_new(cfg.pins.hx711_dt, cfg.pins.hx711_sck).context("open HX711")?;
