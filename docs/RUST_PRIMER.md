@@ -4,7 +4,7 @@ This primer explains the Rust language features and idioms used in this reposito
 
 If you’re new to Rust, keep The Rust Book handy: https://doc.rust-lang.org/book/
 
-Note: For a system-level overview and diagrams, see [ARCHITECTURE](./ARCHITECTURE.md).
+Note: For a system-level overview and diagrams, see [ARCHITECTURE](../ARCHITECTURE.md).
 
 ---
 
@@ -358,7 +358,7 @@ flowchart LR
   CLI -->|logs| LOGS["tracing → console (+ optional file)"]
 ```
 
-See also: [ARCHITECTURE](./ARCHITECTURE.md) for a deeper discussion.
+See also: [ARCHITECTURE](../ARCHITECTURE.md) for a deeper discussion.
 
 ---
 
@@ -369,7 +369,7 @@ See also: [ARCHITECTURE](./ARCHITECTURE.md) for a deeper discussion.
 - Hardware backends: `../doser_hardware/src/lib.rs`
 - CLI entrypoint: `../doser_cli/src/main.rs`
 - Examples: `../examples/`
-- Architecture doc: `./ARCHITECTURE.md`
+- Architecture doc: `../ARCHITECTURE.md`
 
 ---
 
