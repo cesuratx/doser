@@ -346,8 +346,14 @@ impl Doser {
         // 2) Reached or exceeded target? Stop and settle (asymmetric completion)
         if w + self.control.epsilon_g >= self.target_g {
             let _ = self.motor_stop();
-            if self.settled_since_ms.is_none() {
-                self.settled_since_ms = Some(now);
+            // Only consider stability time while inside the hysteresis band
+            if abs_err <= self.control.hysteresis_g {
+                if self.settled_since_ms.is_none() {
+                    self.settled_since_ms = Some(now);
+                }
+            } else {
+                // Outside band: do not accrue stability time
+                self.settled_since_ms = None;
             }
             if let Some(since) = self.settled_since_ms {
                 let stable_for_ms = now.saturating_sub(since);

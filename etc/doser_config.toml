@@ -28,6 +28,9 @@ sample_ms = 100
 [safety]
 max_run_ms = 60000
 max_overshoot_g = 2.0
+# abort if weight doesn't change by ≥ epsilon within this window
+no_progress_epsilon_g = 0.02
+no_progress_ms = 1200
 
 [logging]
 file = "doser.log"

@@ -7,7 +7,8 @@ This guide covers calibration file format, common runtime errors, and how to ena
 - File must be a CSV with the exact header:
   raw,grams
 - Each row maps a raw sensor reading to grams.
-- Minimum of 2–3 rows recommended.
+- At least 2 rows; raw values must be strictly monotonic (no duplicates, no zig‑zag).
+- An OLS fit computes grams = a\*raw + b across all rows; core uses `scale_factor=a` and `offset` as tare counts.
 
 Example (3 rows):
 raw,grams
@@ -41,7 +42,7 @@ Usage:
 
 - Configuration validation errors
   - What it means: Required fields are absent or values are out of range.
-  - Likely causes: Missing `[pins]` or invalid numeric ranges (e.g., `control.epsilon_g` must be in [0.0, 1.0], `timeouts.sample_ms` >= 1).
+  - Likely causes: Missing `[pins]` or invalid numeric ranges (e.g., `timeouts.sample_ms` >= 1, `control.hysteresis_g` >= 0).
   - Fixes:
     - Review your TOML and compare against the sample config.
     - Provide all required pins and sensible ranges.
@@ -52,11 +53,11 @@ You can run the CLI with human-friendly or JSON logs and increase verbosity to t
 
 - Human-friendly logs:
 
-  - `doser_cli --log-level debug dose --grams 5`
+  - `doser --log-level debug dose --grams 5`
 
 - JSON logs (newline-delimited JSON):
 
-  - `doser_cli --json --log-level trace dose --grams 5 > logs.jsonl`
+  - `doser --json --log-level trace dose --grams 5 > logs.jsonl`
   - Inspect with jq, for example:
     - `jq 'select(.level=="INFO")' logs.jsonl`
     - `jq -r '.timestamp + " " + .level + " " + (.fields.message // .message // "")' logs.jsonl'`
@@ -69,3 +70,8 @@ Tips:
 
 - Combine `--json` with a file sink (see config) to keep terminal output clean.
 - For the most detail, run with `--log-level trace` or `RUST_LOG=trace` and parse the JSON stream.
+
+## Notes
+
+- Errors are printed to stderr; stdout is reserved for normal output.
+- The no‑progress watchdog aborts if weight doesn’t change by ≥ epsilon within the configured window.

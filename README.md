@@ -41,15 +41,15 @@ cargo run --release -p doser_cli --features hardware -- \
 
 Notes:
 
-- If you have an enable (EN) pin on the stepper driver, set `pins.motor_en` in the TOML or export `DOSER_EN_PIN` in the environment. EN is handled as active-low (low = enabled).
-- An optional E‑stop input can be configured via `pins.estop_in` (active-low by default in the CLI wiring).
+- If you have an enable (EN) pin on the stepper driver, set `pins.motor_en` in the TOML. EN is handled as active-low (low = enabled).
+- An optional E‑stop input can be configured via `pins.estop_in` (active-low by default in the CLI wiring). E‑stop is debounced and latched until `begin()`.
 
 ## Overview
 
 Doser is a robust, safe dosing system with hardware abstraction and a simulation mode. Core features:
 
-- Safety guards (max runtime, overshoot, no-progress watchdog, E‑stop latch)
-- Calibration and tare
+- Safety guards (max runtime, overshoot, no-progress watchdog, E‑stop debounce + latch)
+- Calibration and tare (strict CSV header `raw,grams`; OLS fit across all rows)
 - Median + moving-average filtering
 - Hysteresis + settle time near target
 - Typed TOML configuration + CLI overrides
@@ -61,7 +61,7 @@ Crates:
 - doser_cli: CLI, config/CSV loading, logging
 - doser_config: typed config/CSV loaders
 - doser_hardware: hardware and simulation backends
-- doser_traits: Scale/Motor traits
+- doser_traits: Scale/Motor traits and Clock
 
 ## Configuration (TOML)
 
@@ -75,7 +75,7 @@ hx711_sck = 6
 # Stepper pins
 motor_step = 13
 motor_dir = 19
-# Optional enable (active-low); if omitted, can also set env DOSER_EN_PIN
+# Optional enable (active-low)
 motor_en = 21
 # Optional E-Stop input (active-low)
 estop_in = 26
@@ -98,9 +98,9 @@ sample_ms = 100
 [safety]
 max_run_ms = 60000
 max_overshoot_g = 2.0
-# Abort if weight change < epsilon for at least this many ms
-no_progress_epsilon_g = 0.05
-no_progress_ms = 2000
+# abort if weight doesn't change by ≥ epsilon within this window
+no_progress_epsilon_g = 0.02
+no_progress_ms = 1200
 
 [logging]
 file = "doser.log"
@@ -116,33 +116,34 @@ Notes:
 
 ## Calibration (CSV)
 
-Provide a simple CSV with headers and key/value rows:
+Provide a strict CSV with the exact headers:
 
 ```csv
-kind,key,value
-scale,offset,0
-scale,scale_factor,1.0
+raw,grams
+842913,0.0
+1024913,100.0
 ```
+
+- At least 2 rows required; raw values must be strictly monotonic (no duplicates, no zig-zag).
+- An ordinary least squares fit computes grams = a\*raw + b across all rows. The core uses `scale_factor=a` and `offset` as tare counts.
 
 Use with the CLI:
 
 ```bash
-cargo run --release -p doser_cli -- --config ./doser_config.toml --grams 18.5 \
+cargo run --release -p doser_cli -- --config ./doser_config.toml dose --grams 18.5 \
   --calibration ./calibration.csv
 ```
 
-- offset is the tare baseline in raw counts
-- scale_factor is grams per count (gain)
-
-## Logging
+## Logging and Tracing
 
 - Console: pretty or JSON (`--json`).
-- File: when `logging.file` is set in the TOML, a non-blocking log appender writes JSON/pretty entries to that file in addition to the console. The log writer is kept alive for process lifetime.
+- File: when `logging.file` is set in the TOML, a non-blocking appender writes in parallel to the file. The writer is kept alive for process lifetime.
 - Rotation: choose `never` (default), `daily`, or `hourly` via `logging.rotation`.
+- Trace control decisions: run with `--log-level trace` or set `RUST_LOG=trace`.
 
 ## Deterministic time in tests
 
-The core exposes a `Clock` trait with monotonic time and helpers: `now() -> Instant`, `sleep(Duration)`, and `ms_since(epoch: Instant) -> u64`. Tests inject a deterministic clock via `DoserBuilder::with_clock(...)` to advance time without sleeping. The default real clock is `MonotonicClock`; tests can use `test_clock::TestClock`.
+The core exposes a `Clock` trait with monotonic time and helpers: `now() -> Instant`, `sleep(Duration)`, and `ms_since(epoch: Instant) -> u64`. Tests inject a deterministic clock via `DoserBuilder::with_clock(...)` to advance time without sleeping. The default real clock is `MonotonicClock`; tests can use a deterministic `TestClock`.
 
 Type‑checked builder: The core uses a type‑state builder so `build()` is only available after providing scale, motor, and target grams. Typical usage remains simple:
 
@@ -173,7 +174,10 @@ Under the hood:
 
 ## Testing
 
-Run the full workspace tests (simulation only):
+- Unit tests for core logic use simulated hardware and deterministic clocks (`rstest`).
+- CLI integration tests use `assert_cmd` and read operator messages from stderr.
+
+Run all tests:
 
 ```bash
 cargo test

@@ -80,7 +80,8 @@ fn humanize(err: &eyre::Report) -> String {
     )
 }
 
-fn make_file_writer(
+/// Build a file sink writer with optional rotation, storing the non-blocking guard in OnceLock.
+fn file_layer(
     file: Option<&str>,
     rotation: Option<&str>,
 ) -> Option<tracing_appender::non_blocking::NonBlocking> {
@@ -108,23 +109,23 @@ fn init_tracing(json: bool, level: &str, file: Option<&str>, rotation: Option<&s
 
     if json {
         let console = fmt::layer().json().with_target(false);
-        if let Some(nb_writer) = make_file_writer(file, rotation) {
-            let file_layer = fmt::layer()
+        if let Some(nb_writer) = file_layer(file, rotation) {
+            let file_l = fmt::layer()
                 .with_ansi(false)
                 .with_target(false)
                 .with_writer(nb_writer);
-            registry.with(console).with(file_layer).init();
+            registry.with(console).with(file_l).init();
         } else {
             registry.with(console).init();
         }
     } else {
         let console = fmt::layer().pretty().with_target(false);
-        if let Some(nb_writer) = make_file_writer(file, rotation) {
-            let file_layer = fmt::layer()
+        if let Some(nb_writer) = file_layer(file, rotation) {
+            let file_l = fmt::layer()
                 .with_ansi(false)
                 .with_target(false)
                 .with_writer(nb_writer);
-            registry.with(console).with(file_layer).init();
+            registry.with(console).with(file_l).init();
         } else {
             registry.with(console).init();
         }

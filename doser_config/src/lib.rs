@@ -133,27 +133,68 @@ pub struct Calibration {
 }
 
 impl Calibration {
-    /// Build Calibration from at least two rows: grams ~= gain * (raw - offset)
+    /// Build Calibration from calibration rows using ordinary least squares on all points.
+    /// Fits grams = a*raw + b, then converts to core form grams = a*(raw - offset) + 0,
+    /// where offset = round(-b/a) is the tare baseline in raw counts.
     pub fn from_rows(rows: Vec<CalibrationRow>) -> eyre::Result<Self> {
         if rows.len() < 2 {
             eyre::bail!("calibration requires at least two rows, got {}", rows.len());
         }
-        let r1 = rows[0];
-        let r2 = rows[1];
-        if (r2.raw - r1.raw) == 0 {
-            eyre::bail!("calibration rows have identical raw values; cannot compute scale factor");
+
+        // Ensure strictly monotonic raw values (increasing or decreasing), no duplicates
+        let mut dir: i8 = 0; // 1 for increasing, -1 for decreasing
+        for i in 1..rows.len() {
+            let d = rows[i].raw - rows[i - 1].raw;
+            if d == 0 {
+                eyre::bail!(
+                    "calibration rows have duplicate raw values at index {} and {}",
+                    i - 1,
+                    i
+                );
+            }
+            let step_dir = if d > 0 { 1 } else { -1 };
+            if dir == 0 {
+                dir = step_dir;
+            } else if dir != step_dir {
+                eyre::bail!("calibration raw values must be monotonic (strictly increasing or strictly decreasing)");
+            }
         }
-        let dr = (r2.raw - r1.raw) as f32;
-        let dg = r2.grams - r1.grams;
-        let gain = dg / dr; // grams per count
-        if !gain.is_finite() || gain == 0.0 {
-            eyre::bail!("calibration produced invalid gain: {}", gain);
+
+        // OLS fit in f64 for numerical stability
+        let n = rows.len() as f64;
+        let sum_x: f64 = rows.iter().map(|r| r.raw as f64).sum();
+        let sum_y: f64 = rows.iter().map(|r| r.grams as f64).sum();
+        let mean_x = sum_x / n;
+        let mean_y = sum_y / n;
+
+        let mut sxx = 0.0f64;
+        let mut sxy = 0.0f64;
+        for r in &rows {
+            let x = r.raw as f64 - mean_x;
+            let y = r.grams as f64 - mean_y;
+            sxx += x * x;
+            sxy += x * y;
         }
-        let offset_f = r1.raw as f32 - (r1.grams / gain);
-        let offset_i32 = offset_f.round() as i32;
+        if !sxx.is_finite() || sxx == 0.0 {
+            eyre::bail!("calibration cannot determine slope (degenerate X variance)");
+        }
+
+        let a = sxy / sxx; // grams per count
+        if !a.is_finite() || a == 0.0 {
+            eyre::bail!("calibration produced invalid nonzero slope: {}", a);
+        }
+        let b = mean_y - a * mean_x;
+
+        // Convert to core representation: grams = a * (raw - offset) + 0
+        let zero_counts = -b / a; // where grams==0
+        if !zero_counts.is_finite() {
+            eyre::bail!("calibration produced invalid tare baseline");
+        }
+        let offset_i32 = zero_counts.round() as i32;
+
         Ok(Calibration {
             offset: offset_i32,
-            scale_factor: gain,
+            scale_factor: a as f32,
         })
     }
 }

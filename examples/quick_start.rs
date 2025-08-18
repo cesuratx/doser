@@ -1,21 +1,6 @@
 //! Quick Start Example
 //!
 //! This example demonstrates how to set up and run a simulated dosing session using the Doser library.
-//!
-//! # Steps
-//!
-//! 1. Create a `Doser` via its builder to configure the dosing session.
-//! 2. Attach simulated scale and motor implementations.
-//! 3. Set the target dose in grams.
-//! 4. Build the dosing session and run it.
-//!
-//! # Output
-//!
-//! On success, the dosing session will complete using simulated hardware.
-//!
-//! # Errors
-//!
-//! Any configuration or runtime errors will be returned as an `eyre::Report`.
 
 use doser_core::{ControlCfg, Doser, DosingStatus, FilterCfg, Timeouts};
 use doser_hardware::{SimulatedMotor as SimMotor, SimulatedScale as SimScale};
@@ -60,7 +45,7 @@ fn main() -> Result<(), eyre::Report> {
         // Simulated scale returns counts ≈ grams * 1000; convert to grams
         .with_calibration_gain_offset(0.001, 0.0)
         .with_target_grams(18.5)
-        .with_clock(Box::new(MonotonicClock::new()))
+        .with_clock(Box::new(clock.clone()))
         .build()?;
 
     // Optional: start a new run
