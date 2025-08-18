@@ -10,12 +10,69 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 
 static FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
-fn humanize(e: &doser_core::error::Report) -> String {
-    let mut s = format!("{}", e);
-    if let Some(src) = e.source() {
-        s.push_str(&format!(" — cause: {}", src));
+fn humanize(err: &eyre::Report) -> String {
+    use doser_core::error::{BuildError, DoserError};
+
+    // Typed matches first
+    if let Some(be) = err.downcast_ref::<BuildError>() {
+        return match be {
+            BuildError::MissingScale => {
+                "What happened: No scale was provided to the dosing engine.\nLikely causes: Hardware scale failed to initialize or was not wired into the builder.\nHow to fix: Ensure the HX711 scale is created successfully and passed via with_scale(...).".to_string()
+            }
+            BuildError::MissingMotor => {
+                "What happened: No motor was provided to the dosing engine.\nLikely causes: Motor driver failed to initialize or was not wired into the builder.\nHow to fix: Ensure the motor is created successfully and passed via with_motor(...).".to_string()
+            }
+            BuildError::MissingTarget => {
+                "What happened: Target grams not set.\nLikely causes: The CLI did not pass --grams or the builder was not configured.\nHow to fix: Provide the desired grams (e.g., `doser dose --grams 10`).".to_string()
+            }
+            BuildError::InvalidConfig(msg) => format!(
+                "What happened: Invalid configuration ({}).\nLikely causes: Missing or out-of-range values in the TOML.\nHow to fix: Edit the config file, then rerun. See README for a sample.",
+                msg
+            ),
+        };
     }
-    s
+
+    if let Some(de) = err.downcast_ref::<DoserError>() {
+        return match de {
+            DoserError::Timeout => {
+                "What happened: Scale read timed out.\nLikely causes: HX711 not wired correctly, no power/ground, or timeout too low.\nHow to fix: Verify DT/SCK pins and power, and consider increasing hardware.sensor_read_timeout_ms in the config.".to_string()
+            }
+            // Fallback to generic for other domain errors
+            _ => format!(
+                "What happened: {}.\nLikely causes: See logs.\nHow to fix: Re-run with --log-level=debug or set RUST_LOG for more detail.",
+                de
+            ),
+        };
+    }
+
+    // String-based heuristics for errors coming from init or config
+    let msg = err.to_string();
+    let lower = msg.to_ascii_lowercase();
+
+    if (lower.contains("hx711") && lower.contains("timeout")) || lower.contains("datareadytimeout")
+    {
+        return "What happened: HX711 did not produce data within the configured timeout.\nLikely causes: Wrong DT/SCK pins, wiring/power issues, or timeout configured too low.\nHow to fix: Check [pins] in the config, verify 5V/GND, and raise hardware.sensor_read_timeout_ms.".to_string();
+    }
+
+    if lower.contains("open hx711") || lower.contains("open motor pins") {
+        return "What happened: Failed to initialize hardware pins.\nLikely causes: Incorrect pin numbers or insufficient GPIO permissions.\nHow to fix: Fix the [pins] values in the config; ensure the process has permission to access GPIO.".to_string();
+    }
+
+    if lower.contains("invalid configuration")
+        || (lower.contains("pin") && lower.contains("missing"))
+    {
+        return "What happened: Configuration is invalid or incomplete.\nLikely causes: Missing [pins] (hx711_dt, hx711_sck, motor_step, motor_dir, ...), or out-of-range values.\nHow to fix: Edit the TOML config and try again.".to_string();
+    }
+
+    // Generic fallback
+    let mut cause = String::new();
+    if let Some(src) = err.source() {
+        cause = format!(" Cause: {}", src);
+    }
+    format!(
+        "Something went wrong.{}\nHow to fix: Re-run with --log-level=debug for details. Original: {}",
+        cause, msg
+    )
 }
 
 fn make_file_writer(
@@ -110,6 +167,14 @@ enum Commands {
 }
 
 fn main() -> eyre::Result<()> {
+    if let Err(e) = real_main() {
+        println!("{}", humanize(&e));
+        std::process::exit(2);
+    }
+    Ok(())
+}
+
+fn real_main() -> eyre::Result<()> {
     let cli = Cli::parse();
 
     // 1) Load typed config from TOML (for logging.file)
@@ -177,22 +242,19 @@ fn main() -> eyre::Result<()> {
                 Ok(_v) => tracing::info!("scale read ok"),
                 Err(e) => {
                     tracing::error!(error = %e, "scale read failed");
-                    println!("SCALE_ERROR: {e}");
-                    return Ok(());
+                    return Err(eyre::eyre!("scale read failed: {}", e));
                 }
             }
 
             // Probe motor lifecycle (non-destructive): start -> set_speed(0) -> stop
             if let Err(e) = motor.start() {
                 tracing::error!(error = %e, "motor start failed");
-                println!("MOTOR_ERROR: {e}");
-                return Ok(());
+                return Err(eyre::eyre!("motor start failed: {}", e));
             }
             let _ = motor.set_speed(0); // ignore errors here, stop will follow
             if let Err(e) = motor.stop() {
                 tracing::error!(error = %e, "motor stop failed");
-                println!("MOTOR_ERROR: {e}");
-                return Ok(());
+                return Err(eyre::eyre!("motor stop failed: {}", e));
             }
 
             tracing::info!("self-check ok");
@@ -204,10 +266,7 @@ fn main() -> eyre::Result<()> {
             max_run_ms,
             max_overshoot_g,
         } => {
-            if let Err(e) = run_dose(&cfg, calib.as_ref(), grams, max_run_ms, max_overshoot_g, hw) {
-                println!("{}", humanize(&e));
-                std::process::exit(2);
-            }
+            run_dose(&cfg, calib.as_ref(), grams, max_run_ms, max_overshoot_g, hw)?;
             Ok(())
         }
     }
