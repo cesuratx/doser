@@ -18,56 +18,53 @@ fn humanize(e: &doser_core::error::Report) -> String {
     s
 }
 
+fn make_file_writer(
+    file: Option<&str>,
+    rotation: Option<&str>,
+) -> Option<tracing_appender::non_blocking::NonBlocking> {
+    let path = file?;
+    let p = std::path::Path::new(path);
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let file_appender = match rotation.unwrap_or("never").to_ascii_lowercase().as_str() {
+        "daily" => tracing_appender::rolling::daily(".", path),
+        "hourly" => tracing_appender::rolling::hourly(".", path),
+        _ => tracing_appender::rolling::never(".", path),
+    };
+    let (nb_writer, guard) = tracing_appender::non_blocking(file_appender);
+    let _ = FILE_GUARD.set(guard);
+    Some(nb_writer)
+}
+
 /// Initialize tracing once for the whole app.
 fn init_tracing(json: bool, level: &str, file: Option<&str>, rotation: Option<&str>) {
-    let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("info"));
+    // Prefer RUST_LOG if set; otherwise use CLI level
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
-    let base = tracing_subscriber::registry().with(filter);
+    let registry = tracing_subscriber::registry().with(filter);
 
     if json {
         let console = fmt::layer().json().with_target(false);
-        if let Some(path) = file {
-            // Ensure directory exists and allow switching to rotation if needed.
-            let p = std::path::Path::new(path);
-            if let Some(parent) = p.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let file_appender = match rotation.unwrap_or("never").to_ascii_lowercase().as_str() {
-                "daily" => tracing_appender::rolling::daily(".", path),
-                "hourly" => tracing_appender::rolling::hourly(".", path),
-                _ => tracing_appender::rolling::never(".", path),
-            };
-            let (nb_writer, guard) = tracing_appender::non_blocking(file_appender);
-            let _ = FILE_GUARD.set(guard);
+        if let Some(nb_writer) = make_file_writer(file, rotation) {
             let file_layer = fmt::layer()
                 .with_ansi(false)
                 .with_target(false)
                 .with_writer(nb_writer);
-            base.with(console).with(file_layer).init();
+            registry.with(console).with(file_layer).init();
         } else {
-            base.with(console).init();
+            registry.with(console).init();
         }
     } else {
         let console = fmt::layer().pretty().with_target(false);
-        if let Some(path) = file {
-            let p = std::path::Path::new(path);
-            if let Some(parent) = p.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let file_appender = match rotation.unwrap_or("never").to_ascii_lowercase().as_str() {
-                "daily" => tracing_appender::rolling::daily(".", path),
-                "hourly" => tracing_appender::rolling::hourly(".", path),
-                _ => tracing_appender::rolling::never(".", path),
-            };
-            let (nb_writer, guard) = tracing_appender::non_blocking(file_appender);
-            let _ = FILE_GUARD.set(guard);
+        if let Some(nb_writer) = make_file_writer(file, rotation) {
             let file_layer = fmt::layer()
                 .with_ansi(false)
                 .with_target(false)
                 .with_writer(nb_writer);
-            base.with(console).with(file_layer).init();
+            registry.with(console).with(file_layer).init();
         } else {
-            base.with(console).init();
+            registry.with(console).init();
         }
     }
 }
