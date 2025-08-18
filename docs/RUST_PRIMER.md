@@ -92,13 +92,13 @@ In the CLI dose loop, we `match` on `DosingStatus` to continue, report completio
 
 ---
 
-## 8) Error Handling: `anyhow` vs `thiserror` and Domain Errors
+## 8) Error Handling: `eyre` + `thiserror` and Domain Errors
 
 - Libraries (`doser_core`): define a domain error enum (e.g., `DoserError`) using `thiserror` for readable Display/From impls. This gives typed, testable errors.
-- Applications (`doser_cli`): use `anyhow` for ergonomic propagation and context strings.
+- Applications (`doser_cli`): use `eyre` for ergonomic propagation and context strings.
 - Mapping: Hardware-specific errors (e.g., timeouts) are mapped centrally to domain variants (e.g., `DoserError::Timeout`). Tests assert correct mapping without string matching.
 
-Tip: Use `.with_context(|| ...)` (anyhow) to enrich errors at the edges (file I/O, parsing).
+Tip: Use `.wrap_err(...)` / `.wrap_err_with(...)` (eyre) to enrich errors at the edges (file I/O, parsing).
 
 ---
 
@@ -160,6 +160,13 @@ Why: Structured logs aid debugging and operations; non-blocking avoids stalling 
 
 Tip: Prefer dependency injection (traits, clocks) to isolate time and I/O in tests.
 
+Tools we use:
+
+- `rstest` for parameterized unit/integration tests (table‑driven cases)
+- `assert_cmd` + `predicates` for CLI tests, and `tempfile` for isolated temp dirs
+
+See also: [Testing Strategy (rstest, assert_cmd)](./RUST_PRIMER_DETAILED.md#testing-strategy-rstest-assert_cmd)
+
 ---
 
 ## 15) Useful Syntax and Patterns You’ll See
@@ -201,7 +208,7 @@ Tip: Prefer dependency injection (traits, clocks) to isolate time and I/O in tes
 ## 19) Further Reading
 
 - The Rust Book: https://doc.rust-lang.org/book/
-- Error handling: anyhow + thiserror patterns — https://nick.groenen.me/posts/rust-error-handling/
+- Error handling: eyre + thiserror patterns — https://docs.rs/eyre and https://docs.rs/thiserror
 - Conditional compilation: https://doc.rust-lang.org/reference/conditional-compilation.html
 - Concurrency: https://doc.rust-lang.org/book/ch16-00-concurrency.html
 - Tracing: https://docs.rs/tracing and https://docs.rs/tracing-subscriber
@@ -225,7 +232,7 @@ This section maps familiar software design patterns to concrete spots in the rep
 - Builder
 
   - What: Stepwise construction with validation at `build()`.
-  - Where: `Doser::builder()` with `.with_scale()`, `.with_motor()`, `.with_filter()`, `.with_control()`, `.with_safety()`, `.with_timeouts()`, `.with_target_grams()`, optional `.with_estop_check()`, `.with_clock()`.
+  - Where: `Doser::builder()` with `.with_scale()`, `.with_motor()`, `.with_filter()`, `.with_control()`, `.with_safety()`, `.with_timeouts()`, `.with_target_grams()`, optional `.with_estop_check()`, `.with_estop_debounce()`, `.with_clock()`.
   - Why: Encourages immutable config and makes invalid states unrepresentable via early validation.
 
 - Dependency Injection (DI)
@@ -297,14 +304,14 @@ This section maps familiar software design patterns to concrete spots in the rep
 
 - Deterministic Time
 
-  - Inject a test clock implementing `doser_core::Clock` to advance time deterministically in unit tests.
+  - Inject a test clock implementing `doser_traits::Clock` to advance time deterministically in unit tests.
 
 - Simulation-First
 
   - Most tests use `SimulatedScale`/`SimulatedMotor`, keeping CI fast and platform-independent.
 
 - Health Check CLI
-  - `SelfCheck` subcommand probes scale read and motor start/stop without moving the mechanism, suitable for bring-up and automation.
+  - `self-check` subcommand probes scale read and motor start/stop without moving the mechanism, suitable for bring-up and automation.
 
 ---
 

@@ -41,7 +41,7 @@ Usage:
 
 - Configuration validation errors
   - What it means: Required fields are absent or values are out of range.
-  - Likely causes: Missing `[pins]` or invalid numeric ranges (e.g., `control.epsilon_g` must be > 0, `timeouts.sensor_ms` >= 1).
+  - Likely causes: Missing `[pins]` or invalid numeric ranges (e.g., `control.epsilon_g` must be in [0.0, 1.0], `timeouts.sample_ms` >= 1).
   - Fixes:
     - Review your TOML and compare against the sample config.
     - Provide all required pins and sensible ranges.
@@ -61,9 +61,9 @@ You can run the CLI with human-friendly or JSON logs and increase verbosity to t
     - `jq 'select(.level=="INFO")' logs.jsonl`
     - `jq -r '.timestamp + " " + .level + " " + (.fields.message // .message // "")' logs.jsonl'`
 
-- Trace control shortcut:
-  - If your build exposes `--trace-control`, it’s a shorthand for enabling detailed control-loop tracing (equivalent to `--log-level trace`).
-  - Otherwise, use `--log-level trace` as shown above. You can also set `RUST_LOG=trace`.
+- Trace control
+  - Use `--log-level trace` to enable detailed control-loop tracing.
+  - Alternatively, set `RUST_LOG=trace`.
 
 Tips:
 

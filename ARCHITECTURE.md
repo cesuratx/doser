@@ -102,8 +102,8 @@ Important modules:
 
 ### Time and determinism
 
-- A `Clock` trait (`fn now_ms() -> u64`) is used instead of `Instant` for all time‑based logic (runtime cap, settle window, watchdog).
-- `SystemClock` is the default. Tests can inject a `TestClock` via `DoserBuilder::with_clock(...)`.
+- A `Clock` trait provides monotonic time and helpers: `now() -> Instant`, `sleep(Duration)`, and `ms_since(epoch: Instant) -> u64`. It is used for all time‑based logic (runtime cap, settle window, watchdog) to avoid wall‑clock jumps.
+- `MonotonicClock` is the default implementation. Tests can inject a deterministic `test_clock::TestClock` via `DoserBuilder::with_clock(...)`.
 
 ### Safety invariants
 
@@ -134,8 +134,8 @@ These are implemented by simulation and (feature‑gated) hardware backends.
 
 ## CLI (doser_cli)
 
-- Argument parsing with `clap`. Commands: `Dose` and `SelfCheck`.
-- Initializes logging early using `logging.file`, `logging.level`, and `logging.rotation`.
+- Argument parsing with `clap`. Commands: `dose` and `self-check`.
+- Initializes logging early using the CLI flag or `RUST_LOG` for level, and optional file sink via `logging.file` and `logging.rotation`.
 - Hardware path (when feature enabled) constructs `HardwareScale` and `HardwareMotor::try_new_with_en(step, dir, motor_en)`.
 - Wires E‑stop if configured: active‑low, 5 ms poll by default.
 

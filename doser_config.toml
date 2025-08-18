@@ -36,4 +36,5 @@ no_progress_ms = 1200
 
 [logging]
 file = "doser.log"
-level = "info"
+# Log rotation policy: "never" | "daily" | "hourly"
+rotation = "never"

@@ -17,7 +17,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 git clone https://github.com/cesuratx/doser.git
 cd doser
 # Use the provided typed config at ./doser_config.toml
-cargo run --release -p doser_cli -- --config ./doser_config.toml --grams 18.5
+cargo run --release -p doser_cli -- --config ./doser_config.toml dose --grams 18.5
 ```
 
 Optional flags:
@@ -32,11 +32,11 @@ Hardware support is feature-gated and intended for Raspberry Pi (Linux). On macO
 ```bash
 # On Raspberry Pi
 cargo run --release -p doser_cli --features hardware -- \
-  --config ./doser_config.toml SelfCheck
+  --config ./doser_config.toml self-check
 
 # Run a real dose
 cargo run --release -p doser_cli --features hardware -- \
-  --config ./doser_config.toml Dose --grams 5
+  --config ./doser_config.toml dose --grams 5
 ```
 
 Notes:
@@ -98,13 +98,12 @@ sample_ms = 100
 [safety]
 max_run_ms = 60000
 max_overshoot_g = 2.0
-# Abort if weight change < epsilon for at least this many ms (0 disables)
+# Abort if weight change < epsilon for at least this many ms
 no_progress_epsilon_g = 0.05
 no_progress_ms = 2000
 
 [logging]
 file = "doser.log"
-level = "info"
 # Log rotation policy: "never" | "daily" | "hourly"
 rotation = "never"
 ```
@@ -112,7 +111,8 @@ rotation = "never"
 Notes:
 
 - Missing [safety] values fall back to safe defaults; CLI flags take precedence.
-- On macOS, the hardware feature will not compile; build hardware on Raspberry Pi with `--features hardware`.
+- no_progress_ms must be >= 1 (0 is invalid).
+- Console log level is controlled by the CLI flag `--log-level` or `RUST_LOG`. The `[logging]` section configures only the optional file sink (`file`, `rotation`).
 
 ## Calibration (CSV)
 
@@ -142,7 +142,7 @@ cargo run --release -p doser_cli -- --config ./doser_config.toml --grams 18.5 \
 
 ## Deterministic time in tests
 
-The core exposes a `Clock` trait (`fn now_ms() -> u64`). Tests inject a deterministic clock via `DoserBuilder::with_clock(...)` to advance time without sleeping.
+The core exposes a `Clock` trait with monotonic time and helpers: `now() -> Instant`, `sleep(Duration)`, and `ms_since(epoch: Instant) -> u64`. Tests inject a deterministic clock via `DoserBuilder::with_clock(...)` to advance time without sleeping. The default real clock is `MonotonicClock`; tests can use `test_clock::TestClock`.
 
 Type‑checked builder: The core uses a type‑state builder so `build()` is only available after providing scale, motor, and target grams. Typical usage remains simple:
 

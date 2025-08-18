@@ -4,7 +4,7 @@ Thank you for your interest in contributing! Please follow these guidelines:
 
 ## How to Contribute
 
-- Fork the repository and create your branch from `master`.
+- Fork the repository and create your branch from `dev`.
 - Write clear, idiomatic Rust code and document public items with Rustdoc.
 - Add or update tests for new features or bug fixes.
 - Run `cargo fmt` and `cargo clippy` before submitting a PR.
