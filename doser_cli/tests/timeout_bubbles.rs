@@ -52,7 +52,7 @@ sensor_read_timeout_ms = 50
         .arg("dose")
         .arg("--grams")
         .arg("0.5");
-    cmd.assert().failure().stdout(predicate::str::contains(
+    cmd.assert().failure().stderr(predicate::str::contains(
         "What happened: Scale read timed out",
     ));
 }
