@@ -211,7 +211,7 @@ fn real_main() -> eyre::Result<()> {
 
     // 3) Build hardware (feature-gated) or sim
     #[cfg(feature = "hardware")]
-    let hw: (Box<dyn doser_traits::Scale>, Box<dyn doser_traits::Motor>) = {
+    let hw = {
         use doser_hardware::{HardwareMotor, HardwareScale};
         let scale = HardwareScale::try_new_with_timeout(
             cfg.pins.hx711_dt,
@@ -225,7 +225,7 @@ fn real_main() -> eyre::Result<()> {
             cfg.pins.motor_en,
         )
         .wrap_err("open motor pins")?;
-        (Box::new(scale), Box::new(motor))
+        (scale, motor)
     };
 
     #[cfg(not(feature = "hardware"))]
