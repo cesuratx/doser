@@ -94,7 +94,7 @@ pub mod sim {
 
 #[cfg(feature = "hardware")]
 pub mod hardware {
-    use crate::error::{HwError, Result};
+    use crate::error::{HwError, Result as HwResult};
     use crate::hx711::Hx711;
     use doser_traits::clock::MonotonicClock;
     use doser_traits::{Motor, Scale};
@@ -116,7 +116,7 @@ pub mod hardware {
 
     impl HardwareScale {
         /// Create a new HX711-backed scale using DT and SCK GPIO pins.
-        pub fn try_new(dt_pin: u8, sck_pin: u8) -> Result<Self> {
+        pub fn try_new(dt_pin: u8, sck_pin: u8) -> HwResult<Self> {
             let gpio =
                 Gpio::new().map_err(|e| HwError::Gpio(format!("open GPIO for HX711: {e}")))?;
             let dt = gpio
@@ -137,7 +137,7 @@ pub mod hardware {
             dt_pin: u8,
             sck_pin: u8,
             data_ready_timeout_ms: u64,
-        ) -> Result<Self> {
+        ) -> HwResult<Self> {
             let gpio =
                 Gpio::new().map_err(|e| HwError::Gpio(format!("open GPIO for HX711: {e}")))?;
             let dt = gpio
@@ -186,7 +186,7 @@ pub mod hardware {
 
     impl HardwareMotor {
         /// Create a motor from GPIO pin numbers. EN is taken from the DOSER_EN_PIN env var if present.
-        pub fn try_new(step_pin: u8, dir_pin: u8) -> Result<Self> {
+        pub fn try_new(step_pin: u8, dir_pin: u8) -> HwResult<Self> {
             let en_env = std::env::var("DOSER_EN_PIN")
                 .ok()
                 .and_then(|s| s.parse::<u8>().ok());
@@ -195,7 +195,7 @@ pub mod hardware {
 
         /// Create a motor from GPIO pin numbers with an optional enable pin.
         /// Note: On A4988/DRV8825, EN is active-low (low = enabled). We default to disabled (high).
-        pub fn try_new_with_en(step_pin: u8, dir_pin: u8, en_pin: Option<u8>) -> Result<Self> {
+        pub fn try_new_with_en(step_pin: u8, dir_pin: u8, en_pin: Option<u8>) -> HwResult<Self> {
             let gpio = Gpio::new().map_err(|e| HwError::Gpio(format!("open GPIO: {e}")))?;
             let mut step = gpio
                 .get(step_pin)
@@ -217,7 +217,8 @@ pub mod hardware {
 
             let running = Arc::new(AtomicBool::new(false));
             let sps = Arc::new(AtomicU32::new(0));
-            let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
+            let (shutdown_tx, shutdown_rx): (mpsc::Sender<()>, mpsc::Receiver<()>) =
+                mpsc::channel();
 
             let running_bg = running.clone();
             let sps_bg = sps.clone();
@@ -272,7 +273,7 @@ pub mod hardware {
         }
 
         /// Enable or disable the driver (active-low enable pin, if present)
-        pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
+        pub fn set_enabled(&mut self, enabled: bool) -> HwResult<()> {
             if let Some(en) = self.en.as_mut() {
                 if enabled {
                     en.set_low();
