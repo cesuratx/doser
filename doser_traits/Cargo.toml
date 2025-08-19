@@ -7,6 +7,4 @@ edition = "2021"
 name = "doser_traits"
 path = "src/lib.rs"
 
-autoexamples = false
-
 [dependencies]

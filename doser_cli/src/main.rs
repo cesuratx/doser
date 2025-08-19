@@ -8,6 +8,22 @@ use eyre::WrapErr;
 use std::sync::OnceLock;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
+// Add imports for sampler-driven mode
+use doser_core::sampler::Sampler;
+use doser_traits::MonotonicClock;
+use std::time::Duration;
+
+// Local NoopScale for sampler-driven mode (DoserG won't call read() when using step_from_raw)
+struct NoopScale;
+impl doser_traits::Scale for NoopScale {
+    fn read(
+        &mut self,
+        _timeout: Duration,
+    ) -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
+        Err(Box::new(std::io::Error::other("noop scale")))
+    }
+}
+
 static FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
 fn humanize(err: &eyre::Report) -> String {
@@ -283,7 +299,7 @@ fn run_dose(
     max_run_ms_override: Option<u64>,
     max_overshoot_g_override: Option<f32>,
     hw: (
-        impl doser_traits::Scale + 'static,
+        impl doser_traits::Scale + Send + 'static,
         impl doser_traits::Motor + 'static,
     ),
 ) -> CoreResult<()> {
@@ -330,9 +346,34 @@ fn run_dose(
         ..Default::default()
     });
 
+    // Split hardware into scale and motor; move scale into sampler thread
+    let (scale, motor) = hw;
+
+    // Spawn sampler to drive control with raw samples
+    let period_us = 1_000_000u64 / (filter.sample_rate_hz as u64);
+    let _period_ms = (1000u64 / (filter.sample_rate_hz as u64)).max(1);
+    let fast_threshold = _cfg.timeouts.sample_ms.saturating_mul(4);
+    let safe_threshold = std::cmp::max(fast_threshold, _period_ms.saturating_mul(2));
+    let stall_threshold_ms = if safety.max_run_ms < _period_ms.saturating_mul(2) {
+        // In very short runs, prefer a quick timeout before max_run kicks in
+        fast_threshold
+            .min(safety.max_run_ms.saturating_sub(1))
+            .max(1)
+    } else {
+        safe_threshold
+    };
+    let sampler_timeout = Duration::from_millis(_cfg.timeouts.sample_ms);
+    let sampler = Sampler::spawn(
+        scale,
+        filter.sample_rate_hz,
+        sampler_timeout,
+        MonotonicClock::new(),
+    );
+
+    // Build DoserG with a NoopScale since we'll only call step_from_raw
     let mut doser_g = doser_core::build_doser(
-        hw.0,
-        hw.1,
+        NoopScale,
+        motor,
         filter.clone(),
         control.clone(),
         safety.clone(),
@@ -349,21 +390,45 @@ fn run_dose(
     tracing::info!(target_g = grams, "dose start");
 
     let mut attempts = 0u32;
+    let start = std::time::Instant::now();
     loop {
-        attempts += 1;
-        match doser_g.step()? {
-            DosingStatus::Running => continue,
-            DosingStatus::Complete => {
-                let final_g = doser_g.last_weight();
-                tracing::info!(final_g, attempts, "dose complete");
-                println!("final: {final_g:.2} g  attempts: {attempts}");
-                return Ok(());
-            }
-            DosingStatus::Aborted(e) => {
+        // Startup grace: don't flag stall until after the threshold window
+        if start.elapsed().as_millis() as u64 >= stall_threshold_ms {
+            // Check for stalled sampler and abort like a sensor timeout
+            if sampler.stalled_for_now() > stall_threshold_ms {
                 let _ = doser_g.motor_stop();
-                tracing::error!(error = %e, attempts, "dose aborted");
-                return Err(doser_core::error::Report::new(e));
+                return Err(doser_core::error::Report::new(
+                    doser_core::error::DoserError::Timeout,
+                ));
             }
+        }
+        // Enforce max runtime regardless of sampling
+        if start.elapsed().as_millis() as u64 >= safety.max_run_ms {
+            let _ = doser_g.motor_stop();
+            return Err(doser_core::error::Report::new(
+                doser_core::error::DoserError::State("max run time exceeded".into()),
+            ));
+        }
+        // Drain to the latest available sample
+        if let Some(raw) = sampler.latest() {
+            attempts = attempts.saturating_add(1);
+            match doser_g.step_from_raw(raw)? {
+                DosingStatus::Running => continue,
+                DosingStatus::Complete => {
+                    let final_g = doser_g.last_weight();
+                    tracing::info!(final_g, attempts, "dose complete");
+                    println!("final: {final_g:.2} g  attempts: {attempts}");
+                    return Ok(());
+                }
+                DosingStatus::Aborted(e) => {
+                    let _ = doser_g.motor_stop();
+                    tracing::error!(error = %e, attempts, "dose aborted");
+                    return Err(doser_core::error::Report::new(e));
+                }
+            }
+        } else {
+            // No sample yet; wait roughly one period to avoid busy spinning
+            std::thread::sleep(Duration::from_micros(period_us));
         }
     }
 }
