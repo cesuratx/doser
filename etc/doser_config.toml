@@ -1,37 +1,31 @@
-# Doser typed configuration (example)
+[io.pins] # <-- exact table name
+# HX711
+hx711_dt = 5  # BCM5  (Pi pin 29)
+hx711_sck = 6 # BCM6  (Pi pin 31)
 
-[pins]
-# HX711 pins
-hx711_dt = 5
-hx711_sck = 6
-# Stepper pins
-motor_step = 13
-motor_dir = 19
-# Optional E-Stop input
-estop_in = 26
+# Stepper (recommended pins)
+step = 23 # BCM23 (pin 16)
+dir = 24  # BCM24 (pin 18)
+en = 25   # BCM25 (pin 22)
 
-[filter]
-ma_window = 4
-median_window = 3
-sample_rate_hz = 50
+# Optional safety inputs (NC to GND)
+estop = 12 # BCM12
+lid = 16   # BCM16
 
 [control]
-coarse_speed = 1200
-fine_speed = 250
-slow_at_g = 1.0
-hysteresis_g = 0.05
-stable_ms = 250
+# speeds are in steps-per-second if your code exposes them
+coarse_speed_sps = 1200
+fine_speed_sps = 250
 
-[timeouts]
-sample_ms = 100
+slow_at_g = 1.2     # switch to fine below this error
+hysteresis_g = 0.15 # stability band (completion check)
+epsilon_g = 0.05    # stop threshold (asymmetric)
+stable_ms = 500     # must remain stable for this long
 
 [safety]
-max_run_ms = 60000
-max_overshoot_g = 2.0
-# abort if weight doesn't change by ≥ epsilon within this window
+max_run_ms = 15000
 no_progress_epsilon_g = 0.02
 no_progress_ms = 1200
 
-[logging]
-file = "doser.log"
-level = "info"
+[timeouts]
+sensor_ms = 120
