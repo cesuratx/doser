@@ -4,9 +4,11 @@ on:
   push:
     branches: [main, dev]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   lint:
+    name: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,6 +21,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
+    name: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,8 +34,8 @@ jobs:
           cargo test --workspace --no-default-features
 
   test-hardware-feature:
+    name: test-hardware-feature
     runs-on: ubuntu-latest
-    if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
