@@ -1,3 +1,10 @@
 [workspace]
 members = ["doser_cli", "doser_core", "doser_hardware", "doser_ui"]
 resolver = "3"
+
+# Performance-focused release profile
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

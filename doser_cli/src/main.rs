@@ -2,7 +2,7 @@ use std::{fs, path::PathBuf};
 
 use clap::{ArgAction, Parser, Subcommand};
 use doser_config::{load_calibration_csv, Calibration, Config};
-use doser_core::{error::Result as CoreResult, Doser, DosingStatus};
+use doser_core::{error::Result as CoreResult, DosingStatus};
 use eyre::WrapErr;
 
 use std::sync::OnceLock;
@@ -280,10 +280,8 @@ fn run_dose(
     _cfg: &doser_config::Config,
     calib: Option<&Calibration>,
     grams: f32,
-    // CLI safety overrides
     max_run_ms_override: Option<u64>,
     max_overshoot_g_override: Option<f32>,
-    // 'static bounds so these can be boxed inside the Doser builder:
     hw: (
         impl doser_traits::Scale + 'static,
         impl doser_traits::Motor + 'static,
@@ -325,57 +323,44 @@ fn run_dose(
         no_progress_ms: _cfg.safety.no_progress_ms,
     };
 
-    let mut builder = Doser::builder()
-        .with_scale(hw.0)
-        .with_motor(hw.1)
-        .with_filter(filter)
-        .with_control(control)
-        .with_safety(safety)
-        .with_timeouts(timeouts)
-        .with_target_grams(grams);
+    // Prefer generic, statically-dispatched doser for performance
+    let calibration_core = calib.map(|c| doser_core::Calibration {
+        gain_g_per_count: c.scale_factor,
+        zero_counts: c.offset,
+        ..Default::default()
+    });
 
-    // Hardware E-stop hookup (feature-gated). Create a real GPIO-backed checker.
-    #[cfg(feature = "hardware")]
-    {
-        if let Some(estop_pin) = _cfg.pins.estop_in {
-            // Active-low E-stop is common; poll every 5ms.
-            match doser_hardware::make_estop_checker(estop_pin, true, 5) {
-                Ok(checker) => {
-                    // move the boxed closure into the builder; wrap to erase Send+Sync bound
-                    builder = builder.with_estop_check(move || checker());
-                }
-                Err(e) => {
-                    // If we cannot create the checker, proceed without E-stop but log it.
-                    tracing::warn!("failed to init estop checker: {}", e);
-                }
-            }
-        }
-    }
+    let mut doser_g = doser_core::build_doser(
+        hw.0,
+        hw.1,
+        filter.clone(),
+        control.clone(),
+        safety.clone(),
+        timeouts.clone(),
+        calibration_core,
+        grams,
+        None,
+        None,
+        None,
+    )?;
 
-    // Apply calibration CSV if provided
-    if let Some(c) = calib {
-        builder = builder
-            .with_tare_counts(c.offset)
-            .with_calibration_gain_offset(c.scale_factor, 0.0);
-    }
-
-    let mut doser = builder.build()?;
+    doser_g.begin();
 
     tracing::info!(target_g = grams, "dose start");
 
     let mut attempts = 0u32;
     loop {
         attempts += 1;
-        match doser.step()? {
+        match doser_g.step()? {
             DosingStatus::Running => continue,
             DosingStatus::Complete => {
-                let final_g = doser.last_weight();
+                let final_g = doser_g.last_weight();
                 tracing::info!(final_g, attempts, "dose complete");
                 println!("final: {final_g:.2} g  attempts: {attempts}");
                 return Ok(());
             }
             DosingStatus::Aborted(e) => {
-                let _ = doser.motor_stop();
+                let _ = doser_g.motor_stop();
                 tracing::error!(error = %e, attempts, "dose aborted");
                 return Err(doser_core::error::Report::new(e));
             }
