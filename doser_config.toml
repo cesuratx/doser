@@ -1,24 +1,41 @@
-[io.pins] # BCM numbering on the Pi
-hx711_dt = 5  # Pi pin 29
-hx711_sck = 6 # Pi pin 31
 
-# You can leave these even if nothing is wired; it's harmless.
-step = 23 # Pi pin 16
-dir = 24  # Pi pin 18
-en = 25   # Pi pin 22
+[pins]
+# HX711 (BCM numbering)
+hx711_dt = 5
+hx711_sck = 6
+
+# Motor pins are required by the schema even if you haven't wired the motor yet.
+motor_step = 23
+motor_dir = 24
+# motor_en = 25       # optional; omit if not wired
+# estop_in = 12       # optional; omit if not wired
+
+[filter]
+ma_window = 4
+median_window = 3
+sample_rate_hz = 50
 
 [control]
-coarse_speed_sps = 1200
-fine_speed_sps = 250
+coarse_speed = 1200
+fine_speed = 250
 slow_at_g = 1.0
-epsilon_g = 0.05
-hysteresis_g = 0.15
-stable_ms = 500
+hysteresis_g = 0.05
+stable_ms = 250
+epsilon_g = 0.05    # <-- set non-zero; default in code is 0.0
+
+[timeouts]
+sample_ms = 120 # <-- required field name
 
 [safety]
-max_run_ms = 15000
+max_run_ms = 60000
+max_overshoot_g = 2.0
 no_progress_epsilon_g = 0.02
 no_progress_ms = 1200
 
-[timeouts]
-sensor_ms = 120
+[logging]
+file = "doser.log"
+rotation = "never"
+level = "info"
+
+# [hardware]                # optional; default = 150 ms
+# sensor_read_timeout_ms = 150
