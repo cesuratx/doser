@@ -94,10 +94,10 @@ pub mod sim {
 
 #[cfg(feature = "hardware")]
 pub mod hardware {
+    use crate::error::{HwError, Result};
     use crate::hx711::Hx711;
     use doser_traits::clock::MonotonicClock;
     use doser_traits::{Motor, Scale};
-    use eyre::{Result, WrapErr};
     use rppal::gpio::{Gpio, OutputPin};
     use std::error::Error;
     use std::sync::{
@@ -117,11 +117,15 @@ pub mod hardware {
     impl HardwareScale {
         /// Create a new HX711-backed scale using DT and SCK GPIO pins.
         pub fn try_new(dt_pin: u8, sck_pin: u8) -> Result<Self> {
-            let gpio = Gpio::new().wrap_err("open GPIO for HX711")?;
-            let dt = gpio.get(dt_pin).wrap_err("get HX711 DT pin")?.into_input();
+            let gpio =
+                Gpio::new().map_err(|e| HwError::Gpio(format!("open GPIO for HX711: {e}")))?;
+            let dt = gpio
+                .get(dt_pin)
+                .map_err(|e| HwError::Gpio(format!("get HX711 DT pin: {e}")))?
+                .into_input();
             let sck = gpio
                 .get(sck_pin)
-                .wrap_err("get HX711 SCK pin")?
+                .map_err(|e| HwError::Gpio(format!("get HX711 SCK pin: {e}")))?
                 .into_output_low();
             // Channel A, gain = 128 uses 25 pulses after the 24-bit read.
             let hx = Hx711::new(dt, sck, 25, Duration::from_millis(150))?;
@@ -134,11 +138,15 @@ pub mod hardware {
             sck_pin: u8,
             data_ready_timeout_ms: u64,
         ) -> Result<Self> {
-            let gpio = Gpio::new().wrap_err("open GPIO for HX711")?;
-            let dt = gpio.get(dt_pin).wrap_err("get HX711 DT pin")?.into_input();
+            let gpio =
+                Gpio::new().map_err(|e| HwError::Gpio(format!("open GPIO for HX711: {e}")))?;
+            let dt = gpio
+                .get(dt_pin)
+                .map_err(|e| HwError::Gpio(format!("get HX711 DT pin: {e}")))?
+                .into_input();
             let sck = gpio
                 .get(sck_pin)
-                .wrap_err("get HX711 SCK pin")?
+                .map_err(|e| HwError::Gpio(format!("get HX711 SCK pin: {e}")))?
                 .into_output_low();
             let drt = if data_ready_timeout_ms == 0 {
                 150
@@ -188,15 +196,22 @@ pub mod hardware {
         /// Create a motor from GPIO pin numbers with an optional enable pin.
         /// Note: On A4988/DRV8825, EN is active-low (low = enabled). We default to disabled (high).
         pub fn try_new_with_en(step_pin: u8, dir_pin: u8, en_pin: Option<u8>) -> Result<Self> {
-            let gpio = Gpio::new().wrap_err("open GPIO")?;
+            let gpio = Gpio::new().map_err(|e| HwError::Gpio(format!("open GPIO: {e}")))?;
             let mut step = gpio
                 .get(step_pin)
-                .wrap_err("get STEP pin")?
+                .map_err(|e| HwError::Gpio(format!("get STEP pin: {e}")))?
                 .into_output_low();
-            let dir = gpio.get(dir_pin).wrap_err("get DIR pin")?.into_output_low();
+            let dir = gpio
+                .get(dir_pin)
+                .map_err(|e| HwError::Gpio(format!("get DIR pin: {e}")))?
+                .into_output_low();
 
             let en = match en_pin {
-                Some(pin) => Some(gpio.get(pin).wrap_err("get EN pin")?.into_output_high()), // high = disabled
+                Some(pin) => Some(
+                    gpio.get(pin)
+                        .map_err(|e| HwError::Gpio(format!("get EN pin: {e}")))?
+                        .into_output_high(),
+                ), // high = disabled
                 None => None,
             };
 
@@ -331,8 +346,11 @@ pub mod hardware {
         poll_ms: u64,
     ) -> Result<Box<dyn Fn() -> bool + Send + Sync>> {
         use std::sync::atomic::AtomicBool;
-        let gpio = Gpio::new().wrap_err("open GPIO")?;
-        let pin = gpio.get(pin).wrap_err("get E-STOP pin")?.into_input();
+        let gpio = Gpio::new().map_err(|e| HwError::Gpio(format!("open GPIO: {e}")))?;
+        let pin = gpio
+            .get(pin)
+            .map_err(|e| HwError::Gpio(format!("get E-STOP pin: {e}")))?
+            .into_input();
         let flag = Arc::new(AtomicBool::new(false));
         let flag_bg = flag.clone();
         thread::spawn(move || {
