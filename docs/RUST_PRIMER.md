@@ -407,3 +407,10 @@ Tradeoffs
 
 - Slightly more generic boilerplate and type signatures.
 - IDE type hints can be noisier, but method chaining remains ergonomic.
+
+---
+
+## Calibration helpers (developer note)
+
+- `doser_config::Calibration` implements `TryFrom<Vec<CalibrationRow>>` and `TryFrom<&[CalibrationRow]>`, delegating to `Calibration::from_rows`.
+- Use these when building calibrations programmatically (e.g., in tests) instead of calling `from_rows` directly.

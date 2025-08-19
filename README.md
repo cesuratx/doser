@@ -116,6 +116,8 @@ Notes:
 
 ## Calibration (CSV)
 
+Note: The calibration CSV is optional. If you don’t pass --calibration, defaults are used (zero_counts=0, gain=1.0), which yields uncalibrated readings.
+
 Provide a strict CSV with the exact headers:
 
 ```csv
