@@ -199,6 +199,21 @@ impl Calibration {
     }
 }
 
+// Ergonomic conversions for building Calibration
+impl TryFrom<Vec<CalibrationRow>> for Calibration {
+    type Error = eyre::Report;
+    fn try_from(rows: Vec<CalibrationRow>) -> Result<Self, Self::Error> {
+        Self::from_rows(rows)
+    }
+}
+
+impl TryFrom<&[CalibrationRow]> for Calibration {
+    type Error = eyre::Report;
+    fn try_from(rows: &[CalibrationRow]) -> Result<Self, Self::Error> {
+        Self::from_rows(rows.to_vec())
+    }
+}
+
 pub fn load_calibration_csv(path: &std::path::Path) -> eyre::Result<Calibration> {
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(true)
@@ -229,7 +244,7 @@ pub fn load_calibration_csv(path: &std::path::Path) -> eyre::Result<Calibration>
         }
     }
 
-    Calibration::from_rows(rows)
+    Calibration::try_from(rows)
 }
 
 impl Config {
