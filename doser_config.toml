@@ -1,9 +1,43 @@
-# Doser hardware configuration
 
-[hx711]
-dt_pin = 5
-sck_pin = 6
+[pins]
+# HX711 (BCM numbering)
+hx711_dt = 5
+hx711_sck = 6
 
-[stepper]
-step_pin = 13
-dir_pin = 19
+# Motor pins are required by the schema even if you haven't wired the motor yet.
+motor_step = 23
+motor_dir = 24
+# motor_en = 25       # optional; omit if not wired
+# estop_in = 12       # optional; omit if not wired
+
+[filter]
+ma_window = 4
+median_window = 3
+sample_rate_hz = 50
+
+[control]
+slow_at_g = 1.5     # switch to fine earlier
+coarse_speed = 900
+fine_speed = 120
+epsilon_g = 0.02    # stop just before target
+hysteresis_g = 0.05
+stable_ms = 400
+# <-- set non-zero; default in code is 0.0
+
+[timeouts]
+sample_ms = 120 # <-- required field name
+
+[safety]
+max_run_ms = 60000
+max_overshoot_g = 5.0
+no_progress_epsilon_g = 0.02
+no_progress_ms = 1200
+
+
+[logging]
+file = "doser.log"
+rotation = "never"
+level = "info"
+
+# [hardware]                # optional; default = 150 ms
+# sensor_read_timeout_ms = 150

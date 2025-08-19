@@ -1,0 +1,37 @@
+# Doser typed configuration (example)
+
+[pins]
+# HX711 pins
+hx711_dt = 5
+hx711_sck = 6
+# Stepper pins
+motor_step = 13
+motor_dir = 19
+# Optional E-Stop input
+estop_in = 26
+
+[filter]
+ma_window = 4
+median_window = 3
+sample_rate_hz = 50
+
+[control]
+coarse_speed = 1200
+fine_speed = 250
+slow_at_g = 1.0
+hysteresis_g = 0.05
+stable_ms = 250
+
+[timeouts]
+sample_ms = 100
+
+[safety]
+max_run_ms = 60000
+max_overshoot_g = 2.0
+# abort if weight doesn't change by ≥ epsilon within this window
+no_progress_epsilon_g = 0.02
+no_progress_ms = 1200
+
+[logging]
+file = "doser.log"
+level = "info"

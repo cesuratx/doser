@@ -1,0 +1,14 @@
+[package]
+name = "doser_config"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+csv = "1"
+eyre = "0.6"
+
+[dev-dependencies]
+tempfile = "3"
+rstest = "0.23"

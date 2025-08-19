@@ -4,9 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+crossbeam-channel = "0.5"
+doser_traits = { path = "../doser_traits" }
 chrono = "0.4"
 thiserror = "2.0.14"
 toml = "0.9.5"
+doser_hardware = { path = "../doser_hardware" }
+eyre = "0.6.12"
+tracing = "0.1"
 
 [dev-dependencies]
-rstest = "0.18"
+rstest = "0.23"
