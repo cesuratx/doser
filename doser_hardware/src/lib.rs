@@ -96,7 +96,7 @@ pub mod sim {
 pub mod hardware {
     use crate::error::{HwError, Result as HwResult};
     use crate::hx711::Hx711;
-    use doser_traits::clock::MonotonicClock;
+    use doser_traits::clock::{Clock, MonotonicClock};
     use doser_traits::{Motor, Scale};
     use rppal::gpio::{Gpio, OutputPin};
     use std::error::Error;
@@ -345,7 +345,7 @@ pub mod hardware {
         pin: u8,
         active_low: bool,
         poll_ms: u64,
-    ) -> Result<Box<dyn Fn() -> bool + Send + Sync>> {
+    ) -> HwResult<Box<dyn Fn() -> bool + Send + Sync>> {
         use std::sync::atomic::AtomicBool;
         let gpio = Gpio::new().map_err(|e| HwError::Gpio(format!("open GPIO: {e}")))?;
         let pin = gpio
