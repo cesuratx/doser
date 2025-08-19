@@ -349,13 +349,47 @@ fn run_dose(
     // Split hardware into scale and motor; move scale into sampler thread
     let (scale, motor) = hw;
 
+    // Optional E-stop wiring (hardware builds only)
+    let estop_check: Option<Box<dyn Fn() -> bool + Send + Sync>> = {
+        #[cfg(feature = "hardware")]
+        {
+            if let Some(pin) = _cfg.pins.estop_in {
+                match doser_hardware::make_estop_checker(
+                    pin,
+                    _cfg.estop.active_low,
+                    _cfg.estop.poll_ms,
+                ) {
+                    Ok(c) => {
+                        tracing::info!(
+                            pin,
+                            active_low = _cfg.estop.active_low,
+                            poll_ms = _cfg.estop.poll_ms,
+                            "E-stop enabled"
+                        );
+                        Some(c)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to init E-stop; continuing without it");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        }
+        #[cfg(not(feature = "hardware"))]
+        {
+            let _ = &_cfg; // silence unused in non-hardware build
+            None
+        }
+    };
+
     // Spawn sampler to drive control with raw samples
     let period_us = 1_000_000u64 / (filter.sample_rate_hz as u64);
     let _period_ms = (1000u64 / (filter.sample_rate_hz as u64)).max(1);
     let fast_threshold = _cfg.timeouts.sample_ms.saturating_mul(4);
     let safe_threshold = std::cmp::max(fast_threshold, _period_ms.saturating_mul(2));
     let stall_threshold_ms = if safety.max_run_ms < _period_ms.saturating_mul(2) {
-        // In very short runs, prefer a quick timeout before max_run kicks in
         fast_threshold
             .min(safety.max_run_ms.saturating_sub(1))
             .max(1)
@@ -363,12 +397,20 @@ fn run_dose(
         safe_threshold
     };
     let sampler_timeout = Duration::from_millis(_cfg.timeouts.sample_ms);
+
+    #[cfg(feature = "hardware")]
+    let sampler = Sampler::spawn_event(scale, sampler_timeout, MonotonicClock::new());
+    #[cfg(not(feature = "hardware"))]
     let sampler = Sampler::spawn(
         scale,
         filter.sample_rate_hz,
         sampler_timeout,
         MonotonicClock::new(),
     );
+
+    // Narrow estop checker type to the core's expected signature
+    let estop_check_core: Option<Box<dyn Fn() -> bool>> =
+        estop_check.map(|f| -> Box<dyn Fn() -> bool> { Box::new(f) });
 
     // Build DoserG with a NoopScale since we'll only call step_from_raw
     let mut doser_g = doser_core::build_doser(
@@ -380,9 +422,10 @@ fn run_dose(
         timeouts.clone(),
         calibration_core,
         grams,
+        estop_check_core,
         None,
-        None,
-        None,
+        // Use configured debounce
+        Some(_cfg.estop.debounce_n),
     )?;
 
     doser_g.begin();

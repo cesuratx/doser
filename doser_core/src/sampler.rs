@@ -43,6 +43,37 @@ impl Sampler {
         Self { rx, last_ok, epoch }
     }
 
+    /// Event-driven sampler: rely on the sensor's own data-ready timing and do not add extra sleeps.
+    /// The scale.read(timeout) should block until data is ready or timeout expires.
+    pub fn spawn_event<S: Scale + Send + 'static, C: Clock + Send + Sync + 'static>(
+        mut scale: S,
+        timeout: Duration,
+        clock: C,
+    ) -> Self {
+        let (tx, rx) = xch::bounded(1);
+        let last_ok = Arc::new(AtomicU64::new(0));
+        let last_ok_clone = last_ok.clone();
+        let epoch = clock.now();
+
+        std::thread::spawn(move || {
+            loop {
+                match scale.read(timeout) {
+                    Ok(v) => {
+                        let _ = tx.send(v);
+                        let now = clock.ms_since(epoch);
+                        last_ok_clone.store(now, Ordering::Relaxed);
+                    }
+                    Err(_) => {
+                        // On timeout or transient error, just continue; controller will watchdog
+                    }
+                }
+                // No sleep here: next iteration will block in read() until DRDY
+            }
+        });
+
+        Self { rx, last_ok, epoch }
+    }
+
     pub fn latest(&self) -> Option<i32> {
         self.rx.try_iter().last()
     }

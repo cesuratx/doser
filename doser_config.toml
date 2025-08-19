@@ -1,4 +1,3 @@
-
 [pins]
 # HX711 (BCM numbering)
 hx711_dt = 5
@@ -41,3 +40,9 @@ level = "info"
 
 # [hardware]                # optional; default = 150 ms
 # sensor_read_timeout_ms = 150
+
+# Optional E‑stop configuration (used when pins.estop_in is set)
+[estop]
+active_low = true # treat low level as pressed
+debounce_n = 2    # consecutive polls required to latch
+poll_ms = 5       # polling interval (ms) for GPIO checker

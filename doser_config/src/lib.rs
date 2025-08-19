@@ -95,6 +95,27 @@ impl Default for Hardware {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct EstopCfg {
+    /// If true, a low level on the input means E‑stop active
+    pub active_low: bool,
+    /// Number of consecutive polls required to latch E‑stop (>=1)
+    pub debounce_n: u8,
+    /// Poll interval in milliseconds for the GPIO-backed checker
+    pub poll_ms: u64,
+}
+
+impl Default for EstopCfg {
+    fn default() -> Self {
+        Self {
+            active_low: true,
+            debounce_n: 2,
+            poll_ms: 5,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Config {
     pub pins: Pins,
     pub filter: FilterCfg,
@@ -107,6 +128,9 @@ pub struct Config {
     pub logging: Logging,
     #[serde(default)]
     pub hardware: Hardware,
+    /// Emergency stop configuration
+    #[serde(default)]
+    pub estop: EstopCfg,
 }
 
 pub fn load_toml(s: &str) -> Result<Config, toml::de::Error> {
@@ -302,6 +326,14 @@ impl Config {
         // Hardware
         if self.hardware.sensor_read_timeout_ms == 0 {
             eyre::bail!("hardware.sensor_read_timeout_ms must be >= 1");
+        }
+
+        // E-stop
+        if self.estop.debounce_n == 0 {
+            eyre::bail!("estop.debounce_n must be >= 1");
+        }
+        if self.estop.poll_ms == 0 {
+            eyre::bail!("estop.poll_ms must be >= 1");
         }
 
         Ok(())
