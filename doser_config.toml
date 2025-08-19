@@ -1,40 +1,24 @@
-# Doser typed configuration (example)
+[io.pins] # BCM numbering on the Pi
+hx711_dt = 5  # Pi pin 29
+hx711_sck = 6 # Pi pin 31
 
-[pins]
-# HX711 pins
-hx711_dt = 5
-hx711_sck = 6
-# Stepper pins
-motor_step = 13
-motor_dir = 19
-# Optional enable (active-low). Uncomment and set if wired.
-# motor_en = 18
-# Optional E-Stop input
-estop_in = 26
-
-[filter]
-ma_window = 4
-median_window = 3
-sample_rate_hz = 50
+# You can leave these even if nothing is wired; it's harmless.
+step = 23 # Pi pin 16
+dir = 24  # Pi pin 18
+en = 25   # Pi pin 22
 
 [control]
-coarse_speed = 1200
-fine_speed = 250
+coarse_speed_sps = 1200
+fine_speed_sps = 250
 slow_at_g = 1.0
-hysteresis_g = 0.05
-stable_ms = 250
-
-[timeouts]
-sample_ms = 100
+epsilon_g = 0.05
+hysteresis_g = 0.15
+stable_ms = 500
 
 [safety]
-max_run_ms = 60000
-max_overshoot_g = 2.0
-# Abort if weight change < epsilon (g) for at least this many ms while motor runs
+max_run_ms = 15000
 no_progress_epsilon_g = 0.02
 no_progress_ms = 1200
 
-[logging]
-file = "doser.log"
-# Log rotation policy: "never" | "daily" | "hourly"
-rotation = "never"
+[timeouts]
+sensor_ms = 120
