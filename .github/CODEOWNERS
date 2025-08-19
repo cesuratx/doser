@@ -1,0 +1,14 @@
+# CODEOWNERS
+# Docs: https://docs.github.com/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owners for everything in the repo
+* @cesuratx
+
+# You can add per-path owners below (examples):
+# /doser_core/ @cesuratx
+# /doser_hardware/ @cesuratx
+# /doser_cli/ @cesuratx
+# /doser_config/ @cesuratx
+# /doser_traits/ @cesuratx
+# /doser_ui/ @cesuratx
+# /.github/ @cesuratx
