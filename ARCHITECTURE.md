@@ -147,3 +147,47 @@ stateDiagram-v2
   Running --> Aborted: Max overshoot exceeded
   Running --> Aborted: No progress window
 ```
+
+## Local setup and simulation
+
+You can run everything locally without GPIO using the built-in simulator.
+
+- Install Rust (stable)
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+- Clone and run a precise simulated dose (no hardware):
+
+```bash
+DOSER_TEST_SIM_INC=0.01 cargo run -p doser_cli -- \
+  --config ./doser_config.toml --log-level info dose --grams 10
+```
+
+- Faster simulation (less precise, still close to target):
+
+```bash
+DOSER_TEST_SIM_INC=0.02 cargo run -p doser_cli -- \
+  --config ./doser_config.toml --log-level info dose --grams 10
+```
+
+Notes:
+
+- Place `--log-level` before the subcommand (e.g., `dose`).
+- The simulator only increases weight while the motor is running; it stops once the controller stops the motor.
+- For precision tuning guidance, see the README “Precision tuning” section.
+
+### Raspberry Pi hardware (feature-gated)
+
+On a Pi (Linux), enable the hardware feature to use GPIO/HX711 and the step/dir motor driver:
+
+```bash
+# Self-check (probe scale + motor without moving)
+cargo run -p doser_cli --features hardware -- \
+  --config ./doser_config.toml self-check
+
+# Real dose
+cargo run -p doser_cli --features hardware -- \
+  --config ./doser_config.toml dose --grams 10
+```

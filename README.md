@@ -17,13 +17,26 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 git clone https://github.com/cesuratx/doser.git
 cd doser
 # Use the provided typed config at ./doser_config.toml
-cargo run --release -p doser_cli -- --config ./doser_config.toml dose --grams 18.5
+# Simulation: set a small per-read increment so weight rises gradually
+DOSER_TEST_SIM_INC=0.01 cargo run --release -p doser_cli -- --config ./doser_config.toml --log-level info dose --grams 10
+```
+
+Self-check (simulation backend):
+
+```bash
+cargo run --release -p doser_cli -- --config ./doser_config.toml self-check
 ```
 
 Optional flags:
 
 - --json to log as JSON lines
 - --max-run-ms and --max-overshoot-g to override safety at runtime
+
+### Simulation notes
+
+- DOSER_TEST_SIM_INC controls how much the simulated weight increases on each read while the motor is running (e.g., 0.005–0.02).
+- The simulator only increments while the motor runs; it stops increasing after the controller stops the motor.
+- For more detail, add `--log-level debug` before the subcommand.
 
 ### Hardware Self-Check and Dose (Raspberry Pi)
 
@@ -43,6 +56,20 @@ Notes:
 
 - If you have an enable (EN) pin on the stepper driver, set `pins.motor_en` in the TOML. EN is handled as active-low (low = enabled).
 - An optional E‑stop input can be configured via `pins.estop_in` (active-low by default in the CLI wiring). E‑stop is debounced and latched until `begin()`.
+
+#### Hardware Test Checklist
+
+- Power off, wire per BCM pins in `doser_config.toml` (DT/SCK, STEP/DIR, optional EN, optional E‑stop).
+- Secure the mechanism and keep an E‑stop path ready.
+- Provide a calibration CSV for accurate grams; without it, defaults map 0.01 g/count (sim-friendly but not calibrated for hardware).
+- Run self-check:
+  - `cargo run --release -p doser_cli --features hardware -- --config ./doser_config.toml self-check`
+  - Expect a successful scale read and a brief motor start/stop, then `OK`.
+- Start with a small dose (1–2 g) and `--log-level info`:
+  - `cargo run --release -p doser_cli --features hardware -- --config ./doser_config.toml dose --grams 2`
+- Tune if needed:
+  - Lower `control.fine_speed` and/or raise `control.epsilon_g` for softer finishes.
+  - Verify safety: `safety.max_run_ms`, `safety.max_overshoot_g`, and no-progress settings are appropriate.
 
 ## Overview
 
@@ -91,6 +118,7 @@ fine_speed = 250
 slow_at_g = 1.0
 hysteresis_g = 0.05
 stable_ms = 250
+epsilon_g = 0.02
 
 [timeouts]
 sample_ms = 100
@@ -114,9 +142,26 @@ Notes:
 - no_progress_ms must be >= 1 (0 is invalid).
 - Console log level is controlled by the CLI flag `--log-level` or `RUST_LOG`. The `[logging]` section configures only the optional file sink (`file`, `rotation`).
 
+## Precision tuning
+
+- For tighter finishes in simulation and hardware, start with:
+
+```toml
+[control]
+slow_at_g = 2.0
+fine_speed = 90
+epsilon_g = 0.05
+hysteresis_g = 0.06
+stable_ms = 500
+```
+
+- In simulation, use a smaller increment for a finer approach:
+  - zsh: `DOSER_TEST_SIM_INC=0.005 cargo run -p doser_cli -- --config ./doser_config.toml --log-level debug dose --grams 10`
+- For hardware, provide a calibration CSV and then fine-tune `fine_speed` and `epsilon_g` to your mechanism’s inertia.
+
 ## Calibration (CSV)
 
-Note: The calibration CSV is optional. If you don’t pass --calibration, defaults are used (zero_counts=0, gain=1.0), which yields uncalibrated readings.
+Note: The calibration CSV is optional. If you don’t pass --calibration, defaults are used (zero_counts=0, gain=0.01), which matches the simulator’s 0.01 g/count output but yields uncalibrated readings on real hardware. For accurate hardware dosing, supply a calibration CSV.
 
 Provide a strict CSV with the exact headers:
 

@@ -414,3 +414,42 @@ Tradeoffs
 
 - `doser_config::Calibration` implements `TryFrom<Vec<CalibrationRow>>` and `TryFrom<&[CalibrationRow]>`, delegating to `Calibration::from_rows`.
 - Use these when building calibrations programmatically (e.g., in tests) instead of calling `from_rows` directly.
+
+---
+
+## Quick local simulation
+
+You can test the control loop without hardware using the built-in simulator. From the repo root:
+
+```bash
+DOSER_TEST_SIM_INC=0.01 cargo run -p doser_cli -- \
+  --config ./doser_config.toml --log-level info dose --grams 10
+```
+
+Tips:
+
+- Put `--log-level` before the subcommand (`dose`).
+- Increase `DOSER_TEST_SIM_INC` (e.g., 0.02–0.03) for faster runs; decrease for higher precision.
+
+---
+
+## Quick self-check
+
+Run a basic health check to probe a scale read and motor start/stop without performing a dose.
+
+Simulation (default backend):
+
+```bash
+cargo run -p doser_cli -- --config ./doser_config.toml self-check
+```
+
+Hardware (Raspberry Pi):
+
+```bash
+cargo run -p doser_cli --features hardware -- --config ./doser_config.toml self-check
+```
+
+Notes:
+
+- Place `--log-level` before `self-check` if you want more detail (e.g., `--log-level debug`).
+- Expected output ends with `OK` when the probe succeeds.

@@ -18,10 +18,15 @@ mod hx711;
 pub mod sim {
     use doser_traits::{Motor, Scale};
     use std::error::Error;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::Duration;
 
+    // Global sim state shared between motor and scale
+    static SIM_RUNNING: AtomicBool = AtomicBool::new(false);
+    static SIM_SPS: AtomicU32 = AtomicU32::new(0);
+
     /// Simple simulated scale that stores an internal weight in grams.
-    /// `read()` returns a synthetic raw value (grams * 1000) as i32.
+    /// `read()` returns a synthetic raw value in centigrams (grams * 100) as i32.
     #[derive(Default)]
     pub struct SimulatedScale {
         grams: f32,
@@ -53,14 +58,18 @@ pub mod sim {
                 return Err("sensor timeout".into());
             }
             // Optional test hook: increment grams per read to simulate progress
-            if let Ok(inc) = std::env::var("DOSER_TEST_SIM_INC") {
-                if let Ok(delta) = inc.parse::<f32>() {
-                    self.grams = (self.grams + delta).max(0.0);
+            if SIM_RUNNING.load(Ordering::Relaxed) {
+                if let Ok(inc) = std::env::var("DOSER_TEST_SIM_INC") {
+                    if let Ok(delta) = inc.parse::<f32>() {
+                        // Optionally scale by speed to emulate faster dosing
+                        let _sps = SIM_SPS.load(Ordering::Relaxed);
+                        // Keep it simple for now: one delta per read while running
+                        self.grams = (self.grams + delta).max(0.0);
+                    }
                 }
             }
-            // For the sim, return a raw value equal to grams so default core calibration
-            // (gain=1, offset=0) interprets it as grams directly.
-            Ok(self.grams as i32)
+            // For the sim, return raw counts with 0.01 g resolution (centigrams)
+            Ok((self.grams * 100.0) as i32)
         }
     }
 
@@ -74,6 +83,7 @@ pub mod sim {
     impl Motor for SimulatedMotor {
         fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
             self.running = true;
+            SIM_RUNNING.store(true, Ordering::Relaxed);
             Ok(())
         }
 
@@ -81,12 +91,15 @@ pub mod sim {
             // You can enforce "must start first" semantics if you want:
             // if !self.running { return Err("motor not started".into()); }
             self.speed_sps = sps;
+            SIM_SPS.store(sps, Ordering::Relaxed);
             Ok(())
         }
 
         fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
             self.speed_sps = 0;
             self.running = false;
+            SIM_SPS.store(0, Ordering::Relaxed);
+            SIM_RUNNING.store(false, Ordering::Relaxed);
             Ok(())
         }
     }

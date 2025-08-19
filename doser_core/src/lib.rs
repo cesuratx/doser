@@ -32,7 +32,7 @@ impl Calibration {
 impl Default for Calibration {
     fn default() -> Self {
         Self {
-            gain_g_per_count: 1.0,
+            gain_g_per_count: 0.01, // 1 count = 0.01 g (centigram), matches sim
             zero_counts: 0,
             offset_g: 0.0,
         }
@@ -330,8 +330,49 @@ impl Doser {
             )));
         }
 
-        // 1c) no-progress watchdog (disabled when thresholds are zero)
-        if self.safety.no_progress_ms > 0 && self.safety.no_progress_epsilon_g > 0.0 {
+        // 2) Reached or exceeded target? Stop and settle (asymmetric completion)
+        if w + self.control.epsilon_g >= self.target_g {
+            let _ = self.motor_stop();
+            // Start settling window unconditionally once in completion zone.
+            if self.settled_since_ms.is_none() {
+                self.settled_since_ms = Some(now);
+            }
+            if let Some(since) = self.settled_since_ms {
+                let stable_for_ms = now.saturating_sub(since);
+                if stable_for_ms >= self.control.stable_ms {
+                    return Ok(DosingStatus::Complete);
+                }
+            }
+            // Keep polling while settled window accrues.
+            // Throttle loop to the configured sample rate.
+            let period_us = 1_000_000u64 / (self.filter.sample_rate_hz as u64);
+            self.clock.sleep(Duration::from_micros(period_us));
+            return Ok(DosingStatus::Running);
+        } else {
+            // Below target: not in completion zone; reset settle timer
+            self.settled_since_ms = None;
+        }
+
+        // 3) choose coarse or fine speed
+        let target_speed = if abs_err <= self.control.slow_at_g {
+            // Proportional taper: as error -> 0, reduce speed toward a floor (20% of fine_speed)
+            let ratio = if self.control.slow_at_g > 0.0 {
+                (abs_err / self.control.slow_at_g).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            let min_frac = 0.2_f32; // floor at 20% of fine speed to keep motion
+            let frac = min_frac + (1.0 - min_frac) * ratio; // [min_frac, 1.0]
+            ((self.control.fine_speed as f32 * frac).max(1.0)) as u32
+        } else {
+            self.control.coarse_speed
+        };
+
+        // 3a) no-progress watchdog (only while motor is commanded to run)
+        if self.safety.no_progress_ms > 0
+            && self.safety.no_progress_epsilon_g > 0.0
+            && target_speed > 0
+        {
             if (w - self.last_progress_w).abs() >= self.safety.no_progress_epsilon_g {
                 self.last_progress_w = w;
                 self.last_progress_at_ms = now;
@@ -342,37 +383,6 @@ impl Doser {
                 )));
             }
         }
-
-        // 2) Reached or exceeded target? Stop and settle (asymmetric completion)
-        if w + self.control.epsilon_g >= self.target_g {
-            let _ = self.motor_stop();
-            // Only consider stability time while inside the hysteresis band
-            if abs_err <= self.control.hysteresis_g {
-                if self.settled_since_ms.is_none() {
-                    self.settled_since_ms = Some(now);
-                }
-            } else {
-                // Outside band: do not accrue stability time
-                self.settled_since_ms = None;
-            }
-            if let Some(since) = self.settled_since_ms {
-                let stable_for_ms = now.saturating_sub(since);
-                if stable_for_ms >= self.control.stable_ms {
-                    return Ok(DosingStatus::Complete);
-                }
-            }
-            return Ok(DosingStatus::Running);
-        } else {
-            // Below target: not in completion zone; reset settle timer
-            self.settled_since_ms = None;
-        }
-
-        // 3) choose coarse or fine speed
-        let target_speed = if abs_err <= self.control.slow_at_g {
-            self.control.fine_speed
-        } else {
-            self.control.coarse_speed
-        };
 
         // Ensure motor is started before commanding speed
         if !self.motor_started {
@@ -387,6 +397,10 @@ impl Doser {
             .set_speed(target_speed)
             .map_err(|e| eyre::Report::new(map_hw_error_dyn(&*e)))
             .wrap_err("set_speed")?;
+
+        // Throttle loop to the configured sample rate.
+        let period_us = 1_000_000u64 / (self.filter.sample_rate_hz as u64);
+        self.clock.sleep(Duration::from_micros(period_us));
 
         Ok(DosingStatus::Running)
     }

@@ -16,21 +16,23 @@ median_window = 3
 sample_rate_hz = 50
 
 [control]
-coarse_speed = 1200
-fine_speed = 250
-slow_at_g = 1.0
+slow_at_g = 1.5     # switch to fine earlier
+coarse_speed = 900
+fine_speed = 120
+epsilon_g = 0.02    # stop just before target
 hysteresis_g = 0.05
-stable_ms = 250
-epsilon_g = 0.05    # <-- set non-zero; default in code is 0.0
+stable_ms = 400
+# <-- set non-zero; default in code is 0.0
 
 [timeouts]
 sample_ms = 120 # <-- required field name
 
 [safety]
 max_run_ms = 60000
-max_overshoot_g = 2.0
+max_overshoot_g = 5.0
 no_progress_epsilon_g = 0.02
 no_progress_ms = 1200
+
 
 [logging]
 file = "doser.log"

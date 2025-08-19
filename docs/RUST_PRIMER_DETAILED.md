@@ -629,3 +629,32 @@ stateDiagram-v2
 Notes on expansion beyond docs/RUST_PRIMER.md:
 
 - This detailed primer adds: precise symbol/file citations, code excerpts, explicit alternatives/trade‑offs per concept, concurrency specifics (worker thread lifecycle, atomics), time/determinism design with Clock/epoch and saturating math, CLI humanization and stderr policy, and deterministic CLI test hooks.
+
+---
+
+## Practical local setup (copy-paste)
+
+- Install Rust (stable):
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+- Run a simulated dose (no hardware needed):
+
+```bash
+DOSER_TEST_SIM_INC=0.01 cargo run -p doser_cli -- \
+  --config ./doser_config.toml --log-level info dose --grams 10
+```
+
+- Faster but still accurate:
+
+```bash
+DOSER_TEST_SIM_INC=0.02 cargo run -p doser_cli -- \
+  --config ./doser_config.toml --log-level info dose --grams 10
+```
+
+Notes:
+
+- Place global flags (like `--log-level`) before the subcommand (`dose`).
+- The simulator only increments while the motor is running; it stops immediately after stop.
