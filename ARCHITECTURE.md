@@ -172,9 +172,17 @@ DOSER_TEST_SIM_INC=0.02 cargo run -p doser_cli -- \
   --config ./doser_config.toml --log-level info dose --grams 10
 ```
 
+- Quick self-check (simulation backend):
+
+```bash
+cargo run -p doser_cli -- \
+  --config ./doser_config.toml self-check
+```
+
 Notes:
 
-- Place `--log-level` before the subcommand (e.g., `dose`).
+- Place `--log-level` before the subcommand (e.g., `dose` or `self-check`).
+- Expected self-check output ends with `OK` on success.
 - The simulator only increases weight while the motor is running; it stops once the controller stops the motor.
 - For precision tuning guidance, see the README “Precision tuning” section.
 
