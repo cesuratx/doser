@@ -69,6 +69,12 @@ fn completes_when_in_band_and_settled() {
         .with_motor(motor)
         .with_filter(FilterCfg::default())
         .with_control(control)
+        // Interpret raw counts as grams for this test
+        .with_calibration(doser_core::Calibration {
+            gain_g_per_count: 1.0,
+            zero_counts: 0,
+            offset_g: 0.0,
+        })
         .with_timeouts(Timeouts { sensor_ms: 10 })
         .with_target_grams(18.0) // exact hit in sequence
         .apply_calibration::<()>(None)
@@ -131,6 +137,12 @@ fn stops_immediately_when_target_crossed() {
             stable_ms: 0,
             ..ControlCfg::default()
         })
+        // Interpret raw counts as grams
+        .with_calibration(doser_core::Calibration {
+            gain_g_per_count: 1.0,
+            zero_counts: 0,
+            offset_g: 0.0,
+        })
         .with_timeouts(Timeouts { sensor_ms: 5 })
         .with_target_grams(10.0)
         .apply_calibration::<()>(None)
@@ -169,6 +181,12 @@ fn aborts_on_excessive_overshoot() {
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg::default())
         .with_safety(safety)
+        // Interpret raw counts as grams
+        .with_calibration(doser_core::Calibration {
+            gain_g_per_count: 1.0,
+            zero_counts: 0,
+            offset_g: 0.0,
+        })
         .with_timeouts(Timeouts { sensor_ms: 5 })
         .with_target_grams(10.0)
         .apply_calibration::<()>(None)

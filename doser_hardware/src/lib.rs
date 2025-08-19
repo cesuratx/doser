@@ -58,15 +58,14 @@ pub mod sim {
                 return Err("sensor timeout".into());
             }
             // Optional test hook: increment grams per read to simulate progress
-            if SIM_RUNNING.load(Ordering::Relaxed) {
-                if let Ok(inc) = std::env::var("DOSER_TEST_SIM_INC") {
-                    if let Ok(delta) = inc.parse::<f32>() {
-                        // Optionally scale by speed to emulate faster dosing
-                        let _sps = SIM_SPS.load(Ordering::Relaxed);
-                        // Keep it simple for now: one delta per read while running
-                        self.grams = (self.grams + delta).max(0.0);
-                    }
-                }
+            let delta = std::env::var("DOSER_TEST_SIM_INC")
+                .ok()
+                .and_then(|s| s.parse::<f32>().ok())
+                .unwrap_or(0.0);
+            if SIM_RUNNING.load(Ordering::Relaxed) && delta != 0.0 {
+                let _sps = SIM_SPS.load(Ordering::Relaxed);
+                // Keep it simple for now: one delta per read while running
+                self.grams = (self.grams + delta).max(0.0);
             }
             // For the sim, return raw counts with 0.01 g resolution (centigrams)
             Ok((self.grams * 100.0) as i32)
