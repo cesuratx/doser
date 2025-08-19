@@ -31,8 +31,8 @@ impl Motor for DummyMotor {
 fn builder_validates_target_range() {
     // Too small
     let err = match Doser::builder()
-        .with_scale(DummyScale::default())
-        .with_motor(DummyMotor::default())
+        .with_scale(DummyScale)
+        .with_motor(DummyMotor)
         .with_target_grams(0.0)
         .build()
     {
@@ -43,8 +43,8 @@ fn builder_validates_target_range() {
 
     // Too large
     let err = match Doser::builder()
-        .with_scale(DummyScale::default())
-        .with_motor(DummyMotor::default())
+        .with_scale(DummyScale)
+        .with_motor(DummyMotor)
         .with_target_grams(10_000.0)
         .build()
     {
@@ -57,8 +57,8 @@ fn builder_validates_target_range() {
 #[rstest]
 fn builder_accepts_defaults() {
     let res = Doser::builder()
-        .with_scale(DummyScale::default())
-        .with_motor(DummyMotor::default())
+        .with_scale(DummyScale)
+        .with_motor(DummyMotor)
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg::default())
         .with_timeouts(Timeouts::default())
@@ -76,7 +76,7 @@ fn builder_accepts_defaults() {
 fn builder_missing_scale_yields_build_error() {
     // Intentionally omit with_scale()
     let err = Doser::builder()
-        .with_motor(DummyMotor::default())
+        .with_motor(DummyMotor)
         .with_target_grams(10.0)
         .try_build()
         .expect_err("expected build error due to missing scale");

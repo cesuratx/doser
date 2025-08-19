@@ -39,7 +39,7 @@ fn aborts_immediately_on_estop() {
 
     let mut doser = Doser::builder()
         .with_scale(ConstScale(0))
-        .with_motor(SpyMotor::default())
+        .with_motor(SpyMotor)
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg::default())
         .with_timeouts(Timeouts { sensor_ms: 1 })
@@ -71,7 +71,7 @@ fn estop_bounce_does_not_trip_with_debounce_n3() {
 
     let mut doser = Doser::builder()
         .with_scale(ConstScale(0))
-        .with_motor(SpyMotor::default())
+        .with_motor(SpyMotor)
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg::default())
         .with_timeouts(Timeouts { sensor_ms: 1 })
@@ -98,7 +98,7 @@ fn estop_bounce_does_not_trip_with_debounce_n3() {
 fn estop_long_press_trips_and_latches_until_begin() {
     let mut doser = Doser::builder()
         .with_scale(ConstScale(0))
-        .with_motor(SpyMotor::default())
+        .with_motor(SpyMotor)
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg::default())
         .with_timeouts(Timeouts { sensor_ms: 1 })

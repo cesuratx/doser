@@ -28,8 +28,8 @@ impl Motor for NopMotor {
 #[rstest]
 fn builder_rejects_negative_no_progress_epsilon() {
     let err = Doser::builder()
-        .with_scale(NopScale::default())
-        .with_motor(NopMotor::default())
+        .with_scale(NopScale)
+        .with_motor(NopMotor)
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg::default())
         .with_safety(SafetyCfg {
@@ -40,6 +40,6 @@ fn builder_rejects_negative_no_progress_epsilon() {
         .with_target_grams(5.0)
         .try_build()
         .expect_err("expected invalid config");
-    let s = format!("{}", err);
+    let s = format!("{err}");
     assert!(s.contains("no_progress_epsilon_g must be > 0"));
 }

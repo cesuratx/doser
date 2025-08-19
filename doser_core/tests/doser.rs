@@ -53,7 +53,7 @@ impl Motor for SpyMotor {
 fn completes_when_in_band_and_settled() {
     // Target exactly present in the sequence -> completes immediately when hit.
     let scale = SeqScale::new([10, 15, 17, 18]);
-    let motor = SpyMotor::default();
+    let motor = SpyMotor { stopped: false };
 
     let control = ControlCfg {
         slow_at_g: 1.0,
@@ -96,7 +96,7 @@ fn propagates_scale_error_as_core_error() {
 
     let mut doser = Doser::builder()
         .with_scale(ErrScale)
-        .with_motor(SpyMotor::default())
+        .with_motor(SpyMotor { stopped: false })
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg::default())
         .with_timeouts(Timeouts { sensor_ms: 5 })
@@ -125,7 +125,7 @@ fn stops_immediately_when_target_crossed() {
     let scale = SeqScale::new([5, 9, 10, 11]);
     let mut doser = Doser::builder()
         .with_scale(scale)
-        .with_motor(SpyMotor::default())
+        .with_motor(SpyMotor { stopped: false })
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg {
             stable_ms: 0,
@@ -165,7 +165,7 @@ fn aborts_on_excessive_overshoot() {
     let scale = SeqScale::new([8, 9, 11]); // target 10, overshoot by 1g > 0.5
     let mut doser = Doser::builder()
         .with_scale(scale)
-        .with_motor(SpyMotor::default())
+        .with_motor(SpyMotor { stopped: false })
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg::default())
         .with_safety(safety)
@@ -203,7 +203,7 @@ fn aborts_on_max_runtime() {
     };
     let mut doser = Doser::builder()
         .with_scale(SeqScale::new([0]))
-        .with_motor(SpyMotor::default())
+        .with_motor(SpyMotor { stopped: false })
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg::default())
         .with_safety(safety)
@@ -226,7 +226,7 @@ fn calibration_converts_counts_to_grams() {
     let scale = SeqScale::new([10]);
     let mut doser = Doser::builder()
         .with_scale(scale)
-        .with_motor(SpyMotor::default())
+        .with_motor(SpyMotor { stopped: false })
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg::default())
         .with_calibration(doser_core::Calibration {
@@ -251,7 +251,7 @@ fn tare_zero_counts_shifts_baseline() {
     // zero_counts=100, gain 1 => raw 100 -> 0g; raw 105 -> 5g
     let mut doser = Doser::builder()
         .with_scale(SeqScale::new([100, 105]))
-        .with_motor(SpyMotor::default())
+        .with_motor(SpyMotor { stopped: false })
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg::default())
         .with_calibration(doser_core::Calibration {
@@ -301,7 +301,7 @@ fn median_filter_suppresses_spike() {
 
     let mut doser = Doser::builder()
         .with_scale(SeqScale::new([0, 0, 1000, 0, 0]))
-        .with_motor(SpyMotor::default())
+        .with_motor(SpyMotor { stopped: false })
         .with_filter(FilterCfg {
             ma_window: 1,
             median_window: 3,
@@ -339,7 +339,7 @@ fn requires_time_to_settle_when_stable_ms_positive() {
     let scale = SeqScale::new([9, 10, 10, 10]);
     let mut doser = Doser::builder()
         .with_scale(scale)
-        .with_motor(SpyMotor::default())
+        .with_motor(SpyMotor { stopped: false })
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg {
             slow_at_g: 1.0,
@@ -419,7 +419,7 @@ fn aborts_on_no_progress_watchdog() {
 
     let mut doser = Doser::builder()
         .with_scale(ConstScale(0))
-        .with_motor(SpyMotor::default())
+        .with_motor(SpyMotor { stopped: false })
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg {
             slow_at_g: 1.0,
@@ -500,7 +500,7 @@ fn aborts_on_no_progress_when_below_epsilon_for_window() {
     let tclk = TestClock::new();
     let mut doser = Doser::builder()
         .with_scale(ConstScale(0))
-        .with_motor(SpyMotor::default())
+        .with_motor(SpyMotor { stopped: false })
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg::default())
         .with_safety(safety)
@@ -543,7 +543,7 @@ fn estop_condition_latches_until_begin() {
 
     let mut doser = Doser::builder()
         .with_scale(ConstScale(0))
-        .with_motor(SpyMotor::default())
+        .with_motor(SpyMotor { stopped: false })
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg {
             slow_at_g: 1.0,

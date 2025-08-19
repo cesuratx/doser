@@ -37,7 +37,8 @@ epsilon_g = 0.02
 sample_ms = 10
 
 [safety]
-max_run_ms = 100
+# Allow enough time for the throttled control loop (10 Hz) to reach 5 g in sim
+max_run_ms = 5000
 max_overshoot_g = 5.0
 no_progress_epsilon_g = 0.02
 no_progress_ms = 1200
@@ -94,7 +95,7 @@ fn cli_table_cases(
         "stderr" => {
             assert.stderr(predicate::str::contains(needle));
         }
-        other => panic!("unknown stream: {}", other),
+        other => panic!("unknown stream: {other}"),
     }
 }
 

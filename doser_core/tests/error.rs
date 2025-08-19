@@ -54,7 +54,7 @@ impl Motor for NopMotor {
 fn timeouts_map_to_dosererror_timeout() {
     let mut doser = Doser::builder()
         .with_scale(FlakyScaleTimeout { ok_sent: false })
-        .with_motor(NopMotor::default())
+        .with_motor(NopMotor)
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg {
             slow_at_g: 1.0,
@@ -86,7 +86,7 @@ fn timeouts_map_to_dosererror_timeout() {
 fn non_timeout_hardware_errors_map_to_dosererror_hardware() {
     let mut doser = Doser::builder()
         .with_scale(FlakyScaleOtherErr { ok_sent: false })
-        .with_motor(NopMotor::default())
+        .with_motor(NopMotor)
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg::default())
         .with_timeouts(Timeouts { sensor_ms: 10 })
@@ -138,7 +138,7 @@ fn typed_hw_timeout_maps_to_timeout() {
 
     let mut doser = Doser::builder()
         .with_scale(FlakyTypedTimeout { ok_sent: false })
-        .with_motor(NopMotor::default())
+        .with_motor(NopMotor)
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg::default())
         .with_timeouts(Timeouts { sensor_ms: 10 })
@@ -192,7 +192,7 @@ fn typed_hw_other_maps_to_hardware_fault() {
 
     let mut doser = Doser::builder()
         .with_scale(FlakyTypedOther { ok_sent: false })
-        .with_motor(NopMotor::default())
+        .with_motor(NopMotor)
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg::default())
         .with_timeouts(Timeouts { sensor_ms: 10 })

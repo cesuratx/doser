@@ -59,7 +59,7 @@ fn calibration_rejects_duplicate_raw() {
         },
     ];
     let err = Calibration::from_rows(rows).expect_err("should fail on duplicate raw");
-    assert!(format!("{}", err).to_lowercase().contains("duplicate raw"));
+    assert!(format!("{err}").to_lowercase().contains("duplicate raw"));
 }
 
 #[rstest]
@@ -80,7 +80,7 @@ fn calibration_rejects_non_monotonic_zigzag() {
         },
     ];
     let err = Calibration::from_rows(rows).expect_err("should fail on non-monotonic raw");
-    assert!(format!("{}", err)
+    assert!(format!("{err}")
         .to_lowercase()
         .contains("monotonic (strictly increasing or strictly decreasing)"));
 }
@@ -96,7 +96,7 @@ fn csv_with_missing_header_errors() {
     writeln!(f, "200,1.0").unwrap();
 
     let err = load_calibration_csv(&path).expect_err("should error on bad headers");
-    assert!(format!("{}", err).contains("headers 'raw,grams'"));
+    assert!(format!("{err}").contains("headers 'raw,grams'"));
 }
 
 #[rstest]
@@ -109,5 +109,5 @@ fn csv_with_non_numeric_errors() {
     writeln!(f, "abc,xyz").unwrap();
 
     let err = load_calibration_csv(&path).expect_err("should error on non-numeric");
-    assert!(format!("{}", err).contains("invalid CSV row"));
+    assert!(format!("{err}").contains("invalid CSV row"));
 }

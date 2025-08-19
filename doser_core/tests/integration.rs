@@ -29,8 +29,7 @@ fn bin_path() -> PathBuf {
     } else {
         "doser_cli"
     };
-    let candidate = workspace_root.join("target").join(profile).join(exe_name);
-    candidate
+    workspace_root.join("target").join(profile).join(exe_name)
 }
 
 fn write_temp_config() -> PathBuf {
@@ -68,10 +67,9 @@ fn write_temp_config() -> PathBuf {
 fn ensure_exists(p: &Path) {
     if !p.exists() {
         panic!(
-            "CLI binary not found at {:?}.\n\
+            "CLI binary not found at {p:?}.\n\
              Make sure it’s built: `cargo build -p doser_cli`\n\
-             (This test looks under <workspace>/target/<profile>/doser_cli.)",
-            p
+             (This test looks under <workspace>/target/<profile>/doser_cli.)"
         );
     }
 }
@@ -86,12 +84,10 @@ fn cli_missing_arguments_prints_help() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
-    let help_text = format!("{}\n{}", stdout, stderr);
+    let help_text = format!("{stdout}\n{stderr}");
     assert!(
         help_text.contains("Usage:") && help_text.contains("doser_cli"),
-        "Expected help message; got:\nSTDOUT:\n{}\n\nSTDERR:\n{}\n",
-        stdout,
-        stderr
+        "Expected help message; got:\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}\n"
     );
 }
 
@@ -118,14 +114,11 @@ fn cli_self_check_prints_ok(#[case] json: bool) {
 
     assert!(
         out.status.success(),
-        "CLI exited with non-zero status.\nSTDOUT:\n{}\n\nSTDERR:\n{}\n",
-        stdout,
-        stderr
+        "CLI exited with non-zero status.\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}\n"
     );
     assert!(
         stdout.contains("OK"),
-        "Expected OK from self-check; got:\n{}\n",
-        stdout
+        "Expected OK from self-check; got:\n{stdout}\n"
     );
 }
 
@@ -155,7 +148,7 @@ impl Motor for NopMotor {
 fn simulated_hardware_error_in_core() {
     let mut doser = Doser::builder()
         .with_scale(ErrScale)
-        .with_motor(NopMotor::default())
+        .with_motor(NopMotor)
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg::default())
         .with_timeouts(Timeouts { sensor_ms: 5 })

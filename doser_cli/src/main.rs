@@ -26,8 +26,7 @@ fn humanize(err: &eyre::Report) -> String {
                 "What happened: Target grams not set.\nLikely causes: The CLI did not pass --grams or the builder was not configured.\nHow to fix: Provide the desired grams (e.g., `doser dose --grams 10`).".to_string()
             }
             BuildError::InvalidConfig(msg) => format!(
-                "What happened: Invalid configuration ({}).\nLikely causes: Missing or out-of-range values in the TOML.\nHow to fix: Edit the config file, then rerun. See README for a sample.",
-                msg
+                "What happened: Invalid configuration ({msg}).\nLikely causes: Missing or out-of-range values in the TOML.\nHow to fix: Edit the config file, then rerun. See README for a sample."
             ),
         };
     }
@@ -39,8 +38,7 @@ fn humanize(err: &eyre::Report) -> String {
             }
             // Fallback to generic for other domain errors
             _ => format!(
-                "What happened: {}.\nLikely causes: See logs.\nHow to fix: Re-run with --log-level=debug or set RUST_LOG for more detail.",
-                de
+                "What happened: {de}.\nLikely causes: See logs.\nHow to fix: Re-run with --log-level=debug or set RUST_LOG for more detail."
             ),
         };
     }
@@ -72,11 +70,10 @@ fn humanize(err: &eyre::Report) -> String {
     // Generic fallback
     let mut cause = String::new();
     if let Some(src) = err.source() {
-        cause = format!(" Cause: {}", src);
+        cause = format!(" Cause: {src}");
     }
     format!(
-        "Something went wrong.{}\nHow to fix: Re-run with --log-level=debug for details. Original: {}",
-        cause, msg
+        "Something went wrong.{cause}\nHow to fix: Re-run with --log-level=debug for details. Original: {msg}"
     )
 }
 
@@ -312,20 +309,18 @@ fn run_dose(
     };
     let defaults = doser_core::SafetyCfg::default();
     let safety = doser_core::SafetyCfg {
-        max_run_ms: max_run_ms_override.unwrap_or_else(|| {
-            if _cfg.safety.max_run_ms == 0 {
-                defaults.max_run_ms
-            } else {
-                _cfg.safety.max_run_ms
-            }
+        max_run_ms: max_run_ms_override.unwrap_or(if _cfg.safety.max_run_ms == 0 {
+            defaults.max_run_ms
+        } else {
+            _cfg.safety.max_run_ms
         }),
-        max_overshoot_g: max_overshoot_g_override.unwrap_or_else(|| {
+        max_overshoot_g: max_overshoot_g_override.unwrap_or(
             if _cfg.safety.max_overshoot_g == 0.0 {
                 defaults.max_overshoot_g
             } else {
                 _cfg.safety.max_overshoot_g
-            }
-        }),
+            },
+        ),
         no_progress_epsilon_g: _cfg.safety.no_progress_epsilon_g,
         no_progress_ms: _cfg.safety.no_progress_ms,
     };
