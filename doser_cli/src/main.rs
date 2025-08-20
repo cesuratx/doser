@@ -370,11 +370,7 @@ fn run_dose(
         unsafe {
             CPU_ZERO(&mut cpuset);
             CPU_SET(0, &mut cpuset);
-            libc::sched_setaffinity(
-                0,
-                std::mem::size_of::<libc::cpu_set_t>(),
-                &cpuset,
-            );
+            libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpuset);
         }
     }
     #[cfg(target_os = "macos")]
