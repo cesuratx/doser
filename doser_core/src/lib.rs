@@ -60,8 +60,7 @@ impl Calibration {
     /// Implementation (fixed-point):
     /// - gain_cg_per_count = round(100 * gain_g_per_count)
     /// - offset_cg = round(100 * offset_g)
-    /// - result_cg = saturating_mul(gain_cg_per_count, raw - zero_counts)
-    ///               + offset_cg
+    /// - result_cg = saturating_mul(gain_cg_per_count, raw - zero_counts) + offset_cg
     ///
     /// Rationale:
     /// - Avoids per-sample floating-point math in the control loop.
