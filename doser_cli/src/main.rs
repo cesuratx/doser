@@ -360,9 +360,9 @@ fn run_dose(
         unsafe {
             mlockall(MCL_CURRENT | MCL_FUTURE);
         }
-        let mut param = sched_param { sched_priority: 99 };
+        let param = sched_param { sched_priority: 99 };
         unsafe {
-            sched_setscheduler(0, SCHED_FIFO, &mut param);
+            sched_setscheduler(0, SCHED_FIFO, &param);
         }
         // Optionally set affinity to CPU 0
         // libc::CPU_ZERO/CPU_SET expect &mut cpu_set_t on Linux
