@@ -246,17 +246,21 @@ impl Doser {
         }
         if w_cg + self.epsilon_cg >= self.target_cg {
             let _ = self.motor_stop();
+            // Start settling window unconditionally once in completion zone.
             if self.settled_since_ms.is_none() {
                 self.settled_since_ms = Some(now);
             }
-            if let Some(since) = self.settled_since_ms {
-                if now.saturating_sub(since) >= self.control.stable_ms {
-                    return Ok(DosingStatus::Complete);
-                }
+            if let Some(since) = self.settled_since_ms
+                && now.saturating_sub(since) >= self.control.stable_ms
+            {
+                return Ok(DosingStatus::Complete);
             }
+            // Keep polling while settled window accrues.
+            // Throttle loop to the configured sample rate.
             self.clock.sleep(Duration::from_micros(self.period_us));
             return Ok(DosingStatus::Running);
         } else {
+            // Below target: not in completion zone; reset settle timer
             self.settled_since_ms = None;
         }
         let target_speed = if abs_err_cg <= self.slow_at_cg && self.slow_at_cg > 0 {
@@ -425,11 +429,10 @@ impl Doser {
             if self.settled_since_ms.is_none() {
                 self.settled_since_ms = Some(now);
             }
-            if let Some(since) = self.settled_since_ms {
-                let stable_for_ms = now.saturating_sub(since);
-                if stable_for_ms >= self.control.stable_ms {
-                    return Ok(DosingStatus::Complete);
-                }
+            if let Some(since) = self.settled_since_ms
+                && now.saturating_sub(since) >= self.control.stable_ms
+            {
+                return Ok(DosingStatus::Complete);
             }
             // Keep polling while settled window accrues.
             // Throttle loop to the configured sample rate.
@@ -931,13 +934,14 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserG<S, M> {
         }
         if w_cg + self.epsilon_cg >= self.target_cg {
             let _ = self.motor_stop();
+            // Start settling window unconditionally once in completion zone.
             if self.settled_since_ms.is_none() {
                 self.settled_since_ms = Some(now);
             }
-            if let Some(since) = self.settled_since_ms {
-                if now.saturating_sub(since) >= self.control.stable_ms {
-                    return Ok(DosingStatus::Complete);
-                }
+            if let Some(since) = self.settled_since_ms
+                && now.saturating_sub(since) >= self.control.stable_ms
+            {
+                return Ok(DosingStatus::Complete);
             }
             self.clock.sleep(Duration::from_micros(self.period_us));
             return Ok(DosingStatus::Running);
@@ -1080,10 +1084,10 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserG<S, M> {
             if self.settled_since_ms.is_none() {
                 self.settled_since_ms = Some(now);
             }
-            if let Some(since) = self.settled_since_ms {
-                if now.saturating_sub(since) >= self.control.stable_ms {
-                    return Ok(DosingStatus::Complete);
-                }
+            if let Some(since) = self.settled_since_ms
+                && now.saturating_sub(since) >= self.control.stable_ms
+            {
+                return Ok(DosingStatus::Complete);
             }
             self.clock.sleep(Duration::from_micros(self.period_us));
             return Ok(DosingStatus::Running);
