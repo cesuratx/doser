@@ -374,14 +374,33 @@ fn run_dose(
         }
         // Optionally set affinity to CPU 0
         // libc::CPU_ZERO/CPU_SET expect &mut cpu_set_t on Linux
+        let cpu_index: usize = 0;
         let mut cpuset: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-        unsafe {
-            CPU_ZERO(&mut cpuset);
-            CPU_SET(0, &mut cpuset);
-            let rc = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpuset);
-            if rc != 0 {
-                let err = std::io::Error::last_os_error();
-                eprintln!("Warning: sched_setaffinity failed: {err}");
+        // Bounds checks before touching the set
+        let nprocs_onln = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
+        if nprocs_onln <= 0 {
+            eprintln!(
+                "Warning: sysconf(_SC_NPROCESSORS_ONLN) returned {nprocs_onln}; skipping affinity"
+            );
+        } else if (cpu_index as libc::c_long) >= nprocs_onln {
+            eprintln!(
+                "Warning: CPU index {cpu_index} out of range (online={nprocs_onln}); skipping affinity"
+            );
+        } else if cpu_index >= (libc::CPU_SETSIZE as usize) {
+            eprintln!(
+                "Warning: CPU index {cpu_index} >= CPU_SETSIZE={}",
+                libc::CPU_SETSIZE
+            );
+        } else {
+            unsafe {
+                CPU_ZERO(&mut cpuset);
+                CPU_SET(cpu_index, &mut cpuset);
+                let rc =
+                    libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpuset);
+                if rc != 0 {
+                    let err = std::io::Error::last_os_error();
+                    eprintln!("Warning: sched_setaffinity failed: {err}");
+                }
             }
         }
     }
@@ -402,7 +421,7 @@ fn run_dose(
     let mut latencies = Vec::new();
     let mut missed_deadlines = 0;
     let mut sample_count = 0;
-    let expected_period_us = (1_000_000u64 / u64::from(_cfg.filter.sample_rate_hz.max(1))).max(1);
+    let expected_period_us = doser_core::util::period_us(_cfg.filter.sample_rate_hz);
 
     // Builder/config mapping
     let filter = doser_core::FilterCfg {

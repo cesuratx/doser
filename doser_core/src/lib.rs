@@ -7,6 +7,7 @@ pub mod error;
 pub mod mocks;
 pub mod runner;
 pub mod sampler;
+pub mod util;
 
 use crate::error::BuildError;
 use crate::error::{DoserError, Result};
@@ -49,11 +50,36 @@ impl Calibration {
     pub fn to_grams(&self, raw: i32) -> f32 {
         self.gain_g_per_count * ((raw - self.zero_counts) as f32) + self.offset_g
     }
-    /// Convert raw counts directly to centigrams using fixed-point arithmetic.
+    /// Convert raw counts directly to centigrams (cg, where 1 cg = 0.01 g)
+    /// using integer fixed-point arithmetic.
     ///
-    /// This avoids converting intermediate values to floating-point on every call.
-    /// It quantizes the calibration parameters to centigrams once per call and
-    /// uses saturating math to prevent overflow for extreme inputs.
+    /// Definition (continuous):
+    ///   grams = gain_g_per_count * (raw - zero_counts) + offset_g
+    ///   centigrams = round(100 * grams)
+    ///
+    /// Implementation (fixed-point):
+    /// - gain_cg_per_count = round(100 * gain_g_per_count)
+    /// - offset_cg = round(100 * offset_g)
+    /// - result_cg = saturating_mul(gain_cg_per_count, raw - zero_counts)
+    ///               + offset_cg
+    ///
+    /// Rationale:
+    /// - Avoids per-sample floating-point math in the control loop.
+    /// - Keeps all controller thresholds and comparisons in one integer unit (cg).
+    /// - Uses saturating ops to avoid overflow on extreme inputs/parameters.
+    ///
+    /// Rounding and error bounds:
+    /// - `gain_g_per_count` and `offset_g` are rounded to the nearest centigram
+    ///   before use. The returned value is typically within ~0.5 cg of
+    ///   `round(100 * to_grams(raw))` given stable parameters.
+    ///
+    /// Units:
+    /// - Input: `raw` is ADC counts.
+    /// - Output: integer centigrams (cg).
+    ///
+    /// Example:
+    /// - If `gain_g_per_count = 0.01`, `zero_counts = 0`, `offset_g = 0.0`,
+    ///   and `raw = 123`, then `to_cg(123) == 123` (i.e., 1.23 g).
     pub fn to_cg(&self, raw: i32) -> i32 {
         let delta = raw.saturating_sub(self.zero_counts);
         let gain_cg_per_count = (self.gain_g_per_count * 100.0).round() as i32;
@@ -716,7 +742,7 @@ impl<S, M, T> DoserBuilder<S, M, T> {
         let now = clock.ms_since(epoch); // 0
 
         // Precompute loop period (us)
-        let period_us = 1_000_000u64 / u64::from(filter.sample_rate_hz);
+        let period_us = crate::util::period_us(filter.sample_rate_hz);
 
         // Precompute integer thresholds in centigrams
         let to_cg = |g: f32| ((g * 100.0).round()) as i32;
@@ -1019,7 +1045,7 @@ where
     let med_cap = filter.median_window.max(1);
     let epoch = clock.now();
     let now = clock.ms_since(epoch);
-    let period_us = 1_000_000u64 / u64::from(filter.sample_rate_hz);
+    let period_us = crate::util::period_us(filter.sample_rate_hz);
     let to_cg = |g: f32| ((g * 100.0).round()) as i32;
     let target_cg = to_cg(target_g);
     let epsilon_cg = to_cg(control.epsilon_g);

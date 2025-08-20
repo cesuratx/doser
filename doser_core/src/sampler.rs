@@ -21,7 +21,7 @@ impl Sampler {
         let (tx, rx) = xch::bounded(1);
         let last_ok = Arc::new(AtomicU64::new(0));
         let last_ok_clone = last_ok.clone();
-        let period = Duration::from_micros(1_000_000u64 / u64::from(hz));
+        let period = Duration::from_micros(crate::util::period_us(hz));
         let epoch = clock.now();
 
         std::thread::spawn(move || {

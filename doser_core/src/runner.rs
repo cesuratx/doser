@@ -140,8 +140,8 @@ where
     // Use shared NoopScale since step_from_raw won't call read()
     use crate::mocks::NoopScale;
 
-    let period_us = 1_000_000u64 / u64::from(filter.sample_rate_hz);
-    let _period_ms = (1000u64 / u64::from(filter.sample_rate_hz)).max(1);
+    let period_us = crate::util::period_us(filter.sample_rate_hz);
+    let _period_ms = crate::util::period_ms(filter.sample_rate_hz);
     let fast_threshold = timeouts.sensor_ms.saturating_mul(4);
     let safe_threshold = std::cmp::max(fast_threshold, _period_ms.saturating_mul(2));
     // Bound stall threshold by max_run_ms to avoid underflow
