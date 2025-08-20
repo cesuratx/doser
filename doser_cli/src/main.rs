@@ -358,11 +358,19 @@ fn run_dose(
             SCHED_FIFO,
         };
         unsafe {
-            mlockall(MCL_CURRENT | MCL_FUTURE);
+            let rc = mlockall(MCL_CURRENT | MCL_FUTURE);
+            if rc != 0 {
+                let err = std::io::Error::last_os_error();
+                eprintln!("Warning: mlockall failed: {err}");
+            }
         }
         let param = sched_param { sched_priority: 99 };
         unsafe {
-            sched_setscheduler(0, SCHED_FIFO, &param);
+            let rc = sched_setscheduler(0, SCHED_FIFO, &param);
+            if rc != 0 {
+                let err = std::io::Error::last_os_error();
+                eprintln!("Warning: sched_setscheduler(SCHED_FIFO) failed: {err}");
+            }
         }
         // Optionally set affinity to CPU 0
         // libc::CPU_ZERO/CPU_SET expect &mut cpu_set_t on Linux
@@ -370,14 +378,22 @@ fn run_dose(
         unsafe {
             CPU_ZERO(&mut cpuset);
             CPU_SET(0, &mut cpuset);
-            libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpuset);
+            let rc = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpuset);
+            if rc != 0 {
+                let err = std::io::Error::last_os_error();
+                eprintln!("Warning: sched_setaffinity failed: {err}");
+            }
         }
     }
     #[cfg(target_os = "macos")]
     if rt {
         use libc::mlockall;
         unsafe {
-            mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE);
+            let rc = mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE);
+            if rc != 0 {
+                let err = std::io::Error::last_os_error();
+                eprintln!("Warning: mlockall failed: {err}");
+            }
         }
         eprintln!("Warning: macOS does not support SCHED_FIFO or affinity; only mlockall applied.");
     }
@@ -386,7 +402,7 @@ fn run_dose(
     let mut latencies = Vec::new();
     let mut missed_deadlines = 0;
     let mut sample_count = 0;
-    let expected_period_us = (1_000_000u64 / _cfg.filter.sample_rate_hz.max(1) as u64).max(1);
+    let expected_period_us = (1_000_000u64 / u64::from(_cfg.filter.sample_rate_hz.max(1))).max(1);
 
     // Builder/config mapping
     let filter = doser_core::FilterCfg {
@@ -540,16 +556,8 @@ fn run_dose(
         };
         let estop_check_core: Option<Box<dyn Fn() -> bool>> =
             estop_check.map(|f| -> Box<dyn Fn() -> bool> { Box::new(f) });
-        // Local NoopScale for sampler-driven mode
-        struct NoopScale;
-        impl doser_traits::Scale for NoopScale {
-            fn read(
-                &mut self,
-                _timeout: std::time::Duration,
-            ) -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
-                Err(Box::new(std::io::Error::other("noop scale")))
-            }
-        }
+        // Use shared NoopScale for sampler-driven mode
+        use doser_core::mocks::NoopScale;
         let mut doser = doser_core::build_doser(
             NoopScale,
             motor,

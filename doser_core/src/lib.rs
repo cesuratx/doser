@@ -4,6 +4,7 @@
 //! - One-step control loop (call step() from the CLI or a strategy)
 
 pub mod error;
+pub mod mocks;
 pub mod runner;
 pub mod sampler;
 
@@ -18,6 +19,24 @@ use std::time::{Duration, Instant};
 // For typed hardware error mapping
 use doser_hardware::error::HwError;
 
+/// Integer division rounded to nearest, handling negatives consistently.
+///
+/// Behavior:
+/// - For positive numerators, this computes `(n + d/2) / d`.
+/// - For negative numerators, this computes `(n - d/2) / d`.
+/// - Division truncates toward zero in Rust, so this yields round-to-nearest
+///   with ties rounded away from zero.
+/// - `denom` must be > 0.
+#[inline]
+fn div_round_nearest_i32(numer: i32, denom: i32) -> i32 {
+    debug_assert!(denom > 0);
+    if numer >= 0 {
+        (numer + (denom / 2)) / denom
+    } else {
+        (numer - (denom / 2)) / denom
+    }
+}
+
 /// Simple linear calibration from raw scale counts to grams.
 /// grams = gain_g_per_count * (raw - zero_counts) + offset_g
 #[derive(Debug, Clone)]
@@ -29,6 +48,19 @@ pub struct Calibration {
 impl Calibration {
     pub fn to_grams(&self, raw: i32) -> f32 {
         self.gain_g_per_count * ((raw - self.zero_counts) as f32) + self.offset_g
+    }
+    /// Convert raw counts directly to centigrams using fixed-point arithmetic.
+    ///
+    /// This avoids converting intermediate values to floating-point on every call.
+    /// It quantizes the calibration parameters to centigrams once per call and
+    /// uses saturating math to prevent overflow for extreme inputs.
+    pub fn to_cg(&self, raw: i32) -> i32 {
+        let delta = raw.saturating_sub(self.zero_counts);
+        let gain_cg_per_count = (self.gain_g_per_count * 100.0).round() as i32;
+        let offset_cg = (self.offset_g * 100.0).round() as i32;
+        gain_cg_per_count
+            .saturating_mul(delta)
+            .saturating_add(offset_cg)
     }
 }
 impl Default for Calibration {
@@ -221,11 +253,11 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             let _ = self.motor_stop();
             return Ok(DosingStatus::Aborted(DoserError::State("estop".into())));
         }
-        let w_cg_raw = ((self.calibration.to_grams(raw) * 100.0).round()) as i32;
+        let w_cg_raw = self.calibration.to_cg(raw);
         let w_cg = self.apply_filter(w_cg_raw);
         self.last_weight_cg = w_cg;
         let err_cg = self.target_cg - w_cg;
-        let abs_err_cg = err_cg.unsigned_abs() as i32;
+        let abs_err_cg = err_cg.unsigned_abs(); // u32 to avoid overflow on i32::MIN
         let now = self.clock.ms_since(self.epoch);
         if now.saturating_sub(self.start_ms) >= self.safety.max_run_ms {
             let _ = self.motor_stop();
@@ -258,7 +290,7 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             // Below target: not in completion zone; reset settle timer
             self.settled_since_ms = None;
         }
-        let target_speed = if abs_err_cg <= self.slow_at_cg && self.slow_at_cg > 0 {
+        let target_speed = if self.slow_at_cg > 0 && abs_err_cg <= self.slow_at_cg as u32 {
             let ratio = (abs_err_cg as f32 / self.slow_at_cg as f32).clamp(0.0, 1.0);
             let min_frac = 0.2_f32;
             let frac = min_frac + (1.0 - min_frac) * ratio;
@@ -267,7 +299,7 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             self.control.coarse_speed
         };
         if self.safety.no_progress_ms > 0 && self.no_progress_epsilon_cg > 0 && target_speed > 0 {
-            if (w_cg - self.last_progress_cg).unsigned_abs() as i32 >= self.no_progress_epsilon_cg {
+            if (w_cg - self.last_progress_cg).unsigned_abs() >= self.no_progress_epsilon_cg as u32 {
                 self.last_progress_cg = w_cg;
                 self.last_progress_at_ms = now;
             } else if now.saturating_sub(self.last_progress_at_ms) >= self.safety.no_progress_ms {
@@ -365,11 +397,7 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             }
             let sum: i32 = self.ma_buf.iter().copied().sum();
             let len = self.ma_buf.len() as i32;
-            if sum >= 0 {
-                (sum + (len / 2)) / len
-            } else {
-                (sum - (len / 2)) / len
-            }
+            div_round_nearest_i32(sum, len)
         } else {
             after_median
         }
@@ -391,13 +419,13 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             .map_err(|e| eyre::Report::new(map_hw_error_dyn(&*e)))
             .wrap_err("reading scale")?;
 
-        // Apply calibration (raw counts -> grams -> centigrams) and filtering
-        let w_cg_raw = ((self.calibration.to_grams(raw) * 100.0).round()) as i32;
+        // Apply calibration (raw counts -> centigrams) and filtering
+        let w_cg_raw = self.calibration.to_cg(raw);
         let w_cg = self.apply_filter(w_cg_raw);
 
         self.last_weight_cg = w_cg;
         let err_cg = self.target_cg - w_cg;
-        let abs_err_cg = err_cg.unsigned_abs() as i32;
+        let abs_err_cg = err_cg.unsigned_abs();
 
         let now = self.clock.ms_since(self.epoch);
 
@@ -439,7 +467,7 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
         }
 
         // 3) choose coarse or fine speed (use proportional taper with integer error)
-        let target_speed = if abs_err_cg <= self.slow_at_cg && self.slow_at_cg > 0 {
+        let target_speed = if self.slow_at_cg > 0 && abs_err_cg <= self.slow_at_cg as u32 {
             let ratio = (abs_err_cg as f32 / self.slow_at_cg as f32).clamp(0.0, 1.0);
             let min_frac = 0.2_f32; // floor at 20% of fine speed
             let frac = min_frac + (1.0 - min_frac) * ratio; // [min_frac, 1.0]
@@ -450,7 +478,7 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
 
         // 3a) no-progress watchdog (only while motor is commanded to run)
         if self.safety.no_progress_ms > 0 && self.no_progress_epsilon_cg > 0 && target_speed > 0 {
-            if (w_cg - self.last_progress_cg).unsigned_abs() as i32 >= self.no_progress_epsilon_cg {
+            if (w_cg - self.last_progress_cg).unsigned_abs() >= self.no_progress_epsilon_cg as u32 {
                 self.last_progress_cg = w_cg;
                 self.last_progress_at_ms = now;
             } else if now.saturating_sub(self.last_progress_at_ms) >= self.safety.no_progress_ms {
@@ -688,7 +716,7 @@ impl<S, M, T> DoserBuilder<S, M, T> {
         let now = clock.ms_since(epoch); // 0
 
         // Precompute loop period (us)
-        let period_us = 1_000_000u64 / (filter.sample_rate_hz as u64);
+        let period_us = 1_000_000u64 / u64::from(filter.sample_rate_hz);
 
         // Precompute integer thresholds in centigrams
         let to_cg = |g: f32| ((g * 100.0).round()) as i32;
@@ -991,7 +1019,7 @@ where
     let med_cap = filter.median_window.max(1);
     let epoch = clock.now();
     let now = clock.ms_since(epoch);
-    let period_us = 1_000_000u64 / (filter.sample_rate_hz as u64);
+    let period_us = 1_000_000u64 / u64::from(filter.sample_rate_hz);
     let to_cg = |g: f32| ((g * 100.0).round()) as i32;
     let target_cg = to_cg(target_g);
     let epsilon_cg = to_cg(control.epsilon_g);

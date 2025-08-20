@@ -137,19 +137,11 @@ where
     S: doser_traits::Scale + Send + 'static,
     M: doser_traits::Motor + 'static,
 {
-    // Internal NoopScale since step_from_raw won't call read()
-    struct NoopScale;
-    impl doser_traits::Scale for NoopScale {
-        fn read(
-            &mut self,
-            _timeout: Duration,
-        ) -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
-            Err(Box::new(std::io::Error::other("noop scale")))
-        }
-    }
+    // Use shared NoopScale since step_from_raw won't call read()
+    use crate::mocks::NoopScale;
 
-    let period_us = 1_000_000u64 / (filter.sample_rate_hz as u64);
-    let _period_ms = (1000u64 / (filter.sample_rate_hz as u64)).max(1);
+    let period_us = 1_000_000u64 / u64::from(filter.sample_rate_hz);
+    let _period_ms = (1000u64 / u64::from(filter.sample_rate_hz)).max(1);
     let fast_threshold = timeouts.sensor_ms.saturating_mul(4);
     let safe_threshold = std::cmp::max(fast_threshold, _period_ms.saturating_mul(2));
     // Bound stall threshold by max_run_ms to avoid underflow
