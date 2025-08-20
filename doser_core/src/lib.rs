@@ -4,6 +4,7 @@
 //! - One-step control loop (call step() from the CLI or a strategy)
 
 pub mod error;
+pub mod runner;
 pub mod sampler;
 
 use crate::error::BuildError;
