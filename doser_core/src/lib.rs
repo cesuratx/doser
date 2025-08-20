@@ -142,10 +142,10 @@ impl Default for Timeouts {
     }
 }
 
-/// Main core object — owns the Scale/Motor and executes the control loop.
-pub struct Doser {
-    scale: Box<dyn doser_traits::Scale>,
-    motor: Box<dyn doser_traits::Motor>,
+/// Unified core for both dynamic (boxed) and generic (static dispatch) variants.
+pub struct DoserCore<S: doser_traits::Scale, M: doser_traits::Motor> {
+    scale: S,
+    motor: M,
     filter: FilterCfg,
     control: ControlCfg,
     safety: SafetyCfg,
@@ -189,9 +189,9 @@ pub struct Doser {
     estop_count: u8,
 }
 
-impl core::fmt::Debug for Doser {
+impl<S: doser_traits::Scale, M: doser_traits::Motor> core::fmt::Debug for DoserCore<S, M> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Doser")
+        f.debug_struct("DoserCore")
             .field("target_g", &((self.target_cg as f32) / 100.0))
             .field("last_weight_g", &((self.last_weight_cg as f32) / 100.0))
             .field("motor_started", &self.motor_started)
@@ -199,12 +199,7 @@ impl core::fmt::Debug for Doser {
     }
 }
 
-impl Doser {
-    /// Start building a Doser.
-    pub fn builder() -> DoserBuilder<Missing, Missing, Missing> {
-        DoserBuilder::default()
-    }
-
+impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
     /// Return the last observed weight in grams.
     pub fn last_weight(&self) -> f32 {
         (self.last_weight_cg as f32) / 100.0
@@ -487,6 +482,66 @@ impl Doser {
     }
 }
 
+/// Public dynamic (boxed) doser that preserves the existing API via composition.
+pub struct Doser {
+    inner: DoserCore<Box<dyn doser_traits::Scale>, Box<dyn doser_traits::Motor>>,
+}
+
+impl core::fmt::Debug for Doser {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Doser")
+            .field("target_g", &((self.inner.target_cg as f32) / 100.0))
+            .field(
+                "last_weight_g",
+                &((self.inner.last_weight_cg as f32) / 100.0),
+            )
+            .field("motor_started", &self.inner.motor_started)
+            .finish()
+    }
+}
+
+impl Doser {
+    /// Start building a Doser.
+    pub fn builder() -> DoserBuilder<Missing, Missing, Missing> {
+        DoserBuilder::default()
+    }
+
+    /// Return the last observed weight in grams.
+    pub fn last_weight(&self) -> f32 {
+        self.inner.last_weight()
+    }
+
+    /// Optionally set the tare baseline in raw counts.
+    pub fn set_tare_counts(&mut self, zero_counts: i32) {
+        self.inner.set_tare_counts(zero_counts);
+    }
+
+    /// Return the configured filter parameters (currently informational).
+    pub fn filter_cfg(&self) -> &FilterCfg {
+        self.inner.filter_cfg()
+    }
+
+    /// Process a pre-sampled raw reading (centers Phase 3 sampler integration).
+    pub fn step_from_raw(&mut self, raw: i32) -> Result<DosingStatus> {
+        self.inner.step_from_raw(raw)
+    }
+
+    /// Reset per-run state (start time, settling window). Call before a new dose.
+    pub fn begin(&mut self) {
+        self.inner.begin();
+    }
+
+    /// One iteration of the dosing loop
+    pub fn step(&mut self) -> Result<DosingStatus> {
+        self.inner.step()
+    }
+
+    /// Stop the motor (best-effort).
+    pub fn motor_stop(&mut self) -> Result<()> {
+        self.inner.motor_stop()
+    }
+}
+
 // Map any error to a typed DoserError, with special handling for hardware errors.
 fn map_hw_error_dyn(e: &(dyn std::error::Error + 'static)) -> DoserError {
     if let Some(hw) = e.downcast_ref::<HwError>() {
@@ -644,34 +699,36 @@ impl<S, M, T> DoserBuilder<S, M, T> {
         let slow_at_cg = to_cg(control.slow_at_g);
 
         Ok(Doser {
-            scale,
-            motor,
-            filter,
-            control,
-            safety,
-            timeouts,
-            calibration,
-            target_cg,
-            clock,
-            epoch,
-            last_weight_cg: 0,
-            settled_since_ms: None,
-            start_ms: now,
-            ma_buf: VecDeque::with_capacity(ma_cap),
-            med_buf: VecDeque::with_capacity(med_cap),
-            tmp_med_buf: Vec::with_capacity(med_cap),
-            period_us,
-            slow_at_cg,
-            epsilon_cg,
-            max_overshoot_cg,
-            no_progress_epsilon_cg,
-            motor_started: false,
-            estop_check: self.estop_check,
-            last_progress_cg: 0,
-            last_progress_at_ms: now,
-            estop_latched: false,
-            estop_debounce_n,
-            estop_count: 0,
+            inner: DoserCore {
+                scale,
+                motor,
+                filter,
+                control,
+                safety,
+                timeouts,
+                calibration,
+                target_cg,
+                clock,
+                epoch,
+                last_weight_cg: 0,
+                settled_since_ms: None,
+                start_ms: now,
+                ma_buf: VecDeque::with_capacity(ma_cap),
+                med_buf: VecDeque::with_capacity(med_cap),
+                tmp_med_buf: Vec::with_capacity(med_cap),
+                period_us,
+                slow_at_cg,
+                epsilon_cg,
+                max_overshoot_cg,
+                no_progress_epsilon_cg,
+                motor_started: false,
+                estop_check: self.estop_check,
+                last_progress_cg: 0,
+                last_progress_at_ms: now,
+                estop_latched: false,
+                estop_debounce_n,
+                estop_count: 0,
+            },
         })
     }
 }
@@ -861,273 +918,8 @@ impl DoserBuilder<Set, Set, Set> {
     }
 }
 
-/// Generic, statically-dispatched doser for performance-critical paths.
-pub struct DoserG<S: doser_traits::Scale, M: doser_traits::Motor> {
-    scale: S,
-    motor: M,
-    filter: FilterCfg,
-    control: ControlCfg,
-    safety: SafetyCfg,
-    timeouts: Timeouts,
-    calibration: Calibration,
-    target_cg: i32,
-    pub(crate) clock: Arc<dyn Clock + Send + Sync>,
-    epoch: Instant,
-    last_weight_cg: i32,
-    settled_since_ms: Option<u64>,
-    start_ms: u64,
-    ma_buf: VecDeque<i32>,
-    med_buf: VecDeque<i32>,
-    tmp_med_buf: Vec<i32>,
-    period_us: u64,
-    slow_at_cg: i32,
-    epsilon_cg: i32,
-    max_overshoot_cg: i32,
-    no_progress_epsilon_cg: i32,
-    motor_started: bool,
-    estop_check: Option<Box<dyn Fn() -> bool>>,
-    last_progress_cg: i32,
-    last_progress_at_ms: u64,
-    estop_latched: bool,
-    estop_debounce_n: u8,
-    estop_count: u8,
-}
-
-impl<S: doser_traits::Scale, M: doser_traits::Motor> core::fmt::Debug for DoserG<S, M> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("DoserG")
-            .field("target_g", &((self.target_cg as f32) / 100.0))
-            .field("last_weight_g", &((self.last_weight_cg as f32) / 100.0))
-            .field("motor_started", &self.motor_started)
-            .finish()
-    }
-}
-
-impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserG<S, M> {
-    /// Return the last observed weight in grams.
-    pub fn last_weight(&self) -> f32 {
-        (self.last_weight_cg as f32) / 100.0
-    }
-    /// Process a pre-sampled raw reading (centers Phase 3 sampler integration).
-    pub fn step_from_raw(&mut self, raw: i32) -> Result<DosingStatus> {
-        if self.estop_latched || self.poll_estop() {
-            let _ = self.motor_stop();
-            return Ok(DosingStatus::Aborted(DoserError::State("estop".into())));
-        }
-        let w_cg_raw = ((self.calibration.to_grams(raw) * 100.0).round()) as i32;
-        let w_cg = self.apply_filter(w_cg_raw);
-        self.last_weight_cg = w_cg;
-        let err_cg = self.target_cg - w_cg;
-        let abs_err_cg = err_cg.unsigned_abs() as i32;
-        let now = self.clock.ms_since(self.epoch);
-        if now.saturating_sub(self.start_ms) >= self.safety.max_run_ms {
-            let _ = self.motor_stop();
-            return Ok(DosingStatus::Aborted(DoserError::State(
-                "max run time exceeded".into(),
-            )));
-        }
-        if w_cg > self.target_cg + self.max_overshoot_cg {
-            let _ = self.motor_stop();
-            return Ok(DosingStatus::Aborted(DoserError::State(
-                "max overshoot exceeded".into(),
-            )));
-        }
-        if w_cg + self.epsilon_cg >= self.target_cg {
-            let _ = self.motor_stop();
-            // Start settling window unconditionally once in completion zone.
-            if self.settled_since_ms.is_none() {
-                self.settled_since_ms = Some(now);
-            }
-            if let Some(since) = self.settled_since_ms
-                && now.saturating_sub(since) >= self.control.stable_ms
-            {
-                return Ok(DosingStatus::Complete);
-            }
-            self.clock.sleep(Duration::from_micros(self.period_us));
-            return Ok(DosingStatus::Running);
-        } else {
-            self.settled_since_ms = None;
-        }
-        let target_speed = if abs_err_cg <= self.slow_at_cg && self.slow_at_cg > 0 {
-            let ratio = (abs_err_cg as f32 / self.slow_at_cg as f32).clamp(0.0, 1.0);
-            let min_frac = 0.2_f32;
-            let frac = min_frac + (1.0 - min_frac) * ratio;
-            ((self.control.fine_speed as f32 * frac).max(1.0)) as u32
-        } else {
-            self.control.coarse_speed
-        };
-        if self.safety.no_progress_ms > 0 && self.no_progress_epsilon_cg > 0 && target_speed > 0 {
-            if (w_cg - self.last_progress_cg).unsigned_abs() as i32 >= self.no_progress_epsilon_cg {
-                self.last_progress_cg = w_cg;
-                self.last_progress_at_ms = now;
-            } else if now.saturating_sub(self.last_progress_at_ms) >= self.safety.no_progress_ms {
-                let _ = self.motor_stop();
-                return Ok(DosingStatus::Aborted(DoserError::State(
-                    "no progress".into(),
-                )));
-            }
-        }
-        if !self.motor_started {
-            self.motor
-                .start()
-                .map_err(|e| eyre::Report::new(map_hw_error_dyn(&*e)))
-                .wrap_err("motor start")?;
-            self.motor_started = true;
-        }
-        self.motor
-            .set_speed(target_speed)
-            .map_err(|e| eyre::Report::new(map_hw_error_dyn(&*e)))
-            .wrap_err("set_speed")?;
-        self.clock.sleep(Duration::from_micros(self.period_us));
-        Ok(DosingStatus::Running)
-    }
-    pub fn begin(&mut self) {
-        self.epoch = self.clock.now();
-        let now = self.clock.ms_since(self.epoch);
-        self.start_ms = now;
-        self.settled_since_ms = None;
-        self.ma_buf.clear();
-        self.med_buf.clear();
-        self.last_weight_cg = 0;
-        self.motor_started = false;
-        self.last_progress_cg = 0;
-        self.last_progress_at_ms = now;
-        self.estop_latched = false;
-        self.estop_count = 0;
-    }
-    pub fn motor_stop(&mut self) -> Result<()> {
-        self.motor
-            .stop()
-            .map_err(|e| eyre::Report::new(map_hw_error_dyn(&*e)))
-            .wrap_err("motor_stop")
-    }
-    fn poll_estop(&mut self) -> bool {
-        if let Some(check) = &self.estop_check {
-            if check() {
-                self.estop_count = self.estop_count.saturating_add(1);
-                if self.estop_count >= self.estop_debounce_n {
-                    self.estop_latched = true;
-                }
-            } else {
-                self.estop_count = 0;
-            }
-        }
-        self.estop_latched
-    }
-    fn apply_filter(&mut self, w_cg: i32) -> i32 {
-        let med_win = self.filter.median_window.max(1);
-        let ma_win = self.filter.ma_window.max(1);
-        let after_median = if med_win > 1 {
-            self.med_buf.push_back(w_cg);
-            if self.med_buf.len() > med_win {
-                self.med_buf.pop_front();
-            }
-            self.tmp_med_buf.clear();
-            self.tmp_med_buf.extend(self.med_buf.iter().copied());
-            self.tmp_med_buf.sort_unstable();
-            let mid = self.tmp_med_buf.len() / 2;
-            if self.tmp_med_buf.len() % 2 == 0 {
-                (self.tmp_med_buf[mid - 1] + self.tmp_med_buf[mid]) / 2
-            } else {
-                self.tmp_med_buf[mid]
-            }
-        } else {
-            w_cg
-        };
-        if ma_win > 1 {
-            self.ma_buf.push_back(after_median);
-            if self.ma_buf.len() > ma_win {
-                self.ma_buf.pop_front();
-            }
-            let sum: i32 = self.ma_buf.iter().copied().sum();
-            let len = self.ma_buf.len() as i32;
-            if sum >= 0 {
-                (sum + (len / 2)) / len
-            } else {
-                (sum - (len / 2)) / len
-            }
-        } else {
-            after_median
-        }
-    }
-    pub fn step(&mut self) -> Result<DosingStatus> {
-        if self.estop_latched || self.poll_estop() {
-            let _ = self.motor_stop();
-            return Ok(DosingStatus::Aborted(DoserError::State("estop".into())));
-        }
-        let timeout = Duration::from_millis(self.timeouts.sensor_ms);
-        let raw = self
-            .scale
-            .read(timeout)
-            .map_err(|e| eyre::Report::new(map_hw_error_dyn(&*e)))
-            .wrap_err("reading scale")?;
-        let w_cg_raw = ((self.calibration.to_grams(raw) * 100.0).round()) as i32;
-        let w_cg = self.apply_filter(w_cg_raw);
-        self.last_weight_cg = w_cg;
-        let err_cg = self.target_cg - w_cg;
-        let abs_err_cg = err_cg.unsigned_abs() as i32;
-        let now = self.clock.ms_since(self.epoch);
-        if now.saturating_sub(self.start_ms) >= self.safety.max_run_ms {
-            let _ = self.motor_stop();
-            return Ok(DosingStatus::Aborted(DoserError::State(
-                "max run time exceeded".into(),
-            )));
-        }
-        if w_cg > self.target_cg + self.max_overshoot_cg {
-            let _ = self.motor_stop();
-            return Ok(DosingStatus::Aborted(DoserError::State(
-                "max overshoot exceeded".into(),
-            )));
-        }
-        if w_cg + self.epsilon_cg >= self.target_cg {
-            let _ = self.motor_stop();
-            if self.settled_since_ms.is_none() {
-                self.settled_since_ms = Some(now);
-            }
-            if let Some(since) = self.settled_since_ms
-                && now.saturating_sub(since) >= self.control.stable_ms
-            {
-                return Ok(DosingStatus::Complete);
-            }
-            self.clock.sleep(Duration::from_micros(self.period_us));
-            return Ok(DosingStatus::Running);
-        } else {
-            self.settled_since_ms = None;
-        }
-        let target_speed = if abs_err_cg <= self.slow_at_cg && self.slow_at_cg > 0 {
-            let ratio = (abs_err_cg as f32 / self.slow_at_cg as f32).clamp(0.0, 1.0);
-            let min_frac = 0.2_f32;
-            let frac = min_frac + (1.0 - min_frac) * ratio;
-            ((self.control.fine_speed as f32 * frac).max(1.0)) as u32
-        } else {
-            self.control.coarse_speed
-        };
-        if self.safety.no_progress_ms > 0 && self.no_progress_epsilon_cg > 0 && target_speed > 0 {
-            if (w_cg - self.last_progress_cg).unsigned_abs() as i32 >= self.no_progress_epsilon_cg {
-                self.last_progress_cg = w_cg;
-                self.last_progress_at_ms = now;
-            } else if now.saturating_sub(self.last_progress_at_ms) >= self.safety.no_progress_ms {
-                let _ = self.motor_stop();
-                return Ok(DosingStatus::Aborted(DoserError::State(
-                    "no progress".into(),
-                )));
-            }
-        }
-        if !self.motor_started {
-            self.motor
-                .start()
-                .map_err(|e| eyre::Report::new(map_hw_error_dyn(&*e)))
-                .wrap_err("motor start")?;
-            self.motor_started = true;
-        }
-        self.motor
-            .set_speed(target_speed)
-            .map_err(|e| eyre::Report::new(map_hw_error_dyn(&*e)))
-            .wrap_err("set_speed")?;
-        self.clock.sleep(Duration::from_micros(self.period_us));
-        Ok(DosingStatus::Running)
-    }
-}
+/// Generic, statically-dispatched alias using the unified core.
+pub type DoserG<S, M> = DoserCore<S, M>;
 
 /// Build a generic, statically-dispatched DoserG from concrete scale and motor.
 #[allow(clippy::too_many_arguments)]

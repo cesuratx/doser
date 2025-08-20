@@ -36,15 +36,29 @@ fn humanize(err: &eyre::Report) -> String {
     }
 
     if let Some(de) = err.downcast_ref::<DoserError>() {
-        return match de {
-            DoserError::Timeout => {
-                "What happened: Scale read timed out.\nLikely causes: HX711 not wired correctly, no power/ground, or timeout too low.\nHow to fix: Verify DT/SCK pins and power, and consider increasing hardware.sensor_read_timeout_ms in the config.".to_string()
+        // Specific domain cases first
+        if matches!(de, DoserError::Timeout) {
+            return "What happened: Scale read timed out.\nLikely causes: HX711 not wired correctly, no power/ground, or timeout too low.\nHow to fix: Verify DT/SCK pins and power, and consider increasing hardware.sensor_read_timeout_ms in the config.".to_string();
+        }
+        if let DoserError::State(s) = de {
+            let lower = s.to_ascii_lowercase();
+            if lower.contains("estop") {
+                return "What happened: Emergency stop was triggered.\nLikely causes: E-stop button pressed or input pin active.\nHow to fix: Release E-stop, ensure wiring is correct, then start a new run.".to_string();
             }
-            // Fallback to generic for other domain errors
-            _ => format!(
-                "What happened: {de}.\nLikely causes: See logs.\nHow to fix: Re-run with --log-level=debug or set RUST_LOG for more detail."
-            ),
-        };
+            if lower.contains("no progress") {
+                return "What happened: No progress watchdog tripped.\nLikely causes: Jammed auger, empty hopper, or scale not changing within threshold.\nHow to fix: Check mechanics and materials; adjust safety.no_progress_* in config if needed.".to_string();
+            }
+            if lower.contains("max run time exceeded") {
+                return "max run time was exceeded.\nLikely causes: Too conservative speeds, high target, or stalls.\nHow to fix: Increase safety.max_run_ms or adjust speeds/target.".to_string();
+            }
+            if lower.contains("max overshoot exceeded") {
+                return "What happened: Overshoot beyond safety limit.\nLikely causes: Inertia or too high coarse/fine speed near target.\nHow to fix: Lower speeds or increase safety.max_overshoot_g and tune epsilon/slow_at.".to_string();
+            }
+        }
+        // Fallback to generic for other domain errors
+        return format!(
+            "What happened: {de}.\nLikely causes: See logs.\nHow to fix: Re-run with --log-level=debug or set RUST_LOG for more detail."
+        );
     }
 
     // String-based heuristics for errors coming from init or config
@@ -171,6 +185,15 @@ enum Commands {
         /// Use direct control loop (no sampler); reads the scale inside the control loop
         #[arg(long, action = ArgAction::SetTrue)]
         direct: bool,
+        /// Print total runtime on completion
+        #[arg(long, action = ArgAction::SetTrue)]
+        print_runtime: bool,
+        /// Enable real-time mode (SCHED_FIFO, affinity, mlockall)
+        #[arg(long, action = ArgAction::SetTrue)]
+        rt: bool,
+        /// Print control loop and sampling stats
+        #[arg(long, action = ArgAction::SetTrue)]
+        stats: bool,
     },
     /// Quick health check (hardware presence / sim ok)
     SelfCheck,
@@ -276,6 +299,9 @@ fn real_main() -> eyre::Result<()> {
             max_run_ms,
             max_overshoot_g,
             direct,
+            print_runtime,
+            rt,
+            stats,
         } => {
             // CLI flag overrides config; otherwise use config default
             let use_direct = if direct {
@@ -286,7 +312,8 @@ fn real_main() -> eyre::Result<()> {
                     doser_config::RunMode::Direct => true,
                 }
             };
-            run_dose(
+            let t0 = std::time::Instant::now();
+            let res = run_dose(
                 &cfg,
                 calib.as_ref(),
                 grams,
@@ -294,13 +321,21 @@ fn real_main() -> eyre::Result<()> {
                 max_overshoot_g,
                 use_direct,
                 hw,
-            )?;
+                rt,
+                stats,
+            );
+            res?;
+            if print_runtime {
+                let ms = t0.elapsed().as_millis();
+                eprintln!("runtime: {ms} ms");
+            }
             Ok(())
         }
     }
 }
 
 #[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 fn run_dose(
     _cfg: &doser_config::Config,
     calib: Option<&Calibration>,
@@ -312,8 +347,47 @@ fn run_dose(
         impl doser_traits::Scale + Send + 'static,
         impl doser_traits::Motor + 'static,
     ),
+    rt: bool,
+    stats: bool,
 ) -> CoreResult<()> {
-    // Map typed config into core config objects
+    // Real-time mode setup (Linux/macOS)
+    #[cfg(target_os = "linux")]
+    if rt {
+        use libc::{
+            mlockall, sched_param, sched_setscheduler, CPU_SET, CPU_ZERO, MCL_CURRENT, MCL_FUTURE,
+            SCHED_FIFO,
+        };
+        unsafe {
+            mlockall(MCL_CURRENT | MCL_FUTURE);
+        }
+        let mut param = sched_param { sched_priority: 99 };
+        unsafe {
+            sched_setscheduler(0, SCHED_FIFO, &mut param);
+        }
+        // Optionally set affinity to CPU 0
+        let mut cpuset = std::mem::MaybeUninit::uninit();
+        unsafe {
+            CPU_ZERO(cpuset.as_mut_ptr());
+            CPU_SET(0, cpuset.as_mut_ptr());
+            libc::sched_setaffinity(0, std::mem::size_of_val(&cpuset), cpuset.as_ptr());
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if rt {
+        use libc::mlockall;
+        unsafe {
+            mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE);
+        }
+        eprintln!("Warning: macOS does not support SCHED_FIFO or affinity; only mlockall applied.");
+    }
+
+    // Stats: control loop latency, jitter, missed deadlines
+    let mut latencies = Vec::new();
+    let mut missed_deadlines = 0;
+    let mut sample_count = 0;
+    let expected_period_us = (1_000_000u64 / _cfg.filter.sample_rate_hz.max(1) as u64).max(1);
+
+    // Builder/config mapping
     let filter = doser_core::FilterCfg {
         ma_window: _cfg.filter.ma_window,
         median_window: _cfg.filter.median_window,
@@ -325,7 +399,6 @@ fn run_dose(
         slow_at_g: _cfg.control.slow_at_g,
         hysteresis_g: _cfg.control.hysteresis_g,
         stable_ms: _cfg.control.stable_ms,
-        // new: control epsilon
         epsilon_g: _cfg.control.epsilon_g,
     };
     let timeouts = doser_core::Timeouts {
@@ -348,18 +421,12 @@ fn run_dose(
         no_progress_epsilon_g: _cfg.safety.no_progress_epsilon_g,
         no_progress_ms: _cfg.safety.no_progress_ms,
     };
-
-    // Calibration mapping
     let calibration_core = calib.map(|c| doser_core::Calibration {
         gain_g_per_count: c.scale_factor,
         zero_counts: c.offset,
         ..Default::default()
     });
-
-    // Split hardware into scale and motor
     let (scale, motor) = hw;
-
-    // Optional E-stop wiring (hardware builds only)
     let estop_check: Option<Box<dyn Fn() -> bool + Send + Sync>> = {
         #[cfg(feature = "hardware")]
         {
@@ -393,8 +460,6 @@ fn run_dose(
             None
         }
     };
-
-    // Select sampling mode based on flag, config, and build
     let sampling_mode = if direct {
         SamplingMode::Direct
     } else {
@@ -404,28 +469,171 @@ fn run_dose(
         }
         #[cfg(not(feature = "hardware"))]
         {
-            SamplingMode::Paced(filter.sample_rate_hz)
+            SamplingMode::Paced(_cfg.filter.sample_rate_hz)
         }
     };
-
-    // Prefer timeout-first when no max_run_ms override; match previous CLI behavior
     let prefer_timeout_first = max_run_ms_override.is_none();
 
-    let final_g = doser_core::runner::run(
-        scale,
-        motor,
-        filter,
-        control,
-        safety,
-        timeouts,
-        calibration_core,
-        grams,
-        estop_check,
-        _cfg.estop.debounce_n,
-        prefer_timeout_first,
-        sampling_mode,
-    )?;
+    // Stats collection for direct mode
+    if matches!(sampling_mode, SamplingMode::Direct) && stats {
+        // Direct mode: wrap control loop manually
+        let estop_check_core: Option<Box<dyn Fn() -> bool>> =
+            estop_check.map(|f| -> Box<dyn Fn() -> bool> { Box::new(f) });
+        let mut doser = doser_core::build_doser(
+            scale,
+            motor,
+            filter.clone(),
+            control.clone(),
+            safety.clone(),
+            timeouts.clone(),
+            calibration_core.clone(),
+            grams,
+            estop_check_core,
+            None,
+            Some(_cfg.estop.debounce_n),
+        )?;
+        doser.begin();
+        tracing::info!(target_g = grams, mode = "direct", "dose start");
+        loop {
+            let t_start = std::time::Instant::now();
+            let status = doser.step()?;
+            let t_end = std::time::Instant::now();
+            let latency = t_end.duration_since(t_start).as_micros() as u64;
+            latencies.push(latency);
+            if latency > expected_period_us {
+                missed_deadlines += 1;
+            }
+            sample_count += 1;
+            match status {
+                doser_core::DosingStatus::Running => continue,
+                doser_core::DosingStatus::Complete => {
+                    let final_g = doser.last_weight();
+                    tracing::info!(final_g, "dose complete");
+                    println!("final: {final_g:.2} g");
+                    break;
+                }
+                doser_core::DosingStatus::Aborted(e) => {
+                    let _ = doser.motor_stop();
+                    tracing::error!(error = %e, "dose aborted");
+                    return Err(e.into());
+                }
+            }
+        }
+    } else if stats {
+        // Sampler mode: wrap control loop manually
+        let period_us = expected_period_us;
+        let sampler_timeout = std::time::Duration::from_millis(timeouts.sensor_ms);
+        let sampler = match sampling_mode {
+            SamplingMode::Event => doser_core::sampler::Sampler::spawn_event(
+                scale,
+                sampler_timeout,
+                doser_traits::clock::MonotonicClock::new(),
+            ),
+            SamplingMode::Paced(hz) => doser_core::sampler::Sampler::spawn(
+                scale,
+                hz,
+                sampler_timeout,
+                doser_traits::clock::MonotonicClock::new(),
+            ),
+            SamplingMode::Direct => unreachable!(),
+        };
+        let estop_check_core: Option<Box<dyn Fn() -> bool>> =
+            estop_check.map(|f| -> Box<dyn Fn() -> bool> { Box::new(f) });
+        // Local NoopScale for sampler-driven mode
+        struct NoopScale;
+        impl doser_traits::Scale for NoopScale {
+            fn read(
+                &mut self,
+                _timeout: std::time::Duration,
+            ) -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
+                Err(Box::new(std::io::Error::other("noop scale")))
+            }
+        }
+        let mut doser = doser_core::build_doser(
+            NoopScale,
+            motor,
+            filter.clone(),
+            control.clone(),
+            safety.clone(),
+            timeouts.clone(),
+            calibration_core.clone(),
+            grams,
+            estop_check_core,
+            None,
+            Some(_cfg.estop.debounce_n),
+        )?;
+        doser.begin();
+        tracing::info!(target_g = grams, mode = "sampler", "dose start");
+        loop {
+            let t_start = std::time::Instant::now();
+            let status = if let Some(raw) = sampler.latest() {
+                sample_count += 1;
+                doser.step_from_raw(raw)?
+            } else {
+                std::thread::sleep(std::time::Duration::from_micros(period_us));
+                continue;
+            };
+            let t_end = std::time::Instant::now();
+            let latency = t_end.duration_since(t_start).as_micros() as u64;
+            latencies.push(latency);
+            if latency > period_us {
+                missed_deadlines += 1;
+            }
+            match status {
+                doser_core::DosingStatus::Running => continue,
+                doser_core::DosingStatus::Complete => {
+                    let final_g = doser.last_weight();
+                    tracing::info!(final_g, "dose complete");
+                    println!("final: {final_g:.2} g");
+                    break;
+                }
+                doser_core::DosingStatus::Aborted(e) => {
+                    let _ = doser.motor_stop();
+                    tracing::error!(error = %e, "dose aborted");
+                    return Err(e.into());
+                }
+            }
+        }
+    } else {
+        // No stats: use core runner
+        let final_g = doser_core::runner::run(
+            scale,
+            motor,
+            filter,
+            control,
+            safety,
+            timeouts,
+            calibration_core,
+            grams,
+            estop_check,
+            _cfg.estop.debounce_n,
+            prefer_timeout_first,
+            sampling_mode,
+        )?;
+        println!("final: {final_g:.2} g");
+    }
 
-    println!("final: {final_g:.2} g");
+    if stats && !latencies.is_empty() {
+        let min = *latencies.iter().min().unwrap();
+        let max = *latencies.iter().max().unwrap();
+        let avg = latencies.iter().sum::<u64>() as f64 / latencies.len() as f64;
+        let stdev = if latencies.len() > 1 {
+            let mean = avg;
+            let var = latencies
+                .iter()
+                .map(|&x| (x as f64 - mean).powi(2))
+                .sum::<f64>()
+                / (latencies.len() as f64 - 1.0);
+            var.sqrt()
+        } else {
+            0.0
+        };
+        eprintln!("\n--- Doser Stats ---");
+        eprintln!("Samples: {sample_count}");
+        eprintln!("Period (us): {expected_period_us}");
+        eprintln!("Latency min/avg/max/stdev (us): {min:.0} / {avg:.1} / {max:.0} / {stdev:.1}");
+        eprintln!("Missed deadlines (> period): {missed_deadlines}");
+        eprintln!("-------------------\n");
+    }
     Ok(())
 }
