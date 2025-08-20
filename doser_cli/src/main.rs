@@ -365,11 +365,16 @@ fn run_dose(
             sched_setscheduler(0, SCHED_FIFO, &mut param);
         }
         // Optionally set affinity to CPU 0
-        let mut cpuset = std::mem::MaybeUninit::uninit();
+        // libc::CPU_ZERO/CPU_SET expect &mut cpu_set_t on Linux
+        let mut cpuset: libc::cpu_set_t = unsafe { std::mem::zeroed() };
         unsafe {
-            CPU_ZERO(cpuset.as_mut_ptr());
-            CPU_SET(0, cpuset.as_mut_ptr());
-            libc::sched_setaffinity(0, std::mem::size_of_val(&cpuset), cpuset.as_ptr());
+            CPU_ZERO(&mut cpuset);
+            CPU_SET(0, &mut cpuset);
+            libc::sched_setaffinity(
+                0,
+                std::mem::size_of::<libc::cpu_set_t>(),
+                &cpuset,
+            );
         }
     }
     #[cfg(target_os = "macos")]
