@@ -97,11 +97,11 @@ impl Default for Hardware {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct EstopCfg {
-    /// If true, a low level on the input means E‑stop active
+    /// Treat low level as pressed when true
     pub active_low: bool,
-    /// Number of consecutive polls required to latch E‑stop (>=1)
+    /// Number of consecutive polls required to latch E-stop
     pub debounce_n: u8,
-    /// Poll interval in milliseconds for the GPIO-backed checker
+    /// Polling interval in milliseconds for GPIO E-stop checker
     pub poll_ms: u64,
 }
 
@@ -111,6 +111,29 @@ impl Default for EstopCfg {
             active_low: true,
             debounce_n: 2,
             poll_ms: 5,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RunMode {
+    #[default]
+    Sampler,
+    Direct,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct RunnerCfg {
+    /// Default orchestration mode: "sampler" (event/rate-paced) or "direct"
+    pub mode: RunMode,
+}
+
+impl Default for RunnerCfg {
+    fn default() -> Self {
+        Self {
+            mode: RunMode::Sampler,
         }
     }
 }
@@ -131,6 +154,9 @@ pub struct Config {
     /// Emergency stop configuration
     #[serde(default)]
     pub estop: EstopCfg,
+    /// Runner/orchestration defaults
+    #[serde(default)]
+    pub runner: RunnerCfg,
 }
 
 pub fn load_toml(s: &str) -> Result<Config, toml::de::Error> {
@@ -335,6 +361,8 @@ impl Config {
         if self.estop.poll_ms == 0 {
             eyre::bail!("estop.poll_ms must be >= 1");
         }
+
+        // Runner: no extra validation; serde restricts to known modes
 
         Ok(())
     }

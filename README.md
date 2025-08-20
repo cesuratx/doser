@@ -145,6 +145,10 @@ sensor_read_timeout_ms = 150
 active_low = true     # treat low level as pressed
 debounce_n = 2        # consecutive polls required to latch
 poll_ms = 5           # polling interval for GPIO-backed checker
+
+# Runner/orchestration defaults: "sampler" (default) or "direct"
+[runner]
+mode = "sampler"
 ```
 
 Notes:

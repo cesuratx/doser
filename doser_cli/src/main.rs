@@ -180,6 +180,9 @@ enum Commands {
         /// Override safety: abort if overshoot exceeds this many grams
         #[arg(long, value_name = "GRAMS")]
         max_overshoot_g: Option<f32>,
+        /// Use direct control loop (no sampler); reads the scale inside the control loop
+        #[arg(long, action = ArgAction::SetTrue)]
+        direct: bool,
     },
     /// Quick health check (hardware presence / sim ok)
     SelfCheck,
@@ -284,8 +287,26 @@ fn real_main() -> eyre::Result<()> {
             grams,
             max_run_ms,
             max_overshoot_g,
+            direct,
         } => {
-            run_dose(&cfg, calib.as_ref(), grams, max_run_ms, max_overshoot_g, hw)?;
+            // CLI flag overrides config; otherwise use config default
+            let use_direct = if direct {
+                true
+            } else {
+                match cfg.runner.mode {
+                    doser_config::RunMode::Sampler => false,
+                    doser_config::RunMode::Direct => true,
+                }
+            };
+            run_dose(
+                &cfg,
+                calib.as_ref(),
+                grams,
+                max_run_ms,
+                max_overshoot_g,
+                use_direct,
+                hw,
+            )?;
             Ok(())
         }
     }
@@ -298,6 +319,7 @@ fn run_dose(
     grams: f32,
     max_run_ms_override: Option<u64>,
     max_overshoot_g_override: Option<f32>,
+    direct: bool,
     hw: (
         impl doser_traits::Scale + Send + 'static,
         impl doser_traits::Motor + 'static,
@@ -349,6 +371,82 @@ fn run_dose(
     // Split hardware into scale and motor; move scale into sampler thread
     let (scale, motor) = hw;
 
+    // Optional E-stop wiring (hardware builds only)
+    let estop_check: Option<Box<dyn Fn() -> bool + Send + Sync>> = {
+        #[cfg(feature = "hardware")]
+        {
+            if let Some(pin) = _cfg.pins.estop_in {
+                match doser_hardware::make_estop_checker(
+                    pin,
+                    _cfg.estop.active_low,
+                    _cfg.estop.poll_ms,
+                ) {
+                    Ok(c) => {
+                        tracing::info!(
+                            pin,
+                            active_low = _cfg.estop.active_low,
+                            poll_ms = _cfg.estop.poll_ms,
+                            "E-stop enabled"
+                        );
+                        Some(c)
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to init E-stop; continuing without it");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        }
+        #[cfg(not(feature = "hardware"))]
+        {
+            let _ = &_cfg; // silence unused
+            None
+        }
+    };
+
+    // Direct mode: run control loop that reads the scale internally (no sampler thread)
+    if direct {
+        let estop_check_core: Option<Box<dyn Fn() -> bool>> =
+            estop_check.map(|f| -> Box<dyn Fn() -> bool> { Box::new(f) });
+
+        let mut doser_g = doser_core::build_doser(
+            scale,
+            motor,
+            filter.clone(),
+            control.clone(),
+            safety.clone(),
+            timeouts.clone(),
+            calibration_core,
+            grams,
+            estop_check_core,
+            None,
+            Some(_cfg.estop.debounce_n),
+        )?;
+        doser_g.begin();
+        tracing::info!(target_g = grams, mode = "direct", "dose start");
+        let mut attempts = 0u32;
+        loop {
+            attempts = attempts.saturating_add(1);
+            match doser_g.step()? {
+                DosingStatus::Running => continue,
+                DosingStatus::Complete => {
+                    let final_g = doser_g.last_weight();
+                    tracing::info!(final_g, attempts, "dose complete");
+                    println!("final: {final_g:.2} g  attempts: {attempts}");
+                    return Ok(());
+                }
+                DosingStatus::Aborted(e) => {
+                    let _ = doser_g.motor_stop();
+                    tracing::error!(error = %e, attempts, "dose aborted");
+                    return Err(doser_core::error::Report::new(e));
+                }
+            }
+        }
+    }
+
+    // Sampler-driven mode (default)
     // Optional E-stop wiring (hardware builds only)
     let estop_check: Option<Box<dyn Fn() -> bool + Send + Sync>> = {
         #[cfg(feature = "hardware")]
@@ -434,24 +532,40 @@ fn run_dose(
 
     let mut attempts = 0u32;
     let start = std::time::Instant::now();
+    let has_max_run_override = max_run_ms_override.is_some();
     loop {
-        // Startup grace: don't flag stall until after the threshold window
-        if start.elapsed().as_millis() as u64 >= stall_threshold_ms {
-            // Check for stalled sampler and abort like a sensor timeout
-            if sampler.stalled_for_now() > stall_threshold_ms {
-                let _ = doser_g.motor_stop();
-                return Err(doser_core::error::Report::new(
-                    doser_core::error::DoserError::Timeout,
-                ));
+        // If no explicit override, prefer surfacing sensor timeout before max-run
+        if !has_max_run_override {
+            if start.elapsed().as_millis() as u64 >= stall_threshold_ms {
+                if sampler.stalled_for_now() > stall_threshold_ms {
+                    let _ = doser_g.motor_stop();
+                    return Err(doser_core::error::Report::new(
+                        doser_core::error::DoserError::Timeout,
+                    ));
+                }
             }
         }
-        // Enforce max runtime regardless of sampling
+
+        // Enforce max runtime
         if start.elapsed().as_millis() as u64 >= safety.max_run_ms {
             let _ = doser_g.motor_stop();
             return Err(doser_core::error::Report::new(
                 doser_core::error::DoserError::State("max run time exceeded".into()),
             ));
         }
+
+        // If override is present, give precedence to max-run; then check stall
+        if has_max_run_override {
+            if start.elapsed().as_millis() as u64 >= stall_threshold_ms {
+                if sampler.stalled_for_now() > stall_threshold_ms {
+                    let _ = doser_g.motor_stop();
+                    return Err(doser_core::error::Report::new(
+                        doser_core::error::DoserError::Timeout,
+                    ));
+                }
+            }
+        }
+
         // Drain to the latest available sample
         if let Some(raw) = sampler.latest() {
             attempts = attempts.saturating_add(1);
