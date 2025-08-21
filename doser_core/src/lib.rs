@@ -28,14 +28,18 @@ use doser_hardware::error::HwError;
 /// - Division truncates toward zero in Rust, so this yields round-to-nearest
 ///   with ties rounded away from zero.
 /// - `denom` must be > 0.
+/// - Uses 64-bit intermediates to avoid overflow for extremal `i32` values.
 #[inline]
 fn div_round_nearest_i32(numer: i32, denom: i32) -> i32 {
     debug_assert!(denom > 0);
-    if numer >= 0 {
-        (numer + (denom / 2)) / denom
+    let n = numer as i64;
+    let d = denom as i64;
+    let q = if n >= 0 {
+        (n + (d / 2)) / d
     } else {
-        (numer - (denom / 2)) / denom
-    }
+        (n - (d / 2)) / d
+    };
+    q as i32
 }
 
 /// Simple linear calibration from raw scale counts to grams.
@@ -71,6 +75,7 @@ impl Calibration {
     /// - `gain_g_per_count` and `offset_g` are rounded to the nearest centigram
     ///   before use. The returned value is typically within ~0.5 cg of
     ///   `round(100 * to_grams(raw))` given stable parameters.
+    /// - Non-finite parameters (NaN/±Inf) are treated as 0 during quantization.
     ///
     /// Units:
     /// - Input: `raw` is ADC counts.
@@ -81,8 +86,22 @@ impl Calibration {
     ///   and `raw = 123`, then `to_cg(123) == 123` (i.e., 1.23 g).
     pub fn to_cg(&self, raw: i32) -> i32 {
         let delta = raw.saturating_sub(self.zero_counts);
-        let gain_cg_per_count = (self.gain_g_per_count * 100.0).round() as i32;
-        let offset_cg = (self.offset_g * 100.0).round() as i32;
+        // Safe quantization helper: finite check + clamp to i32 range before cast
+        let quantize_cg = |x_g: f32| -> i32 {
+            if !x_g.is_finite() {
+                return 0;
+            }
+            let scaled = (x_g * 100.0).round();
+            if scaled >= i32::MAX as f32 {
+                i32::MAX
+            } else if scaled <= i32::MIN as f32 {
+                i32::MIN
+            } else {
+                scaled as i32
+            }
+        };
+        let gain_cg_per_count = quantize_cg(self.gain_g_per_count);
+        let offset_cg = quantize_cg(self.offset_g);
         gain_cg_per_count
             .saturating_mul(delta)
             .saturating_add(offset_cg)

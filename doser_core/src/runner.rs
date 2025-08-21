@@ -186,9 +186,13 @@ where
 
     let start = std::time::Instant::now();
     loop {
+        let elapsed_ms: u64 = {
+            let ms = start.elapsed().as_millis();
+            (ms.min(u128::from(u64::MAX))) as u64
+        };
         // Timeout vs max-run precedence
         if prefer_timeout_first
-            && start.elapsed().as_millis() as u64 >= stall_threshold_ms
+            && elapsed_ms >= stall_threshold_ms
             && sampler.stalled_for_now() > stall_threshold_ms
         {
             let _ = doser.motor_stop();
@@ -196,7 +200,7 @@ where
         }
 
         // Max run enforcement
-        if start.elapsed().as_millis() as u64 >= safety.max_run_ms {
+        if elapsed_ms >= safety.max_run_ms {
             let _ = doser.motor_stop();
             return Err(crate::error::Report::new(DoserError::State(
                 "max run time exceeded".into(),
@@ -204,7 +208,7 @@ where
         }
 
         if !prefer_timeout_first
-            && start.elapsed().as_millis() as u64 >= stall_threshold_ms
+            && elapsed_ms >= stall_threshold_ms
             && sampler.stalled_for_now() > stall_threshold_ms
         {
             let _ = doser.motor_stop();

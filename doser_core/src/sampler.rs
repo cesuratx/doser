@@ -82,9 +82,11 @@ impl Sampler {
     }
     /// Convenience helper: compute stall using this sampler's epoch and a real monotonic clock.
     pub fn stalled_for_now(&self) -> u64 {
-        let now_ms = Instant::now()
-            .saturating_duration_since(self.epoch)
-            .as_millis() as u64;
+        let now_ms = {
+            let dur = Instant::now().saturating_duration_since(self.epoch);
+            let ms = dur.as_millis();
+            (ms.min(u128::from(u64::MAX))) as u64
+        };
         now_ms.saturating_sub(self.last_ok.load(Ordering::Relaxed))
     }
 }
