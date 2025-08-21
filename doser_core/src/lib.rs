@@ -425,7 +425,9 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             self.tmp_med_buf.sort_unstable();
             let mid = self.tmp_med_buf.len() / 2;
             if self.tmp_med_buf.len() % 2 == 0 {
-                (self.tmp_med_buf[mid - 1] + self.tmp_med_buf[mid]) / 2
+                let a = self.tmp_med_buf[mid - 1];
+                let b = self.tmp_med_buf[mid];
+                div_round_nearest_i32(a.saturating_add(b), 2)
             } else {
                 self.tmp_med_buf[mid]
             }

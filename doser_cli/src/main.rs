@@ -350,72 +350,9 @@ fn run_dose(
     rt: bool,
     stats: bool,
 ) -> CoreResult<()> {
-    // Real-time mode setup (Linux/macOS)
-    #[cfg(target_os = "linux")]
-    if rt {
-        use libc::{
-            mlockall, sched_param, sched_setscheduler, CPU_SET, CPU_ZERO, MCL_CURRENT, MCL_FUTURE,
-            SCHED_FIFO,
-        };
-        unsafe {
-            let rc = mlockall(MCL_CURRENT | MCL_FUTURE);
-            if rc != 0 {
-                let err = std::io::Error::last_os_error();
-                eprintln!("Warning: mlockall failed: {err}");
-            }
-        }
-        let param = sched_param { sched_priority: 99 };
-        unsafe {
-            let rc = sched_setscheduler(0, SCHED_FIFO, &param);
-            if rc != 0 {
-                let err = std::io::Error::last_os_error();
-                eprintln!("Warning: sched_setscheduler(SCHED_FIFO) failed: {err}");
-            }
-        }
-        // Optionally set affinity to CPU 0
-        // libc::CPU_ZERO/CPU_SET expect &mut cpu_set_t on Linux
-        let cpu_index: usize = 0;
-        let mut cpuset: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-        // Bounds checks before touching the set
-        let nprocs_onln = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
-        if nprocs_onln <= 0 {
-            eprintln!(
-                "Warning: sysconf(_SC_NPROCESSORS_ONLN) returned {nprocs_onln}; skipping affinity"
-            );
-        } else if (cpu_index as libc::c_long) >= nprocs_onln {
-            eprintln!(
-                "Warning: CPU index {cpu_index} out of range (online={nprocs_onln}); skipping affinity"
-            );
-        } else if cpu_index >= (libc::CPU_SETSIZE as usize) {
-            eprintln!(
-                "Warning: CPU index {cpu_index} >= CPU_SETSIZE={}",
-                libc::CPU_SETSIZE
-            );
-        } else {
-            unsafe {
-                CPU_ZERO(&mut cpuset);
-                CPU_SET(cpu_index, &mut cpuset);
-                let rc =
-                    libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &cpuset);
-                if rc != 0 {
-                    let err = std::io::Error::last_os_error();
-                    eprintln!("Warning: sched_setaffinity failed: {err}");
-                }
-            }
-        }
-    }
-    #[cfg(target_os = "macos")]
-    if rt {
-        use libc::mlockall;
-        unsafe {
-            let rc = mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE);
-            if rc != 0 {
-                let err = std::io::Error::last_os_error();
-                eprintln!("Warning: mlockall failed: {err}");
-            }
-        }
-        eprintln!("Warning: macOS does not support SCHED_FIFO or affinity; only mlockall applied.");
-    }
+    // Real-time mode setup (Linux/macOS) — run once per process
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    setup_rt_once(rt);
 
     // Stats: control loop latency, jitter, missed deadlines
     let mut latencies = Vec::new();
@@ -664,4 +601,79 @@ fn run_dose(
         eprintln!("-------------------\n");
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn setup_rt_once(rt: bool) {
+    use libc::{
+        mlockall, sched_param, sched_setscheduler, CPU_SET, CPU_ZERO, MCL_CURRENT, MCL_FUTURE,
+        SCHED_FIFO,
+    };
+    use std::sync::OnceLock;
+    static RT_ONCE: OnceLock<()> = OnceLock::new();
+    static ONLINE_CPUS: OnceLock<libc::c_long> = OnceLock::new();
+    static CPUSET0: OnceLock<libc::cpu_set_t> = OnceLock::new();
+
+    if !rt {
+        return;
+    }
+    RT_ONCE.get_or_init(|| {
+        unsafe {
+            let rc = mlockall(MCL_CURRENT | MCL_FUTURE);
+            if rc != 0 {
+                let err = std::io::Error::last_os_error();
+                eprintln!("Warning: mlockall failed: {err}");
+            }
+        }
+        let param = sched_param { sched_priority: 99 };
+        unsafe {
+            let rc = sched_setscheduler(0, SCHED_FIFO, &param);
+            if rc != 0 {
+                let err = std::io::Error::last_os_error();
+                eprintln!("Warning: sched_setscheduler(SCHED_FIFO) failed: {err}");
+            }
+        }
+
+        let _ = ONLINE_CPUS.get_or_init(|| unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) });
+        let _ = CPUSET0.get_or_init(|| unsafe {
+            let mut set: libc::cpu_set_t = std::mem::zeroed();
+            CPU_ZERO(&mut set);
+            CPU_SET(0, &mut set);
+            set
+        });
+
+        let nprocs_onln = *ONLINE_CPUS.get().unwrap();
+        if nprocs_onln <= 0 {
+            eprintln!(
+                "Warning: sysconf(_SC_NPROCESSORS_ONLN) returned {nprocs_onln}; skipping affinity"
+            );
+        } else {
+            let cpuset = CPUSET0.get().unwrap();
+            unsafe {
+                let rc = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), cpuset);
+                if rc != 0 {
+                    let err = std::io::Error::last_os_error();
+                    eprintln!("Warning: sched_setaffinity failed: {err}");
+                }
+            }
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn setup_rt_once(rt: bool) {
+    use libc::mlockall;
+    use std::sync::OnceLock;
+    static RT_ONCE: OnceLock<()> = OnceLock::new();
+    if !rt {
+        return;
+    }
+    RT_ONCE.get_or_init(|| unsafe {
+        let rc = mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE);
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            eprintln!("Warning: mlockall failed: {err}");
+        }
+        eprintln!("Warning: macOS does not support SCHED_FIFO or affinity; only mlockall applied.");
+    });
 }
