@@ -102,7 +102,6 @@ impl Calibration {
             } else {
                 scaled as i32
             }
-        };
         let gain_cg_per_count = quantize_cg(self.gain_g_per_count);
         let offset_cg = quantize_cg(self.offset_g);
         gain_cg_per_count
