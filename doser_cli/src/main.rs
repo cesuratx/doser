@@ -358,7 +358,6 @@ fn run_dose(
     let mut latencies = Vec::new();
     let mut missed_deadlines = 0;
     let mut sample_count = 0;
-    let expected_period_us = doser_core::util::period_us(_cfg.filter.sample_rate_hz);
 
     // Builder/config mapping
     let filter = doser_core::FilterCfg {
@@ -467,13 +466,15 @@ fn run_dose(
         )?;
         doser.begin();
         tracing::info!(target_g = grams, mode = "direct", "dose start");
+        // Compute expected period only when collecting stats
+        let period_us = doser_core::util::period_us(_cfg.filter.sample_rate_hz);
         loop {
             let t_start = std::time::Instant::now();
             let status = doser.step()?;
             let t_end = std::time::Instant::now();
             let latency = t_end.duration_since(t_start).as_micros() as u64;
             latencies.push(latency);
-            if latency > expected_period_us {
+            if latency > period_us {
                 missed_deadlines += 1;
             }
             sample_count += 1;
@@ -494,7 +495,7 @@ fn run_dose(
         }
     } else if stats {
         // Sampler mode: wrap control loop manually
-        let period_us = expected_period_us;
+        let period_us = doser_core::util::period_us(_cfg.filter.sample_rate_hz);
         let sampler_timeout = std::time::Duration::from_millis(timeouts.sensor_ms);
         let sampler = match sampling_mode {
             SamplingMode::Event => doser_core::sampler::Sampler::spawn_event(
@@ -579,6 +580,7 @@ fn run_dose(
     }
 
     if stats && !latencies.is_empty() {
+        let expected_period_us = doser_core::util::period_us(_cfg.filter.sample_rate_hz);
         let min = *latencies.iter().min().unwrap();
         let max = *latencies.iter().max().unwrap();
         let avg = latencies.iter().sum::<u64>() as f64 / latencies.len() as f64;
@@ -643,7 +645,7 @@ fn setup_rt_once(rt: bool) {
         });
 
         let nprocs_onln = *ONLINE_CPUS.get().unwrap();
-        if nprocs_onln <= 0 {
+        if nprocs_onln < 1 {
             eprintln!(
                 "Warning: sysconf(_SC_NPROCESSORS_ONLN) returned {nprocs_onln}; skipping affinity"
             );

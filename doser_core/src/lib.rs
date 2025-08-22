@@ -301,7 +301,9 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
         let w_cg = self.apply_filter(w_cg_raw);
         self.last_weight_cg = w_cg;
         let err_cg = self.target_cg - w_cg;
-        let abs_err_cg = err_cg.unsigned_abs(); // u32 to avoid overflow on i32::MIN
+        // unsigned_abs() returns u32, which safely represents |i32::MIN| without overflow.
+        // This avoids the panic/overflow you’d get from calling i32::abs() on i32::MIN.
+        let abs_err_cg = err_cg.unsigned_abs();
         let now = self.clock.ms_since(self.epoch);
         if now.saturating_sub(self.start_ms) >= self.safety.max_run_ms {
             let _ = self.motor_stop();
