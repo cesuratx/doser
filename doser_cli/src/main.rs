@@ -1,6 +1,6 @@
 use std::{fs, path::PathBuf};
 
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use doser_config::{load_calibration_csv, Calibration, Config};
 use doser_core::error::Result as CoreResult;
 use eyre::WrapErr;
@@ -170,6 +170,24 @@ struct Cli {
     cmd: Commands,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum RtLock {
+    None,
+    Current,
+    All,
+}
+
+impl RtLock {
+    fn os_default() -> Self {
+        if cfg!(target_os = "linux") {
+            RtLock::Current
+        } else {
+            // macOS and others default to no lock to minimize impact
+            RtLock::None
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Run a dose to a target in grams
@@ -189,8 +207,20 @@ enum Commands {
         #[arg(long, action = ArgAction::SetTrue)]
         print_runtime: bool,
         /// Enable real-time mode (SCHED_FIFO, affinity, mlockall)
-        #[arg(long, action = ArgAction::SetTrue)]
+        #[arg(
+            long,
+            action = ArgAction::SetTrue,
+            long_help = "Enable real-time mode on supported OSes.\n\nLinux: Attempts SCHED_FIFO priority, pins to CPU 0, and calls mlockall(MCL_CURRENT|MCL_FUTURE) to lock the process address space into RAM. This reduces page faults and jitter but can impact overall system performance and may require elevated privileges or ulimits (e.g., memlock). Use with care on shared systems.\n\nmacOS: Only mlockall is applied; SCHED_FIFO/affinity are unavailable. Locking memory can increase pressure on the OS memory manager."
+        )]
         rt: bool,
+        /// Select memory locking mode for --rt: none, current, or all
+        #[arg(
+            long,
+            value_enum,
+            value_name = "MODE",
+            long_help = "Select memory locking mode when --rt is enabled.\n- none: do not lock memory.\n- current: lock currently resident pages (mlockall(MCL_CURRENT)).\n- all: lock current and future pages (mlockall(MCL_CURRENT|MCL_FUTURE)).\nDefault: current on Linux, none on macOS."
+        )]
+        rt_lock: Option<RtLock>,
         /// Print control loop and sampling stats
         #[arg(long, action = ArgAction::SetTrue)]
         stats: bool,
@@ -301,6 +331,7 @@ fn real_main() -> eyre::Result<()> {
             direct,
             print_runtime,
             rt,
+            rt_lock,
             stats,
         } => {
             // CLI flag overrides config; otherwise use config default
@@ -322,6 +353,7 @@ fn real_main() -> eyre::Result<()> {
                 use_direct,
                 hw,
                 rt,
+                rt_lock,
                 stats,
             );
             res?;
@@ -348,11 +380,15 @@ fn run_dose(
         impl doser_traits::Motor + 'static,
     ),
     rt: bool,
+    rt_lock: Option<RtLock>,
     stats: bool,
 ) -> CoreResult<()> {
     // Real-time mode setup (Linux/macOS) — run once per process
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    setup_rt_once(rt);
+    {
+        let mode = rt_lock.unwrap_or(RtLock::os_default());
+        setup_rt_once(rt, mode);
+    }
 
     // Stats: control loop latency, jitter, missed deadlines
     let mut latencies = Vec::new();
@@ -606,7 +642,7 @@ fn run_dose(
 }
 
 #[cfg(target_os = "linux")]
-fn setup_rt_once(rt: bool) {
+fn setup_rt_once(rt: bool, lock: RtLock) {
     use libc::{
         mlockall, sched_param, sched_setscheduler, CPU_SET, CPU_ZERO, MCL_CURRENT, MCL_FUTURE,
         SCHED_FIFO,
@@ -620,12 +656,29 @@ fn setup_rt_once(rt: bool) {
         return;
     }
     RT_ONCE.get_or_init(|| {
-        unsafe {
-            let rc = mlockall(MCL_CURRENT | MCL_FUTURE);
-            if rc != 0 {
-                let err = std::io::Error::last_os_error();
-                eprintln!("Warning: mlockall failed: {err}");
+        // Memory locking
+        match lock {
+            RtLock::None => {
+                eprintln!("RT: memory locking disabled (none)");
             }
+            RtLock::Current => unsafe {
+                let rc = mlockall(MCL_CURRENT);
+                if rc != 0 {
+                    let err = std::io::Error::last_os_error();
+                    eprintln!("Warning: mlockall(MCL_CURRENT) failed: {err}");
+                } else {
+                    eprintln!("RT: memory lock = current");
+                }
+            },
+            RtLock::All => unsafe {
+                let rc = mlockall(MCL_CURRENT | MCL_FUTURE);
+                if rc != 0 {
+                    let err = std::io::Error::last_os_error();
+                    eprintln!("Warning: mlockall(MCL_CURRENT|MCL_FUTURE) failed: {err}");
+                } else {
+                    eprintln!("RT: memory lock = all (current|future)");
+                }
+            },
         }
         let param = sched_param { sched_priority: 99 };
         unsafe {
@@ -663,18 +716,36 @@ fn setup_rt_once(rt: bool) {
 }
 
 #[cfg(target_os = "macos")]
-fn setup_rt_once(rt: bool) {
-    use libc::mlockall;
+fn setup_rt_once(rt: bool, lock: RtLock) {
+    use libc::{mlockall, MCL_CURRENT, MCL_FUTURE};
     use std::sync::OnceLock;
     static RT_ONCE: OnceLock<()> = OnceLock::new();
     if !rt {
         return;
     }
     RT_ONCE.get_or_init(|| unsafe {
-        let rc = mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE);
-        if rc != 0 {
-            let err = std::io::Error::last_os_error();
-            eprintln!("Warning: mlockall failed: {err}");
+        match lock {
+            RtLock::None => {
+                eprintln!("RT: memory locking disabled (none)");
+            }
+            RtLock::Current => {
+                let rc = mlockall(MCL_CURRENT);
+                if rc != 0 {
+                    let err = std::io::Error::last_os_error();
+                    eprintln!("Warning: mlockall(MCL_CURRENT) failed: {err}");
+                } else {
+                    eprintln!("RT: memory lock = current");
+                }
+            }
+            RtLock::All => {
+                let rc = mlockall(MCL_CURRENT | MCL_FUTURE);
+                if rc != 0 {
+                    let err = std::io::Error::last_os_error();
+                    eprintln!("Warning: mlockall(MCL_CURRENT|MCL_FUTURE) failed: {err}");
+                } else {
+                    eprintln!("RT: memory lock = all (current|future)");
+                }
+            }
         }
         eprintln!("Warning: macOS does not support SCHED_FIFO or affinity; only mlockall applied.");
     });

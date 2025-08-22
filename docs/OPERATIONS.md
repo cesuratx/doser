@@ -75,3 +75,9 @@ Tips:
 
 - Errors are printed to stderr; stdout is reserved for normal output.
 - The no‑progress watchdog aborts if weight doesn’t change by ≥ epsilon within the configured window.
+
+## Real-time mode (rt)
+
+- Linux: when `--rt` is enabled, the CLI attempts to set SCHED_FIFO priority, pin to CPU 0, and lock memory with `mlockall(MCL_CURRENT|MCL_FUTURE)`. This can reduce latency and jitter but may require elevated privileges and appropriate limits (e.g., `ulimit -l` for memlock, and allowing real-time scheduling). It can impact system responsiveness; prefer dedicated hosts.
+- macOS: only `mlockall` is applied; real-time scheduling and CPU affinity are unavailable. Locking memory can increase pressure on the OS memory manager.
+- Best-effort: if a step fails, a warning is printed and the run continues without that RT tweak.

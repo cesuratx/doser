@@ -33,7 +33,7 @@ use doser_hardware::error::HwError;
 fn div_round_nearest_i32(numer: i32, denom: i32) -> i32 {
     debug_assert!(denom > 0);
     if denom <= 0 {
-        panic!("div_round_nearest_i32: denom must be > 0, got {}", denom);
+        panic!("div_round_nearest_i32: denom must be > 0, got {denom}");
     }
     let n = numer as i64;
     let d = denom as i64;
@@ -102,6 +102,7 @@ impl Calibration {
             } else {
                 scaled as i32
             }
+        };
         let gain_cg_per_count = quantize_cg(self.gain_g_per_count);
         let offset_cg = quantize_cg(self.offset_g);
         gain_cg_per_count
@@ -427,13 +428,21 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             self.tmp_med_buf.clear();
             self.tmp_med_buf.extend(self.med_buf.iter().copied());
             self.tmp_med_buf.sort_unstable();
-            let mid = self.tmp_med_buf.len() / 2;
-            if self.tmp_med_buf.len() % 2 == 0 {
-                let a = self.tmp_med_buf[mid - 1];
-                let b = self.tmp_med_buf[mid];
-                div_round_nearest_i32(a.saturating_add(b), 2)
+            let n = self.tmp_med_buf.len();
+            if n == 0 {
+                // Defensive: should not happen because we push w_cg above,
+                // but return the input value rather than panic.
+                w_cg
             } else {
-                self.tmp_med_buf[mid]
+                let mid = n / 2;
+                if n % 2 == 0 {
+                    // n >= 2 here, so mid >= 1 and mid-1 is safe
+                    let a = self.tmp_med_buf[mid - 1];
+                    let b = self.tmp_med_buf[mid];
+                    div_round_nearest_i32(a.saturating_add(b), 2)
+                } else {
+                    self.tmp_med_buf[mid]
+                }
             }
         } else {
             w_cg

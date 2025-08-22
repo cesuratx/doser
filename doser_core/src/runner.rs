@@ -141,11 +141,11 @@ where
     use crate::mocks::NoopScale;
 
     let period_us = crate::util::period_us(filter.sample_rate_hz);
-    let _period_ms = crate::util::period_ms(filter.sample_rate_hz);
+    let period_ms = crate::util::period_ms(filter.sample_rate_hz);
     let fast_threshold = timeouts.sensor_ms.saturating_mul(4);
-    let safe_threshold = std::cmp::max(fast_threshold, _period_ms.saturating_mul(2));
+    let safe_threshold = std::cmp::max(fast_threshold, period_ms.saturating_mul(2));
     // Bound stall threshold by max_run_ms to avoid underflow
-    let stall_threshold_ms = if safety.max_run_ms < _period_ms.saturating_mul(2) {
+    let stall_threshold_ms = if safety.max_run_ms < period_ms.saturating_mul(2) {
         fast_threshold
             .min(safety.max_run_ms.saturating_sub(1))
             .max(1)
@@ -191,9 +191,10 @@ where
             (ms.min(u128::from(u64::MAX))) as u64
         };
         // Timeout vs max-run precedence
+        let stalled_ms = sampler.stalled_for_now();
         if prefer_timeout_first
             && elapsed_ms >= stall_threshold_ms
-            && sampler.stalled_for_now() > stall_threshold_ms
+            && stalled_ms > stall_threshold_ms
         {
             let _ = doser.motor_stop();
             return Err(crate::error::Report::new(DoserError::Timeout));
@@ -209,7 +210,7 @@ where
 
         if !prefer_timeout_first
             && elapsed_ms >= stall_threshold_ms
-            && sampler.stalled_for_now() > stall_threshold_ms
+            && stalled_ms > stall_threshold_ms
         {
             let _ = doser.motor_stop();
             return Err(crate::error::Report::new(DoserError::Timeout));
