@@ -17,12 +17,22 @@ pub enum SamplingMode {
 
 /// Compute the stall watchdog threshold in milliseconds.
 ///
+/// Parameters:
+/// - `sensor_timeout_ms`: the per-read sensor timeout in milliseconds. Expected ≥ 1.
+///   Used to derive a conservative "fast" stall threshold (4x timeout) for quick detection.
+/// - `period_ms`: the sampling period in milliseconds derived from `sample_rate_hz`.
+///   Expected ≥ 1 (clamped by utility helpers); used to ensure the threshold spans at least
+///   two periods so that a single missed sample doesn't immediately trip the watchdog.
+/// - `max_run_ms`: configured hard cap for a dosing run. Expected ≥ 1. The stall threshold
+///   is kept strictly below this cap when `max_run_ms` is smaller than two periods to avoid
+///   underflow and guarantee the stall watchdog can still fire before the hard cap.
+///
 /// Rationale:
 /// - Start from a "fast" threshold based on the sensor timeout (4x) to catch stalls promptly.
 /// - Ensure the threshold is not shorter than two sampling periods to allow at least
 ///   one missed sample without tripping (safe threshold).
-/// - If the configured max_run_ms is smaller than two periods, cap the threshold below
-///   max_run_ms to avoid underflow and ensure the watchdog can still trip before the
+/// - If the configured `max_run_ms` is smaller than two periods, cap the threshold below
+///   `max_run_ms` to avoid underflow and ensure the watchdog can still trip before the
 ///   hard max runtime; always return at least 1 ms.
 #[inline]
 fn compute_stall_threshold_ms(sensor_timeout_ms: u64, period_ms: u64, max_run_ms: u64) -> u64 {
@@ -33,6 +43,11 @@ fn compute_stall_threshold_ms(sensor_timeout_ms: u64, period_ms: u64, max_run_ms
     } else {
         safe_threshold
     }
+}
+
+#[inline]
+fn stalled_now(elapsed_ms: u64, stalled_ms: u64, threshold_ms: u64) -> bool {
+    elapsed_ms >= threshold_ms && stalled_ms > threshold_ms
 }
 
 /// Run the controller until completion or abort, returning final grams on success.
@@ -205,10 +220,7 @@ where
         };
         // Timeout vs max-run precedence
         let stalled_ms = sampler.stalled_for_now();
-        if prefer_timeout_first
-            && elapsed_ms >= stall_threshold_ms
-            && stalled_ms > stall_threshold_ms
-        {
+        if prefer_timeout_first && stalled_now(elapsed_ms, stalled_ms, stall_threshold_ms) {
             let _ = doser.motor_stop();
             return Err(crate::error::Report::new(DoserError::Timeout));
         }
@@ -221,10 +233,7 @@ where
             )));
         }
 
-        if !prefer_timeout_first
-            && elapsed_ms >= stall_threshold_ms
-            && stalled_ms > stall_threshold_ms
-        {
+        if !prefer_timeout_first && stalled_now(elapsed_ms, stalled_ms, stall_threshold_ms) {
             let _ = doser.motor_stop();
             return Err(crate::error::Report::new(DoserError::Timeout));
         }

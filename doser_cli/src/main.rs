@@ -213,6 +213,13 @@ enum Commands {
             long_help = "Enable real-time mode on supported OSes.\n\nLinux: Attempts SCHED_FIFO priority, pins to CPU 0, and calls mlockall(MCL_CURRENT|MCL_FUTURE) to lock the process address space into RAM. This reduces page faults and jitter but can impact overall system performance and may require elevated privileges or ulimits (e.g., memlock). Use with care on shared systems.\n\nmacOS: Only mlockall is applied; SCHED_FIFO/affinity are unavailable. Locking memory can increase pressure on the OS memory manager."
         )]
         rt: bool,
+        /// Real-time priority for SCHED_FIFO on Linux (1..=max); ignored on macOS
+        #[arg(
+            long,
+            value_name = "PRIO",
+            long_help = "SCHED_FIFO priority when --rt is enabled (Linux only). Higher values run before lower ones. Range is platform-defined (usually 1..=99). Use with care; very high priorities can impact system stability."
+        )]
+        rt_prio: Option<i32>,
         /// Select memory locking mode for --rt: none, current, or all
         #[arg(
             long,
@@ -331,6 +338,7 @@ fn real_main() -> eyre::Result<()> {
             direct,
             print_runtime,
             rt,
+            rt_prio,
             rt_lock,
             stats,
         } => {
@@ -353,6 +361,7 @@ fn real_main() -> eyre::Result<()> {
                 use_direct,
                 hw,
                 rt,
+                rt_prio,
                 rt_lock,
                 stats,
             );
@@ -380,13 +389,20 @@ fn run_dose(
         impl doser_traits::Motor + 'static,
     ),
     rt: bool,
+    rt_prio: Option<i32>,
     rt_lock: Option<RtLock>,
     stats: bool,
 ) -> CoreResult<()> {
     // Real-time mode setup (Linux/macOS) — run once per process
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     {
         let mode = rt_lock.unwrap_or(RtLock::os_default());
+        setup_rt_once(rt, rt_prio, mode);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mode = rt_lock.unwrap_or(RtLock::os_default());
+        let _rt_prio = rt_prio; // silence unused on non-Linux builds
         setup_rt_once(rt, mode);
     }
 
@@ -646,10 +662,10 @@ fn run_dose(
 }
 
 #[cfg(target_os = "linux")]
-fn setup_rt_once(rt: bool, lock: RtLock) {
+fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock) {
     use libc::{
-        mlockall, sched_param, sched_setscheduler, CPU_SET, CPU_ZERO, MCL_CURRENT, MCL_FUTURE,
-        SCHED_FIFO,
+        mlockall, sched_get_priority_max, sched_get_priority_min, sched_param, sched_setscheduler,
+        CPU_SET, CPU_ZERO, MCL_CURRENT, MCL_FUTURE, SCHED_FIFO,
     };
     use std::sync::OnceLock;
     static RT_ONCE: OnceLock<()> = OnceLock::new();
@@ -684,12 +700,26 @@ fn setup_rt_once(rt: bool, lock: RtLock) {
                 }
             },
         }
-        let param = sched_param { sched_priority: 99 };
+        // Determine SCHED_FIFO priority, clamped to system range
+        let prio_val = unsafe {
+            let min = sched_get_priority_min(SCHED_FIFO);
+            let max = sched_get_priority_max(SCHED_FIFO);
+            let (min, max) = if min < 0 || max < 0 {
+                (1, 99)
+            } else {
+                (min, max)
+            };
+            let wanted = prio.unwrap_or(max);
+            wanted.clamp(min, max)
+        };
+        let param = sched_param {
+            sched_priority: prio_val,
+        };
         unsafe {
             let rc = sched_setscheduler(0, SCHED_FIFO, &param);
             if rc != 0 {
                 let err = std::io::Error::last_os_error();
-                eprintln!("Warning: sched_setscheduler(SCHED_FIFO) failed: {err}");
+                eprintln!("Warning: sched_setscheduler(SCHED_FIFO, prio={prio_val}) failed: {err}");
             }
         }
 

@@ -20,15 +20,26 @@ use std::time::{Duration, Instant};
 // For typed hardware error mapping
 use doser_hardware::error::HwError;
 
-/// Integer division rounded to nearest, handling negatives consistently.
+/// Integer division rounded to nearest, with consistent behavior for negatives.
 ///
 /// Behavior:
-/// - For positive numerators, this computes `(n + d/2) / d`.
-/// - For negative numerators, this computes `(n - d/2) / d`.
-/// - Division truncates toward zero in Rust, so this yields round-to-nearest
-///   with ties rounded away from zero.
-/// - `denom` must be > 0.
-/// - Uses 64-bit intermediates to avoid overflow for extremal `i32` values.
+/// - For positive numerators, computes `(n + d/2) / d`.
+/// - For negative numerators, computes `(n - d/2) / d`.
+/// - Rust division truncates toward zero; this biasing yields round-to-nearest with
+///   ties rounded away from zero (e.g., `-5/2 -> -3`, `5/2 -> 3`).
+///
+/// Parameters and constraints:
+/// - `denom` must be strictly greater than 0. If `denom <= 0`, this function panics.
+/// - Uses 64-bit intermediates, so no overflow occurs for any `i32` numerator and
+///   positive `i32` denominator.
+///
+/// Examples (mathematical results shown):
+/// - `7 / 3 = 2.333…` -> 2
+/// - `8 / 3 = 2.666…` -> 3
+/// - `5 / 2 = 2.5` -> 3 (tie away from zero)
+/// - `-5 / 2 = -2.5` -> -3 (tie away from zero)
+/// - `-4 / 3 = -1.333…` -> -1; `-5 / 3 = -1.666…` -> -2
+/// - Extremes: `i32::MIN / 2` and `i32::MAX / 2` are handled without overflow.
 #[inline]
 fn div_round_nearest_i32(numer: i32, denom: i32) -> i32 {
     if denom <= 0 {
@@ -428,6 +439,8 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             self.tmp_med_buf.extend(self.med_buf.iter().copied());
             self.tmp_med_buf.sort_unstable();
             let n = self.tmp_med_buf.len();
+            // Invariant: we just pushed w_cg into med_buf above, so tmp_med_buf.len() >= 1.
+            // This debug assert catches future regressions in debug builds without runtime cost.
             debug_assert!(n > 0, "median buffer unexpectedly empty");
             let mid = n / 2;
             if n % 2 == 0 {
