@@ -228,6 +228,13 @@ enum Commands {
             long_help = "Select memory locking mode when --rt is enabled.\n- none: do not lock memory.\n- current: lock currently resident pages (mlockall(MCL_CURRENT)).\n- all: lock current and future pages (mlockall(MCL_CURRENT|MCL_FUTURE)).\nDefault: current on Linux, none on macOS."
         )]
         rt_lock: Option<RtLock>,
+        /// Real-time CPU index to pin the process to (Linux only). If not set, defaults to 0.
+        #[arg(
+            long,
+            value_name = "CPU",
+            long_help = "Select the CPU index to pin the process to when --rt is enabled (Linux only). Defaults to 0. The value must be allowed by the current affinity mask; otherwise affinity will be left unchanged and a warning is logged."
+        )]
+        rt_cpu: Option<usize>,
         /// Print control loop and sampling stats
         #[arg(long, action = ArgAction::SetTrue)]
         stats: bool,
@@ -340,6 +347,7 @@ fn real_main() -> eyre::Result<()> {
             rt,
             rt_prio,
             rt_lock,
+            rt_cpu,
             stats,
         } => {
             // CLI flag overrides config; otherwise use config default
@@ -363,6 +371,7 @@ fn real_main() -> eyre::Result<()> {
                 rt,
                 rt_prio,
                 rt_lock,
+                rt_cpu,
                 stats,
             );
             res?;
@@ -391,18 +400,20 @@ fn run_dose(
     rt: bool,
     rt_prio: Option<i32>,
     rt_lock: Option<RtLock>,
+    rt_cpu: Option<usize>,
     stats: bool,
 ) -> CoreResult<()> {
     // Real-time mode setup (Linux/macOS) — run once per process
     #[cfg(target_os = "linux")]
     {
         let mode = rt_lock.unwrap_or(RtLock::os_default());
-        setup_rt_once(rt, rt_prio, mode);
+        setup_rt_once(rt, rt_prio, mode, rt_cpu);
     }
     #[cfg(target_os = "macos")]
     {
         let mode = rt_lock.unwrap_or(RtLock::os_default());
         let _rt_prio = rt_prio; // silence unused on non-Linux builds
+        let _rt_cpu = rt_cpu; // silence unused on non-Linux builds
         setup_rt_once(rt, mode);
     }
 
@@ -662,7 +673,7 @@ fn run_dose(
 }
 
 #[cfg(target_os = "linux")]
-fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock) {
+fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize>) {
     use libc::{
         mlockall, sched_get_priority_max, sched_get_priority_min, sched_param, sched_setscheduler,
         CPU_SET, CPU_ZERO, MCL_CURRENT, MCL_FUTURE, SCHED_FIFO,
@@ -670,7 +681,7 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock) {
     use std::sync::OnceLock;
     static RT_ONCE: OnceLock<()> = OnceLock::new();
     static ONLINE_CPUS: OnceLock<libc::c_long> = OnceLock::new();
-    static CPUSET0: OnceLock<libc::cpu_set_t> = OnceLock::new();
+    static CPUSET: OnceLock<libc::cpu_set_t> = OnceLock::new();
 
     if !rt {
         return;
@@ -724,10 +735,18 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock) {
         }
 
         let _ = ONLINE_CPUS.get_or_init(|| unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) });
-        let _ = CPUSET0.get_or_init(|| unsafe {
+        let _ = CPUSET.get_or_init(|| unsafe {
             let mut set: libc::cpu_set_t = std::mem::zeroed();
             CPU_ZERO(&mut set);
-            CPU_SET(0, &mut set);
+            // Start with current mask to respect cgroup/container limits
+            let rc = libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set);
+            if rc != 0 {
+                // Fallback to all CPUs if getaffinity fails; we'll still validate below.
+                CPU_ZERO(&mut set);
+                for i in 0..(std::mem::size_of::<libc::cpu_set_t>() * 8) {
+                    CPU_SET(i, &mut set);
+                }
+            }
             set
         });
 
@@ -737,12 +756,34 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock) {
                 "Warning: sysconf(_SC_NPROCESSORS_ONLN) returned {nprocs_onln}; skipping affinity"
             );
         } else {
-            let cpuset = CPUSET0.get().unwrap();
-            unsafe {
-                let rc = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), cpuset);
-                if rc != 0 {
-                    let err = std::io::Error::last_os_error();
-                    eprintln!("Warning: sched_setaffinity failed: {err}");
+            // Choose target CPU (default 0) and verify it's allowed by current mask
+            let target = rt_cpu.unwrap_or(0);
+            let mut desired: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+            unsafe { CPU_ZERO(&mut desired) };
+            if target as libc::c_long >= nprocs_onln {
+                eprintln!(
+                    "Warning: requested --rt-cpu={target} but only {nprocs_onln} CPU(s) online; skipping affinity"
+                );
+                return;
+            }
+            unsafe { CPU_SET(target, &mut desired) };
+            let allowed = CPUSET.get().unwrap();
+            let allowed_target: bool = unsafe { libc::CPU_ISSET(target, allowed) };
+            if !allowed_target {
+                eprintln!(
+                    "Warning: requested --rt-cpu={target} not permitted by current affinity mask; leaving unchanged"
+                );
+            } else {
+                unsafe {
+                    let rc = libc::sched_setaffinity(
+                        0,
+                        std::mem::size_of::<libc::cpu_set_t>(),
+                        &desired,
+                    );
+                    if rc != 0 {
+                        let err = std::io::Error::last_os_error();
+                        eprintln!("Warning: sched_setaffinity to CPU {target} failed: {err}");
+                    }
                 }
             }
         }

@@ -82,7 +82,8 @@ impl Calibration {
     /// Rationale:
     /// - Avoids per-sample floating-point math in the control loop.
     /// - Keeps all controller thresholds and comparisons in one integer unit (cg).
-    /// - Uses saturating ops to avoid overflow on extreme inputs/parameters.
+    /// - Uses saturating arithmetic operations (saturating_sub/mul/add) to avoid
+    ///   overflow on extreme inputs/parameters.
     ///
     /// Rounding and error bounds:
     /// - `gain_g_per_count` and `offset_g` are rounded to the nearest centigram
@@ -439,9 +440,13 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             self.tmp_med_buf.extend(self.med_buf.iter().copied());
             self.tmp_med_buf.sort_unstable();
             let n = self.tmp_med_buf.len();
-            // Invariant: we just pushed w_cg into med_buf above, so tmp_med_buf.len() >= 1.
-            // This debug assert catches future regressions in debug builds without runtime cost.
+            // Invariants (only applicable when med_win > 1, i.e., when this branch executes):
+            // - We just pushed `w_cg` into `med_buf`, so `med_buf.len() >= 1`.
+            // - After the optional pop, `med_buf.len() <= med_win`.
+            // - `tmp_med_buf` is a copy of `med_buf`, so lengths match and `n >= 1`.
             debug_assert!(n > 0, "median buffer unexpectedly empty");
+            debug_assert_eq!(self.med_buf.len(), n, "tmp_med_buf must mirror med_buf");
+            debug_assert!(n <= med_win, "median buffer exceeded window size");
             let mid = n / 2;
             if n % 2 == 0 {
                 // n >= 2 here, so mid >= 1 and mid-1 is safe
