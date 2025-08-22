@@ -15,6 +15,26 @@ pub enum SamplingMode {
     Paced(u32),
 }
 
+/// Compute the stall watchdog threshold in milliseconds.
+///
+/// Rationale:
+/// - Start from a "fast" threshold based on the sensor timeout (4x) to catch stalls promptly.
+/// - Ensure the threshold is not shorter than two sampling periods to allow at least
+///   one missed sample without tripping (safe threshold).
+/// - If the configured max_run_ms is smaller than two periods, cap the threshold below
+///   max_run_ms to avoid underflow and ensure the watchdog can still trip before the
+///   hard max runtime; always return at least 1 ms.
+#[inline]
+fn compute_stall_threshold_ms(sensor_timeout_ms: u64, period_ms: u64, max_run_ms: u64) -> u64 {
+    let fast_threshold = sensor_timeout_ms.saturating_mul(4);
+    let safe_threshold = std::cmp::max(fast_threshold, period_ms.saturating_mul(2));
+    if max_run_ms < period_ms.saturating_mul(2) {
+        fast_threshold.min(max_run_ms.saturating_sub(1)).max(1)
+    } else {
+        safe_threshold
+    }
+}
+
 /// Run the controller until completion or abort, returning final grams on success.
 /// The caller should pre-merge any safety overrides (e.g., max_run_ms) into `safety`.
 #[allow(clippy::too_many_arguments)]
@@ -142,16 +162,9 @@ where
 
     let period_us = crate::util::period_us(filter.sample_rate_hz);
     let period_ms = crate::util::period_ms(filter.sample_rate_hz);
-    let fast_threshold = timeouts.sensor_ms.saturating_mul(4);
-    let safe_threshold = std::cmp::max(fast_threshold, period_ms.saturating_mul(2));
     // Bound stall threshold by max_run_ms to avoid underflow
-    let stall_threshold_ms = if safety.max_run_ms < period_ms.saturating_mul(2) {
-        fast_threshold
-            .min(safety.max_run_ms.saturating_sub(1))
-            .max(1)
-    } else {
-        safe_threshold
-    };
+    let stall_threshold_ms =
+        compute_stall_threshold_ms(timeouts.sensor_ms, period_ms, safety.max_run_ms);
 
     let sampler_timeout = Duration::from_millis(timeouts.sensor_ms);
     let sampler = match mode {

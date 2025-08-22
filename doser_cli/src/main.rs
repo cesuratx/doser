@@ -482,6 +482,20 @@ fn run_dose(
     };
     let prefer_timeout_first = max_run_ms_override.is_none();
 
+    #[inline]
+    fn record_sample(
+        latencies: &mut Vec<u64>,
+        missed_deadlines: &mut usize,
+        period_us: u64,
+        t_start: std::time::Instant,
+    ) {
+        let latency = t_start.elapsed().as_micros() as u64;
+        latencies.push(latency);
+        if latency > period_us {
+            *missed_deadlines = missed_deadlines.saturating_add(1);
+        }
+    }
+
     // Stats collection for direct mode
     if matches!(sampling_mode, SamplingMode::Direct) && stats {
         // Direct mode: wrap control loop manually
@@ -507,12 +521,7 @@ fn run_dose(
         loop {
             let t_start = std::time::Instant::now();
             let status = doser.step()?;
-            let t_end = std::time::Instant::now();
-            let latency = t_end.duration_since(t_start).as_micros() as u64;
-            latencies.push(latency);
-            if latency > period_us {
-                missed_deadlines += 1;
-            }
+            record_sample(&mut latencies, &mut missed_deadlines, period_us, t_start);
             sample_count += 1;
             match status {
                 doser_core::DosingStatus::Running => continue,
@@ -575,12 +584,7 @@ fn run_dose(
                 std::thread::sleep(std::time::Duration::from_micros(period_us));
                 continue;
             };
-            let t_end = std::time::Instant::now();
-            let latency = t_end.duration_since(t_start).as_micros() as u64;
-            latencies.push(latency);
-            if latency > period_us {
-                missed_deadlines += 1;
-            }
+            record_sample(&mut latencies, &mut missed_deadlines, period_us, t_start);
             match status {
                 doser_core::DosingStatus::Running => continue,
                 doser_core::DosingStatus::Complete => {
