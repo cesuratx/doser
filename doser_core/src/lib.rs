@@ -32,6 +32,9 @@ use doser_hardware::error::HwError;
 #[inline]
 fn div_round_nearest_i32(numer: i32, denom: i32) -> i32 {
     debug_assert!(denom > 0);
+    if denom <= 0 {
+        panic!("div_round_nearest_i32: denom must be > 0, got {}", denom);
+    }
     let n = numer as i64;
     let d = denom as i64;
     let q = if n >= 0 {
