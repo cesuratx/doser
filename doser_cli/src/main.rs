@@ -686,13 +686,11 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
     if !rt {
         return;
     }
-    RT_ONCE.get_or_init(|| {
-        // Memory locking
+    #[inline]
+    unsafe fn apply_mem_lock(lock: RtLock) {
         match lock {
-            RtLock::None => {
-                eprintln!("RT: memory locking disabled (none)");
-            }
-            RtLock::Current => unsafe {
+            RtLock::None => eprintln!("RT: memory locking disabled (none)"),
+            RtLock::Current => {
                 let rc = mlockall(MCL_CURRENT);
                 if rc != 0 {
                     let err = std::io::Error::last_os_error();
@@ -700,8 +698,8 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
                 } else {
                     eprintln!("RT: memory lock = current");
                 }
-            },
-            RtLock::All => unsafe {
+            }
+            RtLock::All => {
                 let rc = mlockall(MCL_CURRENT | MCL_FUTURE);
                 if rc != 0 {
                     let err = std::io::Error::last_os_error();
@@ -709,10 +707,13 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
                 } else {
                     eprintln!("RT: memory lock = all (current|future)");
                 }
-            },
+            }
         }
-        // Determine SCHED_FIFO priority, clamped to system range
-        let prio_val = unsafe {
+    }
+
+    #[inline]
+    unsafe fn apply_fifo_priority(prio: Option<i32>) {
+        let prio_val = {
             let min = sched_get_priority_min(SCHED_FIFO);
             let max = sched_get_priority_max(SCHED_FIFO);
             let (min, max) = if min < 0 || max < 0 {
@@ -726,22 +727,26 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         let param = sched_param {
             sched_priority: prio_val,
         };
-        unsafe {
-            let rc = sched_setscheduler(0, SCHED_FIFO, &param);
-            if rc != 0 {
-                let err = std::io::Error::last_os_error();
-                eprintln!("Warning: sched_setscheduler(SCHED_FIFO, prio={prio_val}) failed: {err}");
-            }
+        let rc = sched_setscheduler(0, SCHED_FIFO, &param);
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            eprintln!("Warning: sched_setscheduler(SCHED_FIFO, prio={prio_val}) failed: {err}");
         }
+    }
 
-        let _ = ONLINE_CPUS.get_or_init(|| unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) });
-        let _ = CPUSET.get_or_init(|| unsafe {
+    #[inline]
+    unsafe fn apply_affinity(
+        rt_cpu: Option<usize>,
+        online_cpus: &OnceLock<libc::c_long>,
+        mask: &OnceLock<libc::cpu_set_t>,
+    ) {
+        let _ = online_cpus.get_or_init(|| libc::sysconf(libc::_SC_NPROCESSORS_ONLN));
+        let _ = mask.get_or_init(|| {
             let mut set: libc::cpu_set_t = std::mem::zeroed();
             CPU_ZERO(&mut set);
             // Start with current mask to respect cgroup/container limits
             let rc = libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set);
             if rc != 0 {
-                // Fallback to all CPUs if getaffinity fails; we'll still validate below.
                 CPU_ZERO(&mut set);
                 for i in 0..(std::mem::size_of::<libc::cpu_set_t>() * 8) {
                     CPU_SET(i, &mut set);
@@ -749,44 +754,38 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
             }
             set
         });
-
-        let nprocs_onln = *ONLINE_CPUS.get().unwrap();
+        let nprocs_onln = *online_cpus.get().unwrap();
         if nprocs_onln < 1 {
             eprintln!(
                 "Warning: sysconf(_SC_NPROCESSORS_ONLN) returned {nprocs_onln}; skipping affinity"
             );
-        } else {
-            // Choose target CPU (default 0) and verify it's allowed by current mask
-            let target = rt_cpu.unwrap_or(0);
-            let mut desired: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-            unsafe { CPU_ZERO(&mut desired) };
-            if target as libc::c_long >= nprocs_onln {
-                eprintln!(
-                    "Warning: requested --rt-cpu={target} but only {nprocs_onln} CPU(s) online; skipping affinity"
-                );
-                return;
-            }
-            unsafe { CPU_SET(target, &mut desired) };
-            let allowed = CPUSET.get().unwrap();
-            let allowed_target: bool = unsafe { libc::CPU_ISSET(target, allowed) };
-            if !allowed_target {
-                eprintln!(
-                    "Warning: requested --rt-cpu={target} not permitted by current affinity mask; leaving unchanged"
-                );
-            } else {
-                unsafe {
-                    let rc = libc::sched_setaffinity(
-                        0,
-                        std::mem::size_of::<libc::cpu_set_t>(),
-                        &desired,
-                    );
-                    if rc != 0 {
-                        let err = std::io::Error::last_os_error();
-                        eprintln!("Warning: sched_setaffinity to CPU {target} failed: {err}");
-                    }
-                }
-            }
+            return;
         }
+        let target = rt_cpu.unwrap_or(0);
+        if target as libc::c_long >= nprocs_onln {
+            eprintln!("Warning: requested --rt-cpu={target} but only {nprocs_onln} CPU(s) online; skipping affinity");
+            return;
+        }
+        let allowed = mask.get().unwrap();
+        let allowed_target: bool = libc::CPU_ISSET(target, allowed);
+        if !allowed_target {
+            eprintln!("Warning: requested --rt-cpu={target} not permitted by current affinity mask; leaving unchanged");
+            return;
+        }
+        let mut desired: libc::cpu_set_t = std::mem::zeroed();
+        CPU_ZERO(&mut desired);
+        CPU_SET(target, &mut desired);
+        let rc = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &desired);
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            eprintln!("Warning: sched_setaffinity to CPU {target} failed: {err}");
+        }
+    }
+
+    RT_ONCE.get_or_init(|| unsafe {
+        apply_mem_lock(lock);
+        apply_fifo_priority(prio);
+        apply_affinity(rt_cpu, &ONLINE_CPUS, &CPUSET);
     });
 }
 

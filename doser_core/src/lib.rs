@@ -2,6 +2,16 @@
 //! - Keeps all hardware behind doser_traits::Scale/Motor
 //! - Exposes a small builder to wire config + traits
 //! - One-step control loop (call step() from the CLI or a strategy)
+//!
+//! Fixed-point arithmetic strategy
+//! - Internals operate primarily in integer centigrams (cg, 1 cg = 0.01 g) to avoid
+//!   per-sample floating-point math in the control loop and to keep thresholds in a
+//!   single unit. See `Calibration::to_cg` for the conversion path and quantization.
+//! - The helper `div_round_nearest_i32` provides round-to-nearest integer division with
+//!   ties away from zero, which is used to compute unbiased medians and moving averages
+//!   in cg space.
+//! - Saturating arithmetic is used where appropriate (e.g., `saturating_sub/mul/add`) to
+//!   prevent overflow with extreme parameters while preserving monotonicity.
 
 pub mod error;
 pub mod mocks;
@@ -55,6 +65,36 @@ fn div_round_nearest_i32(numer: i32, denom: i32) -> i32 {
     q as i32
 }
 
+/// Quantize a floating-point grams value to integer centigrams (cg), rounding to nearest
+/// and clamping to the i32 range. Non-finite values (NaN/±Inf) map to 0.
+#[inline]
+fn quantize_to_cg_i32(x_g: f32) -> i32 {
+    if !x_g.is_finite() {
+        return 0;
+    }
+    let scaled = (x_g * 100.0).round();
+    if scaled >= i32::MAX as f32 {
+        i32::MAX
+    } else if scaled <= i32::MIN as f32 {
+        i32::MIN
+    } else {
+        scaled as i32
+    }
+}
+
+/// Absolute difference of two i32 values as u32 without overflow.
+/// Uses 64-bit intermediates so the full range up to `u32::MAX` is representable.
+#[inline]
+fn abs_diff_i32_u32(a: i32, b: i32) -> u32 {
+    let diff = (a as i64) - (b as i64);
+    let mag = if diff >= 0 {
+        diff as u64
+    } else {
+        (-diff) as u64
+    };
+    mag as u32
+}
+
 /// Simple linear calibration from raw scale counts to grams.
 /// grams = gain_g_per_count * (raw - zero_counts) + offset_g
 #[derive(Debug, Clone)]
@@ -100,22 +140,8 @@ impl Calibration {
     ///   and `raw = 123`, then `to_cg(123) == 123` (i.e., 1.23 g).
     pub fn to_cg(&self, raw: i32) -> i32 {
         let delta = raw.saturating_sub(self.zero_counts);
-        // Safe quantization helper: finite check + clamp to i32 range before cast
-        let quantize_cg = |x_g: f32| -> i32 {
-            if !x_g.is_finite() {
-                return 0;
-            }
-            let scaled = (x_g * 100.0).round();
-            if scaled >= i32::MAX as f32 {
-                i32::MAX
-            } else if scaled <= i32::MIN as f32 {
-                i32::MIN
-            } else {
-                scaled as i32
-            }
-        };
-        let gain_cg_per_count = quantize_cg(self.gain_g_per_count);
-        let offset_cg = quantize_cg(self.offset_g);
+        let gain_cg_per_count = quantize_to_cg_i32(self.gain_g_per_count);
+        let offset_cg = quantize_to_cg_i32(self.offset_g);
         gain_cg_per_count
             .saturating_mul(delta)
             .saturating_add(offset_cg)
@@ -359,7 +385,8 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             self.control.coarse_speed
         };
         if self.safety.no_progress_ms > 0 && self.no_progress_epsilon_cg > 0 && target_speed > 0 {
-            if (w_cg - self.last_progress_cg).unsigned_abs() >= self.no_progress_epsilon_cg as u32 {
+            let progress_delta_cg = abs_diff_i32_u32(w_cg, self.last_progress_cg);
+            if progress_delta_cg >= self.no_progress_epsilon_cg as u32 {
                 self.last_progress_cg = w_cg;
                 self.last_progress_at_ms = now;
             } else if now.saturating_sub(self.last_progress_at_ms) >= self.safety.no_progress_ms {
@@ -444,9 +471,21 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             // - We just pushed `w_cg` into `med_buf`, so `med_buf.len() >= 1`.
             // - After the optional pop, `med_buf.len() <= med_win`.
             // - `tmp_med_buf` is a copy of `med_buf`, so lengths match and `n >= 1`.
-            debug_assert!(n > 0, "median buffer unexpectedly empty");
-            debug_assert_eq!(self.med_buf.len(), n, "tmp_med_buf must mirror med_buf");
-            debug_assert!(n <= med_win, "median buffer exceeded window size");
+            debug_assert!(
+                n > 0,
+                "median buffer unexpectedly empty (n={n}, med_win={med_win}, med_buf_len={})",
+                self.med_buf.len()
+            );
+            debug_assert_eq!(
+                self.med_buf.len(),
+                n,
+                "tmp_med_buf must mirror med_buf (med_buf_len={}, tmp_len={n})",
+                self.med_buf.len()
+            );
+            debug_assert!(
+                n <= med_win,
+                "median buffer exceeded window size (n={n} > med_win={med_win})"
+            );
             let mid = n / 2;
             if n % 2 == 0 {
                 // n >= 2 here, so mid >= 1 and mid-1 is safe
@@ -549,7 +588,8 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
 
         // 3a) no-progress watchdog (only while motor is commanded to run)
         if self.safety.no_progress_ms > 0 && self.no_progress_epsilon_cg > 0 && target_speed > 0 {
-            if (w_cg - self.last_progress_cg).unsigned_abs() >= self.no_progress_epsilon_cg as u32 {
+            let progress_delta_cg = abs_diff_i32_u32(w_cg, self.last_progress_cg);
+            if progress_delta_cg >= self.no_progress_epsilon_cg as u32 {
                 self.last_progress_cg = w_cg;
                 self.last_progress_at_ms = now;
             } else if now.saturating_sub(self.last_progress_at_ms) >= self.safety.no_progress_ms {

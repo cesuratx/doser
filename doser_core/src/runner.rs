@@ -36,22 +36,32 @@ pub enum SamplingMode {
 ///   we prefer the conservative fast threshold if it is even smaller.
 #[inline]
 fn compute_stall_threshold_ms(sensor_timeout_ms: u64, period_ms: u64, max_run_ms: u64) -> u64 {
-    // Invariants: period_ms is produced by util::period_ms, so 1 <= period_ms <= 1000.
     debug_assert!((1..=crate::util::MILLIS_PER_SEC).contains(&period_ms));
-    let fast_threshold = sensor_timeout_ms.saturating_mul(4);
-    let two_periods = period_ms.saturating_mul(2);
 
-    // If the run cap is smaller than two periods, we can't honor the two-period guard.
-    // In that case, use the smaller of the fast threshold and (max_run_ms - 1), still
-    // ensuring the stall watchdog can trip before the hard cap.
-    if max_run_ms < two_periods {
-        return fast_threshold.min(max_run_ms.saturating_sub(1)).max(1);
+    #[inline]
+    fn fast_threshold_ms(sensor_timeout_ms: u64) -> u64 {
+        sensor_timeout_ms.saturating_mul(4)
     }
 
-    // Otherwise choose at least two periods or the fast threshold, but always cap to
-    // fire before the hard max runtime.
-    let safe_threshold = std::cmp::max(fast_threshold, two_periods);
-    safe_threshold.min(max_run_ms.saturating_sub(1)).max(1)
+    #[inline]
+    fn two_periods_ms(period_ms: u64) -> u64 {
+        period_ms.saturating_mul(2)
+    }
+
+    #[inline]
+    fn cap_below_max_run(threshold: u64, max_run_ms: u64) -> u64 {
+        threshold.min(max_run_ms.saturating_sub(1)).max(1)
+    }
+
+    let fast = fast_threshold_ms(sensor_timeout_ms);
+    let two_p = two_periods_ms(period_ms);
+
+    if max_run_ms < two_p {
+        return cap_below_max_run(fast, max_run_ms);
+    }
+
+    let safe = std::cmp::max(fast, two_p);
+    cap_below_max_run(safe, max_run_ms)
 }
 
 #[inline]
