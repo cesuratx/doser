@@ -701,7 +701,7 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
                 if cur == libc::RLIM_INFINITY {
                     Some("memlock limit: unlimited".to_string())
                 } else {
-                    Some(format!("memlock limit: {} KiB", (cur as u64) / 1024))
+                    Some(format!("memlock limit: {} KiB", cur / 1024))
                 }
             } else {
                 None
