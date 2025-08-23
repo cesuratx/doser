@@ -790,23 +790,30 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         online_cpus: &OnceLock<libc::c_long>,
         mask: &OnceLock<libc::cpu_set_t>,
     ) -> std::io::Result<()> {
+        // Size-based limit of cpuset capacity (bits)
+        let max_cpuset_bits: usize = std::mem::size_of::<libc::cpu_set_t>() * 8;
         // Cache online CPUs
         let _ = online_cpus.get_or_init(|| unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) });
         // Get current allowed mask; on failure, fallback to [0..online_cpus)
         let _ = mask.get_or_init(|| {
             let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+            // SAFETY: set points to a valid cpu_set_t we just zero-initialized
             unsafe { CPU_ZERO(&mut set) };
+            // SAFETY: sched_getaffinity writes into &mut set up to size_of::<cpu_set_t>() bytes
             let rc = unsafe {
                 libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set)
             };
             if rc != 0 {
+                // Reset to empty, then mark CPUs [0..n) as allowed (clamped to cpuset capacity)
                 unsafe { CPU_ZERO(&mut set) };
                 let n = online_cpus
                     .get()
                     .copied()
                     .unwrap_or_else(|| unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) });
                 let n = if n < 0 { 0 } else { n as usize };
+                let n = n.min(max_cpuset_bits);
                 for i in 0..n {
+                    // SAFETY: i < max_cpuset_bits ensures CPU_SET stays within the bitset
                     unsafe { CPU_SET(i, &mut set) };
                 }
             }
@@ -823,10 +830,15 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
                 format!("requested CPU {target} >= online {nprocs_onln}"),
             ));
         }
+        if target >= max_cpuset_bits {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("requested CPU {target} exceeds cpu_set_t capacity {max_cpuset_bits}"),
+            ));
+        }
         let allowed = mask.get().expect("cpuset init");
-        // Normalize CPU_ISSET return type across libc variants:
-        // some expose it as c_int, others as bool. Casting to c_int and
-        // comparing to 0 keeps this portable without cfg-specific branches.
+        // SAFETY: target < max_cpuset_bits and `allowed` points to a valid cpu_set_t
+        // Normalize CPU_ISSET return type across libc variants (bool vs c_int)
         let allowed_target = unsafe { (CPU_ISSET(target, allowed) as libc::c_int) != 0 };
         if !allowed_target {
             return Err(std::io::Error::new(
@@ -835,10 +847,12 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
             ));
         }
         let mut desired: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        // SAFETY: desired is a valid cpu_set_t; target < max_cpuset_bits ensures CPU_SET bounds
         unsafe {
             CPU_ZERO(&mut desired);
             CPU_SET(target, &mut desired);
         }
+        // SAFETY: sched_setaffinity reads exactly size_of::<cpu_set_t>() bytes from &desired
         let rc =
             unsafe { libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &desired) };
         if rc != 0 {

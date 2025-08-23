@@ -394,7 +394,9 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
     /// Process a pre-sampled raw reading (centers Phase 3 sampler integration).
     pub fn step_from_raw(&mut self, raw: i32) -> Result<DosingStatus> {
         if self.estop_latched || self.poll_estop() {
-            let _ = self.motor_stop();
+            if let Err(e) = self.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed on estop");
+            }
             return Ok(DosingStatus::Aborted(DoserError::State("estop".into())));
         }
         let w_cg_raw = self.to_cg_cached(raw);
@@ -406,19 +408,25 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
         let abs_err_cg = err_cg.unsigned_abs();
         let now = self.clock.ms_since(self.epoch);
         if now.saturating_sub(self.start_ms) >= self.safety.max_run_ms {
-            let _ = self.motor_stop();
+            if let Err(e) = self.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed on max-run cap");
+            }
             return Ok(DosingStatus::Aborted(DoserError::State(
                 "max run time exceeded".into(),
             )));
         }
         if w_cg > self.target_cg + self.max_overshoot_cg {
-            let _ = self.motor_stop();
+            if let Err(e) = self.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed on overshoot");
+            }
             return Ok(DosingStatus::Aborted(DoserError::State(
                 "max overshoot exceeded".into(),
             )));
         }
         if w_cg + self.epsilon_cg >= self.target_cg {
-            let _ = self.motor_stop();
+            if let Err(e) = self.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed entering settle zone");
+            }
             // Start settling window unconditionally once in completion zone.
             if self.settled_since_ms.is_none() {
                 self.settled_since_ms = Some(now);
@@ -450,7 +458,9 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
                 self.last_progress_cg = w_cg;
                 self.last_progress_at_ms = now;
             } else if now.saturating_sub(self.last_progress_at_ms) >= self.safety.no_progress_ms {
-                let _ = self.motor_stop();
+                if let Err(e) = self.motor_stop() {
+                    tracing::warn!(error = %e, "motor_stop failed on no-progress watchdog");
+                }
                 return Ok(DosingStatus::Aborted(DoserError::State(
                     "no progress".into(),
                 )));
@@ -566,9 +576,26 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             if self.ma_buf.len() > ma_win {
                 self.ma_buf.pop_front();
             }
-            let sum: i32 = self.ma_buf.iter().copied().sum();
-            let len = self.ma_buf.len() as i32;
-            div_round_nearest_i32(sum, len)
+            let sum_i64: i64 = self.ma_buf.iter().map(|&v| v as i64).sum();
+            let len_i32 = self.ma_buf.len() as i32;
+            // Safe: sum fits in i64; convert rounded result back to i32
+            if len_i32 > 0 {
+                let rounded = div_round_nearest_i32(sum_i64 as i32, len_i32);
+                // If the absolute sum exceeds i32, take a slower path to avoid truncation
+                if sum_i64 > i32::MAX as i64 || sum_i64 < i32::MIN as i64 {
+                    let n = len_i32 as i64;
+                    let q = if sum_i64 >= 0 {
+                        (sum_i64 + n / 2) / n
+                    } else {
+                        (sum_i64 - n / 2) / n
+                    };
+                    q as i32
+                } else {
+                    rounded
+                }
+            } else {
+                0
+            }
         } else {
             after_median
         }
@@ -578,7 +605,9 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
     pub fn step(&mut self) -> Result<DosingStatus> {
         // If previously estopped, keep aborting until reset via begin()
         if self.estop_latched || self.poll_estop() {
-            let _ = self.motor_stop();
+            if let Err(e) = self.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed on estop");
+            }
             return Ok(DosingStatus::Aborted(DoserError::State("estop".into())));
         }
 
@@ -602,7 +631,9 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
 
         // 1a) hard runtime cap (>= to allow deterministic tests with 0ms)
         if now.saturating_sub(self.start_ms) >= self.safety.max_run_ms {
-            let _ = self.motor_stop();
+            if let Err(e) = self.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed on max-run cap");
+            }
             return Ok(DosingStatus::Aborted(DoserError::State(
                 "max run time exceeded".into(),
             )));
@@ -610,7 +641,9 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
 
         // 1b) excessive overshoot guard
         if w_cg > self.target_cg + self.max_overshoot_cg {
-            let _ = self.motor_stop();
+            if let Err(e) = self.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed on overshoot");
+            }
             return Ok(DosingStatus::Aborted(DoserError::State(
                 "max overshoot exceeded".into(),
             )));
@@ -618,7 +651,9 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
 
         // 2) Reached or exceeded target? Stop and settle (asymmetric completion)
         if w_cg + self.epsilon_cg >= self.target_cg {
-            let _ = self.motor_stop();
+            if let Err(e) = self.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed entering settle zone");
+            }
             // Start settling window unconditionally once in completion zone.
             if self.settled_since_ms.is_none() {
                 self.settled_since_ms = Some(now);
@@ -654,7 +689,9 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
                 self.last_progress_cg = w_cg;
                 self.last_progress_at_ms = now;
             } else if now.saturating_sub(self.last_progress_at_ms) >= self.safety.no_progress_ms {
-                let _ = self.motor_stop();
+                if let Err(e) = self.motor_stop() {
+                    tracing::warn!(error = %e, "motor_stop failed on no-progress watchdog");
+                }
                 return Ok(DosingStatus::Aborted(DoserError::State(
                     "no progress".into(),
                 )));
