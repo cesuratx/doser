@@ -83,7 +83,11 @@ fn quantize_to_cg_i32(x_g: f32) -> i32 {
 }
 
 /// Absolute difference of two i32 values as u32 without overflow.
-/// Uses 64-bit intermediates so the full range up to `u32::MAX` is representable.
+///
+/// Notes:
+/// - Uses 64-bit intermediates to avoid overflow during subtraction.
+/// - For any `i32` inputs, `|a - b| <= u32::MAX` (the maximum occurs for
+///   `(i32::MIN, i32::MAX)`), so the final cast to `u32` is always lossless.
 #[inline]
 fn abs_diff_i32_u32(a: i32, b: i32) -> u32 {
     let diff = (a as i64) - (b as i64);
@@ -92,7 +96,29 @@ fn abs_diff_i32_u32(a: i32, b: i32) -> u32 {
     } else {
         (-diff) as u64
     };
+    debug_assert!(
+        mag <= u32::MAX as u64,
+        "abs_diff_i32_u32: magnitude out of u32 range: {mag}"
+    );
     mag as u32
+}
+
+#[cfg(test)]
+mod abs_diff_tests {
+    use super::abs_diff_i32_u32;
+
+    #[test]
+    fn handles_extremes_losslessly() {
+        let v = abs_diff_i32_u32(i32::MIN, i32::MAX);
+        assert_eq!(v, u32::MAX);
+    }
+
+    #[test]
+    fn simple_pairs() {
+        assert_eq!(abs_diff_i32_u32(123, -456), 579);
+        assert_eq!(abs_diff_i32_u32(-456, 123), 579);
+        assert_eq!(abs_diff_i32_u32(0, 0), 0);
+    }
 }
 
 /// Simple linear calibration from raw scale counts to grams.

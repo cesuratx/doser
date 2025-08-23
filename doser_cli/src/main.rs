@@ -686,11 +686,15 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
     if !rt {
         return;
     }
+
+    // Apply process memory locking according to the selected mode.
+    // Security/privileges: may require CAP_IPC_LOCK or a sufficient memlock ulimit.
     #[inline]
     unsafe fn apply_mem_lock(lock: RtLock) {
         match lock {
             RtLock::None => eprintln!("RT: memory locking disabled (none)"),
             RtLock::Current => {
+                eprintln!("RT: requesting memory lock (current); may require CAP_IPC_LOCK or memlock ulimit");
                 let rc = mlockall(MCL_CURRENT);
                 if rc != 0 {
                     let err = std::io::Error::last_os_error();
@@ -700,6 +704,7 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
                 }
             }
             RtLock::All => {
+                eprintln!("RT: requesting memory lock (current|future); may require CAP_IPC_LOCK or memlock ulimit");
                 let rc = mlockall(MCL_CURRENT | MCL_FUTURE);
                 if rc != 0 {
                     let err = std::io::Error::last_os_error();
@@ -711,6 +716,8 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         }
     }
 
+    // Apply SCHED_FIFO priority, clamped to the system range.
+    // Security/privileges: typically requires CAP_SYS_NICE or root.
     #[inline]
     unsafe fn apply_fifo_priority(prio: Option<i32>) {
         let prio_val = {
@@ -734,6 +741,8 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         }
     }
 
+    // Pin process to a single CPU if permitted by the current affinity mask.
+    // Respects cgroup/container restrictions via sched_getaffinity.
     #[inline]
     unsafe fn apply_affinity(
         rt_cpu: Option<usize>,
@@ -744,11 +753,16 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         let _ = mask.get_or_init(|| {
             let mut set: libc::cpu_set_t = std::mem::zeroed();
             CPU_ZERO(&mut set);
-            // Start with current mask to respect cgroup/container limits
             let rc = libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set);
             if rc != 0 {
+                // Fallback: permit only the actually online CPUs instead of all bits.
                 CPU_ZERO(&mut set);
-                for i in 0..(std::mem::size_of::<libc::cpu_set_t>() * 8) {
+                let n = online_cpus
+                    .get()
+                    .copied()
+                    .unwrap_or_else(|| libc::sysconf(libc::_SC_NPROCESSORS_ONLN));
+                let n = if n < 0 { 0 } else { n as usize };
+                for i in 0..n {
                     CPU_SET(i, &mut set);
                 }
             }

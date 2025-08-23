@@ -38,21 +38,6 @@ pub enum SamplingMode {
 fn compute_stall_threshold_ms(sensor_timeout_ms: u64, period_ms: u64, max_run_ms: u64) -> u64 {
     debug_assert!((1..=crate::util::MILLIS_PER_SEC).contains(&period_ms));
 
-    #[inline]
-    fn fast_threshold_ms(sensor_timeout_ms: u64) -> u64 {
-        sensor_timeout_ms.saturating_mul(4)
-    }
-
-    #[inline]
-    fn two_periods_ms(period_ms: u64) -> u64 {
-        period_ms.saturating_mul(2)
-    }
-
-    #[inline]
-    fn cap_below_max_run(threshold: u64, max_run_ms: u64) -> u64 {
-        threshold.min(max_run_ms.saturating_sub(1)).max(1)
-    }
-
     let fast = fast_threshold_ms(sensor_timeout_ms);
     let two_p = two_periods_ms(period_ms);
 
@@ -62,6 +47,24 @@ fn compute_stall_threshold_ms(sensor_timeout_ms: u64, period_ms: u64, max_run_ms
 
     let safe = std::cmp::max(fast, two_p);
     cap_below_max_run(safe, max_run_ms)
+}
+
+/// Derive a quick stall threshold from per-read sensor timeout.
+#[inline]
+fn fast_threshold_ms(sensor_timeout_ms: u64) -> u64 {
+    sensor_timeout_ms.saturating_mul(4)
+}
+
+/// Ensure the stall threshold spans at least two periods to tolerate one miss.
+#[inline]
+fn two_periods_ms(period_ms: u64) -> u64 {
+    period_ms.saturating_mul(2)
+}
+
+/// Cap a threshold to be strictly below `max_run_ms` and at least 1ms.
+#[inline]
+fn cap_below_max_run(threshold: u64, max_run_ms: u64) -> u64 {
+    threshold.min(max_run_ms.saturating_sub(1)).max(1)
 }
 
 #[inline]
@@ -275,5 +278,57 @@ where
             // avoid busy spin if no sample yet
             std::thread::sleep(Duration::from_micros(period_us));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cap_below_max_run, compute_stall_threshold_ms, fast_threshold_ms, two_periods_ms};
+
+    #[test]
+    fn fast_threshold_scales_by_four() {
+        assert_eq!(fast_threshold_ms(0), 0);
+        assert_eq!(fast_threshold_ms(1), 4);
+        assert_eq!(fast_threshold_ms(150), 600);
+    }
+
+    #[test]
+    fn two_periods_is_double_period() {
+        assert_eq!(two_periods_ms(1), 2);
+        assert_eq!(two_periods_ms(10), 20);
+    }
+
+    #[test]
+    fn cap_below_max_run_enforces_bounds() {
+        // Normal cap below max_run
+        assert_eq!(cap_below_max_run(5000, 100), 99);
+        // When max_run is 1, result is clamped to 1
+        assert_eq!(cap_below_max_run(10, 1), 1);
+        // When threshold already small, keep it if below max-1
+        assert_eq!(cap_below_max_run(5, 100), 5);
+    }
+
+    #[test]
+    fn compute_threshold_uses_max_of_fast_and_two_periods() {
+        // fast=600, two_p=20 -> safe=600
+        let v = compute_stall_threshold_ms(150, 10, 60_000);
+        assert_eq!(v, 600);
+        // fast=20, two_p=20 -> safe=20
+        let v = compute_stall_threshold_ms(5, 10, 60_000);
+        assert_eq!(v, 20);
+    }
+
+    #[test]
+    fn compute_threshold_handles_small_max_run() {
+        // max_run < two_p, prefer fast then cap below max_run
+        // fast=40, two_p=200, max_run=50 -> cap(fast, 50)=40
+        let v = compute_stall_threshold_ms(10, 100, 50);
+        assert_eq!(v, 40);
+        // If safe exceeds max_run, it’s capped to max_run-1
+        let v = compute_stall_threshold_ms(2000, 10, 100);
+        assert_eq!(v, 99);
+        // If max_run is 1, clamp to minimum 1
+        let v = compute_stall_threshold_ms(10, 10, 1);
+        assert_eq!(v, 1);
     }
 }
