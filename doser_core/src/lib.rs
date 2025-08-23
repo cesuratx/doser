@@ -543,21 +543,22 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             // - We just pushed `w_cg` into `med_buf`, so `med_buf.len() >= 1`.
             // - After the optional pop, `med_buf.len() <= med_win`.
             // - `tmp_med_buf` is a copy of `med_buf`, so lengths match and `n >= 1`.
-            debug_assert!(
-                n > 0,
-                "median buffer unexpectedly empty (n={n}, med_win={med_win}, med_buf_len={})",
-                self.med_buf.len()
-            );
-            debug_assert_eq!(
-                self.med_buf.len(),
-                n,
-                "tmp_med_buf must mirror med_buf (med_buf_len={}, tmp_len={n})",
-                self.med_buf.len()
-            );
-            debug_assert!(
-                n <= med_win,
-                "median buffer exceeded window size (n={n} > med_win={med_win})"
-            );
+            #[cfg(debug_assertions)]
+            {
+                let med_len = self.med_buf.len();
+                debug_assert!(
+                    n > 0,
+                    "median buffer unexpectedly empty (n={n}, med_win={med_win}, med_buf_len={med_len})",
+                );
+                debug_assert_eq!(
+                    med_len, n,
+                    "tmp_med_buf must mirror med_buf (med_buf_len={med_len}, tmp_len={n})",
+                );
+                debug_assert!(
+                    n <= med_win,
+                    "median buffer exceeded window size (n={n} > med_win={med_win})"
+                );
+            }
             let mid = n / 2;
             if n % 2 == 0 {
                 // n >= 2 here, so mid >= 1 and mid-1 is safe
