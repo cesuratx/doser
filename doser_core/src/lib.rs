@@ -52,8 +52,10 @@ use doser_hardware::error::HwError;
 /// - Extremes: `i32::MIN / 2` and `i32::MAX / 2` are handled without overflow.
 #[inline]
 fn div_round_nearest_i32(numer: i32, denom: i32) -> i32 {
+    debug_assert!(denom > 0, "div_round_nearest_i32: denom must be > 0");
     if denom <= 0 {
-        panic!("div_round_nearest_i32: denom must be > 0, got {denom}");
+        // Static message to avoid formatting overhead on panic path
+        panic!("div_round_nearest_i32: denom must be > 0");
     }
     let n = numer as i64;
     let d = denom as i64;
@@ -63,6 +65,18 @@ fn div_round_nearest_i32(numer: i32, denom: i32) -> i32 {
         (n - (d / 2)) / d
     };
     q as i32
+}
+
+/// Average of two i32 values rounded to nearest with ties away from zero.
+/// Uses 64-bit intermediates; cannot overflow and the average fits in i32.
+#[inline]
+fn avg2_round_nearest_i32(a: i32, b: i32) -> i32 {
+    let s = (a as i64) + (b as i64);
+    if s >= 0 {
+        ((s + 1) / 2) as i32
+    } else {
+        ((s - 1) / 2) as i32
+    }
 }
 
 /// Quantize a floating-point grams value to integer centigrams (cg), rounding to nearest
@@ -118,6 +132,27 @@ mod abs_diff_tests {
         assert_eq!(abs_diff_i32_u32(123, -456), 579);
         assert_eq!(abs_diff_i32_u32(-456, 123), 579);
         assert_eq!(abs_diff_i32_u32(0, 0), 0);
+    }
+}
+
+#[cfg(test)]
+mod avg2_tests {
+    use super::avg2_round_nearest_i32;
+
+    #[test]
+    fn extremes_and_signs() {
+        assert_eq!(avg2_round_nearest_i32(i32::MAX, i32::MAX), i32::MAX);
+        assert_eq!(avg2_round_nearest_i32(i32::MIN, i32::MIN), i32::MIN);
+        // Cross extremes: sum = -1 -> avg = -0.5 -> away from zero => -1
+        assert_eq!(avg2_round_nearest_i32(i32::MAX, i32::MIN), -1);
+    }
+
+    #[test]
+    fn simple_pairs() {
+        assert_eq!(avg2_round_nearest_i32(1, 2), 2); // 1.5 -> 2
+        assert_eq!(avg2_round_nearest_i32(-1, 0), -1); // -0.5 -> -1
+        assert_eq!(avg2_round_nearest_i32(10, 10), 10);
+        assert_eq!(avg2_round_nearest_i32(-5, -6), -6); // -5.5 -> -6
     }
 }
 
@@ -312,6 +347,9 @@ pub struct DoserCore<S: doser_traits::Scale, M: doser_traits::Motor> {
     tmp_med_buf: Vec<i32>,
     // Cached control-loop sleep period in microseconds to avoid repeated division
     period_us: u64,
+    // Cached quantized calibration parameters (centigrams per count and offset)
+    cal_gain_cg_per_count: i32,
+    cal_offset_cg: i32,
     // Cached integer thresholds (centigrams)
     slow_at_cg: i32,
     epsilon_cg: i32,
@@ -363,7 +401,7 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             let _ = self.motor_stop();
             return Ok(DosingStatus::Aborted(DoserError::State("estop".into())));
         }
-        let w_cg_raw = self.calibration.to_cg(raw);
+        let w_cg_raw = self.to_cg_cached(raw);
         let w_cg = self.apply_filter(w_cg_raw);
         self.last_weight_cg = w_cg;
         let err_cg = self.target_cg - w_cg;
@@ -435,6 +473,14 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             .wrap_err("set_speed")?;
         self.clock.sleep(Duration::from_micros(self.period_us));
         Ok(DosingStatus::Running)
+    }
+
+    #[inline]
+    fn to_cg_cached(&self, raw: i32) -> i32 {
+        let delta = raw.saturating_sub(self.calibration.zero_counts);
+        self.cal_gain_cg_per_count
+            .saturating_mul(delta)
+            .saturating_add(self.cal_offset_cg)
     }
 
     /// Reset per-run state (start time, settling window). Call before a new dose.
@@ -517,7 +563,8 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
                 // n >= 2 here, so mid >= 1 and mid-1 is safe
                 let a = self.tmp_med_buf[mid - 1];
                 let b = self.tmp_med_buf[mid];
-                div_round_nearest_i32(a.saturating_add(b), 2)
+                // Use a specialized avg(2) helper to avoid any panic path and keep ties away from zero.
+                avg2_round_nearest_i32(a, b)
             } else {
                 self.tmp_med_buf[mid]
             }
@@ -555,8 +602,8 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             .map_err(|e| eyre::Report::new(map_hw_error_dyn(&*e)))
             .wrap_err("reading scale")?;
 
-        // Apply calibration (raw counts -> centigrams) and filtering
-        let w_cg_raw = self.calibration.to_cg(raw);
+        // Apply calibration (raw counts -> centigrams) via cached integer path and filtering
+        let w_cg_raw = self.to_cg_cached(raw);
         let w_cg = self.apply_filter(w_cg_raw);
 
         self.last_weight_cg = w_cg;
@@ -863,6 +910,10 @@ impl<S, M, T> DoserBuilder<S, M, T> {
         let no_progress_epsilon_cg = to_cg(safety.no_progress_epsilon_g);
         let slow_at_cg = to_cg(control.slow_at_g);
 
+        // Precompute quantized calibration before moving `calibration` into the struct
+        let cal_gain_cg_per_count = quantize_to_cg_i32(calibration.gain_g_per_count);
+        let cal_offset_cg = quantize_to_cg_i32(calibration.offset_g);
+
         Ok(Doser {
             inner: DoserCore {
                 scale,
@@ -882,6 +933,8 @@ impl<S, M, T> DoserBuilder<S, M, T> {
                 med_buf: VecDeque::with_capacity(med_cap),
                 tmp_med_buf: Vec::with_capacity(med_cap),
                 period_us,
+                cal_gain_cg_per_count,
+                cal_offset_cg,
                 slow_at_cg,
                 epsilon_cg,
                 max_overshoot_cg,
@@ -1164,6 +1217,10 @@ where
     let no_progress_epsilon_cg = to_cg(safety.no_progress_epsilon_g);
     let slow_at_cg = to_cg(control.slow_at_g);
 
+    // Precompute quantized calibration before moving `calibration` into the struct
+    let cal_gain_cg_per_count = quantize_to_cg_i32(calibration.gain_g_per_count);
+    let cal_offset_cg = quantize_to_cg_i32(calibration.offset_g);
+
     Ok(DoserG {
         scale,
         motor,
@@ -1182,6 +1239,8 @@ where
         med_buf: VecDeque::with_capacity(med_cap),
         tmp_med_buf: Vec::with_capacity(med_cap),
         period_us,
+        cal_gain_cg_per_count,
+        cal_offset_cg,
         slow_at_cg,
         epsilon_cg,
         max_overshoot_cg,

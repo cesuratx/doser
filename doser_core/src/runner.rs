@@ -36,7 +36,9 @@ pub enum SamplingMode {
 ///   we prefer the conservative fast threshold if it is even smaller.
 #[inline]
 fn compute_stall_threshold_ms(sensor_timeout_ms: u64, period_ms: u64, max_run_ms: u64) -> u64 {
-    debug_assert!((1..=crate::util::MILLIS_PER_SEC).contains(&period_ms));
+    // period_ms comes from util::period_ms(hz) which clamps hz>=1 and returns at least 1ms.
+    // We only assert the lower bound here; upper bounds depend on caller semantics.
+    debug_assert!(period_ms >= 1);
 
     let fast = fast_threshold_ms(sensor_timeout_ms);
     let two_p = two_periods_ms(period_ms);
