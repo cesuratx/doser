@@ -790,8 +790,10 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         online_cpus: &OnceLock<libc::c_long>,
         mask: &OnceLock<libc::cpu_set_t>,
     ) -> std::io::Result<()> {
-        // Size-based limit of cpuset capacity (bits)
-        let max_cpuset_bits: usize = std::mem::size_of::<libc::cpu_set_t>() * 8;
+        // Capacity of cpu_set_t in CPU indices (bits). cpu_set_t is a fixed-size bitset; its
+        // usable CPU index range is the number of bits it can hold. size_of returns bytes,
+        // so multiply by 8 to get bits.
+        const MAX_CPUSET_BITS: usize = std::mem::size_of::<libc::cpu_set_t>() * 8;
         // Cache online CPUs
         let _ = online_cpus.get_or_init(|| unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) });
         // Get current allowed mask; on failure, fallback to [0..online_cpus)
@@ -811,7 +813,7 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
                     .copied()
                     .unwrap_or_else(|| unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) });
                 let n = if n < 0 { 0 } else { n as usize };
-                let n = n.min(max_cpuset_bits);
+                let n = n.min(MAX_CPUSET_BITS);
                 for i in 0..n {
                     // SAFETY: i < max_cpuset_bits ensures CPU_SET stays within the bitset
                     unsafe { CPU_SET(i, &mut set) };
@@ -830,10 +832,10 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
                 format!("requested CPU {target} >= online {nprocs_onln}"),
             ));
         }
-        if target >= max_cpuset_bits {
+        if target >= MAX_CPUSET_BITS {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("requested CPU {target} exceeds cpu_set_t capacity {max_cpuset_bits}"),
+                format!("requested CPU {target} exceeds cpu_set_t capacity {MAX_CPUSET_BITS}"),
             ));
         }
         let allowed = mask.get().expect("cpuset init");
