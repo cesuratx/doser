@@ -247,20 +247,26 @@ where
         // Timeout vs max-run precedence
         let stalled_ms = sampler.stalled_for_now();
         if prefer_timeout_first && stalled_now(elapsed_ms, stalled_ms, stall_threshold_ms) {
-            let _ = doser.motor_stop();
+            if let Err(e) = doser.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed on timeout");
+            }
             return Err(crate::error::Report::new(DoserError::Timeout));
         }
 
         // Max run enforcement
         if elapsed_ms >= safety.max_run_ms {
-            let _ = doser.motor_stop();
+            if let Err(e) = doser.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed on max-run cap");
+            }
             return Err(crate::error::Report::new(DoserError::State(
                 "max run time exceeded".into(),
             )));
         }
 
         if !prefer_timeout_first && stalled_now(elapsed_ms, stalled_ms, stall_threshold_ms) {
-            let _ = doser.motor_stop();
+            if let Err(e) = doser.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed on timeout");
+            }
             return Err(crate::error::Report::new(DoserError::Timeout));
         }
 
@@ -273,7 +279,9 @@ where
                     return Ok(final_g);
                 }
                 DosingStatus::Aborted(e) => {
-                    let _ = doser.motor_stop();
+                    if let Err(me) = doser.motor_stop() {
+                        tracing::warn!(error = %me, "motor_stop failed on abort");
+                    }
                     tracing::error!(error = %e, "dose aborted");
                     return Err(crate::error::Report::new(e));
                 }

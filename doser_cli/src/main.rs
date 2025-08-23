@@ -691,19 +691,67 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
     // Security/privileges: may require CAP_IPC_LOCK or a sufficient memlock ulimit.
     #[inline]
     fn try_apply_mem_lock(lock: RtLock) -> std::io::Result<()> {
+        // Helper: read current memlock rlimit for diagnostics
+        #[inline]
+        fn memlock_limit_hint() -> Option<String> {
+            let mut lim: libc::rlimit = unsafe { std::mem::zeroed() };
+            let rc = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut lim) };
+            if rc == 0 {
+                let cur = lim.rlim_cur;
+                if cur == libc::RLIM_INFINITY {
+                    Some("memlock limit: unlimited".to_string())
+                } else {
+                    Some(format!("memlock limit: {} KiB", (cur as u64) / 1024))
+                }
+            } else {
+                None
+            }
+        }
+
         // SAFETY: mlockall is an FFI call with constant flags; no pointers are used.
-        let rc = unsafe {
+        let (rc, attempted_all) = unsafe {
             match lock {
                 RtLock::None => return Ok(()),
-                RtLock::Current => mlockall(MCL_CURRENT),
-                RtLock::All => mlockall(MCL_CURRENT | MCL_FUTURE),
+                RtLock::Current => (mlockall(MCL_CURRENT), false),
+                RtLock::All => (mlockall(MCL_CURRENT | MCL_FUTURE), true),
             }
         };
-        if rc != 0 {
-            Err(std::io::Error::last_os_error())
-        } else {
-            Ok(())
+        if rc == 0 {
+            return Ok(());
         }
+        let err = std::io::Error::last_os_error();
+
+        // Fallback: if All failed due to permission or memory, try Current
+        if attempted_all {
+            if let Some(code) = err.raw_os_error() {
+                if code == libc::EPERM || code == libc::ENOMEM {
+                    let rc2 = unsafe { mlockall(MCL_CURRENT) };
+                    if rc2 == 0 {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        // Build a more informative error message with hints
+        let mut msg = format!(
+            "mlockall({}) failed: {}",
+            if attempted_all {
+                "current|future"
+            } else {
+                "current"
+            },
+            err
+        );
+        if let Some(code) = err.raw_os_error() {
+            if code == libc::EPERM || code == libc::ENOMEM {
+                if let Some(h) = memlock_limit_hint() {
+                    msg.push_str(&format!("; {h}"));
+                }
+                msg.push_str("; hint: needs CAP_IPC_LOCK (or root) and sufficient 'ulimit -l'");
+            }
+        }
+        Err(std::io::Error::new(err.kind(), msg))
     }
 
     // Apply SCHED_FIFO priority, clamped to the system range.

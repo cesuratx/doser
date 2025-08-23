@@ -52,15 +52,7 @@ use doser_hardware::error::HwError;
 /// - Extremes: `i32::MIN / 2` and `i32::MAX / 2` are handled without overflow.
 #[inline]
 fn div_round_nearest_i32(numer: i32, denom: i32) -> i32 {
-    debug_assert!(denom > 0, "div_round_nearest_i32: denom must be > 0");
-    if denom <= 0 {
-        // Intentional duplication with the debug_assert above:
-        // - In debug builds, debug_assert! helps catch callers early during testing.
-        // - In release builds, we still fail fast rather than proceed with an invalid
-        //   denominator, since this is an internal helper with a strict precondition
-        //   (programming error if violated). Keep a static message to avoid formatting cost.
-        panic!("div_round_nearest_i32: denom must be > 0");
-    }
+    assert!(denom > 0, "div_round_nearest_i32: denom must be > 0");
     let n = numer as i64;
     let d = denom as i64;
     let q = if n >= 0 {
