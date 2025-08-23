@@ -776,7 +776,9 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
             ));
         }
         let allowed = mask.get().expect("cpuset init");
-        // Normalize CPU_ISSET return type (bool or c_int) across platforms
+        // Normalize CPU_ISSET return type across libc variants:
+        // some expose it as c_int, others as bool. Casting to c_int and
+        // comparing to 0 keeps this portable without cfg-specific branches.
         let allowed_target = unsafe { (CPU_ISSET(target, allowed) as libc::c_int) != 0 };
         if !allowed_target {
             return Err(std::io::Error::new(
@@ -830,13 +832,13 @@ fn setup_rt_once(rt: bool, lock: RtLock) {
     if !rt {
         return;
     }
-    RT_ONCE.get_or_init(|| unsafe {
+    RT_ONCE.get_or_init(|| {
         match lock {
             RtLock::None => {
                 eprintln!("RT: memory locking disabled (none)");
             }
             RtLock::Current => {
-                let rc = mlockall(MCL_CURRENT);
+                let rc = unsafe { mlockall(MCL_CURRENT) };
                 if rc != 0 {
                     let err = std::io::Error::last_os_error();
                     eprintln!("Warning: mlockall(MCL_CURRENT) failed: {err}");
@@ -845,7 +847,7 @@ fn setup_rt_once(rt: bool, lock: RtLock) {
                 }
             }
             RtLock::All => {
-                let rc = mlockall(MCL_CURRENT | MCL_FUTURE);
+                let rc = unsafe { mlockall(MCL_CURRENT | MCL_FUTURE) };
                 if rc != 0 {
                     let err = std::io::Error::last_os_error();
                     eprintln!("Warning: mlockall(MCL_CURRENT|MCL_FUTURE) failed: {err}");

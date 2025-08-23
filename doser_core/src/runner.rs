@@ -21,8 +21,10 @@ pub enum SamplingMode {
 /// - `sensor_timeout_ms`: the per-read sensor timeout in milliseconds. Expected ≥ 1.
 ///   Used to derive a conservative "fast" stall threshold (4x timeout) for quick detection.
 /// - `period_ms`: the sampling period in milliseconds derived from `sample_rate_hz`.
-///   Expected in [1, 1000] (clamped by utility helpers); used to ensure the threshold spans at least
-///   two periods so that a single missed sample doesn't immediately trip the watchdog.
+///   Typically ≥ 1ms as returned by `util::period_ms(hz)` (which clamps to at least 1).
+///   Used to ensure the threshold spans at least two periods so that a single missed sample
+///   doesn't immediately trip the watchdog. There is no hard upper bound enforced here;
+///   extremely large periods are handled via saturating arithmetic and capping to `max_run_ms`.
 /// - `max_run_ms`: configured hard cap for a dosing run. Expected ≥ 1. The stall threshold
 ///   is kept strictly below this cap when `max_run_ms` is smaller than two periods to avoid
 ///   underflow and guarantee the stall watchdog can still fire before the hard cap.

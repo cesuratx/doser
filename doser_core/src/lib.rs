@@ -54,7 +54,11 @@ use doser_hardware::error::HwError;
 fn div_round_nearest_i32(numer: i32, denom: i32) -> i32 {
     debug_assert!(denom > 0, "div_round_nearest_i32: denom must be > 0");
     if denom <= 0 {
-        // Static message to avoid formatting overhead on panic path
+        // Intentional duplication with the debug_assert above:
+        // - In debug builds, debug_assert! helps catch callers early during testing.
+        // - In release builds, we still fail fast rather than proceed with an invalid
+        //   denominator, since this is an internal helper with a strict precondition
+        //   (programming error if violated). Keep a static message to avoid formatting cost.
         panic!("div_round_nearest_i32: denom must be > 0");
     }
     let n = numer as i64;
@@ -546,18 +550,9 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             #[cfg(debug_assertions)]
             {
                 let med_len = self.med_buf.len();
-                debug_assert!(
-                    n > 0,
-                    "median buffer unexpectedly empty (n={n}, med_win={med_win}, med_buf_len={med_len})",
-                );
-                debug_assert_eq!(
-                    med_len, n,
-                    "tmp_med_buf must mirror med_buf (med_buf_len={med_len}, tmp_len={n})",
-                );
-                debug_assert!(
-                    n <= med_win,
-                    "median buffer exceeded window size (n={n} > med_win={med_win})"
-                );
+                debug_assert!(n > 0, "median buffer unexpectedly empty");
+                debug_assert_eq!(med_len, n);
+                debug_assert!(n <= med_win, "median buffer exceeded window size");
             }
             let mid = n / 2;
             if n % 2 == 0 {
