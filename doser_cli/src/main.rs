@@ -766,10 +766,7 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         });
         let nprocs_onln = *online_cpus.get().unwrap_or(&0);
         if nprocs_onln < 1 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "_SC_NPROCESSORS_ONLN < 1",
-            ));
+            return Err(std::io::Error::other("_SC_NPROCESSORS_ONLN < 1"));
         }
         let target = rt_cpu.unwrap_or(0);
         if target as libc::c_long >= nprocs_onln {
