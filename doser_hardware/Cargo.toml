@@ -7,14 +7,16 @@ edition.workspace = true
 doser_traits = { path = "../doser_traits" }
 thiserror = { workspace = true }
 tracing = "0.1"
-rppal = { version = "0.17", optional = true }
 libc = { version = "0.2", optional = true }
 nix = { version = "0.28", optional = true }
 
 [features]
 default = []
-hardware = ["rppal"]
-rt = ["libc", "nix"]
+hardware = ["dep:rppal"]
+rt = ["libc", "nix/sched", "nix/mman"]
 
 [dev-dependencies]
 rstest = "0.23"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rppal = { version = "0.17", optional = true }

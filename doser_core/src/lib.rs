@@ -486,11 +486,11 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
                     break;
                 }
             }
-            if selected_band.is_none() {
-                if let Some((thr_cg, sps)) = self.speed_bands_cg.last().copied() {
-                    selected_band = Some((thr_cg, sps));
-                    target_speed = sps;
-                }
+            if selected_band.is_none()
+                && let Some((thr_cg, sps)) = self.speed_bands_cg.last().copied()
+            {
+                selected_band = Some((thr_cg, sps));
+                target_speed = sps;
             }
             let thr_g = selected_band
                 .map(|(cg, _)| (cg as f32) / 100.0)
@@ -786,11 +786,11 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
                     break;
                 }
             }
-            if selected_band.is_none() {
-                if let Some((thr_cg, sps)) = self.speed_bands_cg.last().copied() {
-                    selected_band = Some((thr_cg, sps));
-                    target_speed = sps;
-                }
+            if selected_band.is_none()
+                && let Some((thr_cg, sps)) = self.speed_bands_cg.last().copied()
+            {
+                selected_band = Some((thr_cg, sps));
+                target_speed = sps;
             }
             let thr_g = selected_band
                 .map(|(cg, _)| (cg as f32) / 100.0)
@@ -899,7 +899,7 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
 
         // inflight_cg = round(dw_cg * pred_latency_ms / dt_ms)
         // Use i64 with saturating_mul; preserve sign-aware rounding semantics.
-        let num: i64 = (dw_cg as i64).saturating_mul(self.pred_latency_ms as i64);
+        let num: i64 = dw_cg.saturating_mul(self.pred_latency_ms as i64);
         let den: i64 = (dt_ms as i64).max(1);
         let half = den >> 1;
         let inflight_i64 = if num >= 0 {

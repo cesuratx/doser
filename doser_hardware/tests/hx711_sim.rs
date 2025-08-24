@@ -1,4 +1,4 @@
-#![cfg(feature = "hardware")]
+#![cfg(all(feature = "hardware", target_os = "linux"))]
 
 use std::time::Duration;
 

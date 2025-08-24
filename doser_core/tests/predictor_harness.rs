@@ -313,7 +313,7 @@ fn predictor_reduces_overshoot_and_failures_under_latency() {
             let predictor = PredictorCfg {
                 enabled: true,
                 window: 5,
-                extra_latency_ms: DELAY_MS as u64,
+                extra_latency_ms: DELAY_MS,
                 min_progress_ratio: 0.1,
             };
             let mut d = Doser::builder()

@@ -10,54 +10,56 @@
 pub mod error;
 pub mod util;
 
-// Make the HX711 driver module available when hardware feature is enabled.
-#[cfg(feature = "hardware")]
+// Make the HX711 driver module available when hardware feature is enabled on Linux.
+#[cfg(all(feature = "hardware", target_os = "linux"))]
 mod hx711;
 
-#[cfg(not(feature = "hardware"))]
+// Provide the simulation backend when hardware is disabled OR when not on Linux.
+// This ensures cross-platform builds work even if the `hardware` feature is toggled on.
+#[cfg(any(not(feature = "hardware"), not(target_os = "linux")))]
 pub mod sim {
     use doser_traits::{Motor, Scale};
     use std::error::Error;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::Duration;
 
-    // Global sim state shared between motor and scale
     static SIM_RUNNING: AtomicBool = AtomicBool::new(false);
     static SIM_SPS: AtomicU32 = AtomicU32::new(0);
 
-    /// Simple simulated scale that stores an internal weight in grams.
-    /// `read()` returns a synthetic raw value in centigrams (grams * 100) as i32.
-    #[derive(Default)]
+    /// Minimal simulated scale that increments by an optional env-configured delta while running.
     pub struct SimulatedScale {
         grams: f32,
+    }
+
+    impl Default for SimulatedScale {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl SimulatedScale {
         pub fn new() -> Self {
             Self { grams: 0.0 }
         }
-
-        /// Add grams to the simulated hopper (for tests/demos).
-        pub fn push(&mut self, grams: f32) {
-            self.grams += grams;
-            if self.grams.is_sign_negative() {
-                self.grams = 0.0;
-            }
-        }
-
-        /// Set absolute weight (useful for deterministic tests).
-        pub fn set(&mut self, grams: f32) {
-            self.grams = grams.max(0.0);
-        }
     }
 
     impl Scale for SimulatedScale {
         fn read(&mut self, _timeout: Duration) -> Result<i32, Box<dyn Error + Send + Sync>> {
-            // Test hook: allow simulating a timeout-style error via env var in integration tests.
-            if std::env::var("DOSER_TEST_SIM_TIMEOUT").ok().as_deref() == Some("1") {
-                return Err("sensor timeout".into());
+            // Optional: simulate a blocking timeout when DOSER_TEST_SIM_TIMEOUT is set.
+            if std::env::var("DOSER_TEST_SIM_TIMEOUT")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0)
+                > 0
+            {
+                // Sleep roughly the requested timeout to mimic a real blocking call.
+                // The controller's watchdog logic does not depend on the exact sleep here.
+                // Use a small upper bound to avoid long stalls in tests.
+                let sleep_for = _timeout.min(Duration::from_millis(10));
+                std::thread::sleep(sleep_for);
+                let err = std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout");
+                return Err(Box::new(err));
             }
-            // Optional test hook: increment grams per read to simulate progress
             let delta = std::env::var("DOSER_TEST_SIM_INC")
                 .ok()
                 .and_then(|s| s.parse::<f32>().ok())
@@ -105,8 +107,8 @@ pub mod sim {
 }
 
 // Generic absolute-deadline pacer with pluggable sleeper for testability
-// When building without the `hardware` feature, these items may be unused; silence warnings.
-#[cfg_attr(not(feature = "hardware"), allow(dead_code))]
+// When not building Linux+hardware, these items may be unused; silence warnings.
+#[cfg_attr(not(all(feature = "hardware", target_os = "linux")), allow(dead_code))]
 mod pacing {
     use std::time::{Duration, Instant};
 
@@ -127,7 +129,7 @@ mod pacing {
                 return;
             }
             let delta = deadline - now;
-            #[cfg(feature = "rt")]
+            #[cfg(all(feature = "rt", target_os = "linux"))]
             {
                 use libc::{
                     CLOCK_MONOTONIC, TIMER_ABSTIME, clock_gettime, clock_nanosleep, timespec,
@@ -258,6 +260,33 @@ mod pacing {
     mod tests {
         use super::*;
 
+        // Test-only fake sleeper that advances a virtual clock.
+        pub struct FakeSleeper {
+            origin: Instant,
+            offset: std::sync::Arc<std::sync::Mutex<Duration>>,
+        }
+        impl FakeSleeper {
+            pub fn new() -> Self {
+                Self {
+                    origin: Instant::now(),
+                    offset: std::sync::Arc::new(std::sync::Mutex::new(Duration::ZERO)),
+                }
+            }
+            pub fn elapsed(&self) -> Duration {
+                *self.offset.lock().unwrap()
+            }
+        }
+        impl Sleeper for FakeSleeper {
+            fn now(&self) -> Instant {
+                self.origin + *self.offset.lock().unwrap()
+            }
+            fn sleep_until(&self, deadline: Instant) {
+                let mut off = self.offset.lock().unwrap();
+                let dur = deadline.saturating_duration_since(self.origin);
+                *off = dur;
+            }
+        }
+
         #[test]
         fn add_no_carry() {
             let (s, ns) =
@@ -295,43 +324,13 @@ mod pacing {
             assert_eq!(sleeper.elapsed(), expected);
         }
     }
-
-    // Test-only fake sleeper that advances a virtual clock.
-    #[cfg(test)]
-    pub struct FakeSleeper {
-        origin: Instant,
-        offset: std::sync::Arc<std::sync::Mutex<Duration>>,
-    }
-    #[cfg(test)]
-    impl FakeSleeper {
-        pub fn new() -> Self {
-            Self {
-                origin: Instant::now(),
-                offset: std::sync::Arc::new(std::sync::Mutex::new(Duration::ZERO)),
-            }
-        }
-        pub fn elapsed(&self) -> Duration {
-            *self.offset.lock().unwrap()
-        }
-    }
-    #[cfg(test)]
-    impl Sleeper for FakeSleeper {
-        fn now(&self) -> Instant {
-            self.origin + *self.offset.lock().unwrap()
-        }
-        fn sleep_until(&self, deadline: Instant) {
-            let mut off = self.offset.lock().unwrap();
-            let dur = deadline.saturating_duration_since(self.origin);
-            *off = dur;
-        }
-    }
 }
 
-#[cfg(feature = "hardware")]
+#[cfg(all(feature = "hardware", target_os = "linux"))]
 pub mod hardware {
     use crate::error::{HwError, Result as HwResult};
     use crate::hx711::Hx711;
-    use crate::pacing::{Pacer, RealSleeper, Sleeper};
+    use crate::pacing::{Pacer, RealSleeper};
     use doser_traits::clock::{Clock, MonotonicClock};
     use doser_traits::{Motor, Scale};
     use rppal::gpio::{Gpio, OutputPin};
@@ -616,7 +615,7 @@ pub mod hardware {
         }
     }
 
-    #[cfg(feature = "rt")]
+    #[cfg(all(feature = "rt", target_os = "linux"))]
     fn setup_realtime() -> Result<(), String> {
         use nix::errno::Errno;
         use nix::sched::{SchedParam, Scheduler, sched_setscheduler};
@@ -665,10 +664,10 @@ pub mod hardware {
 }
 
 // Re-exports for callers (CLI/tests) to pick the right backend easily.
-#[cfg(not(feature = "hardware"))]
+#[cfg(any(not(feature = "hardware"), not(target_os = "linux")))]
 pub use sim::{SimulatedMotor, SimulatedScale};
 
-#[cfg(feature = "hardware")]
+#[cfg(all(feature = "hardware", target_os = "linux"))]
 pub use hardware::{HardwareMotor, HardwareScale, make_estop_checker};
 
 // Note: end-to-end pacing behavior is covered in the pacing::tests module using FakeSleeper.

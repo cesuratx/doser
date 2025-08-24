@@ -380,7 +380,7 @@ fn real_main() -> eyre::Result<()> {
     };
 
     // 3) Build hardware (feature-gated) or sim
-    #[cfg(feature = "hardware")]
+    #[cfg(all(feature = "hardware", target_os = "linux"))]
     let hw = {
         use doser_hardware::{HardwareMotor, HardwareScale};
         let scale = HardwareScale::try_new_with_timeout(
@@ -398,7 +398,7 @@ fn real_main() -> eyre::Result<()> {
         (scale, motor)
     };
 
-    #[cfg(not(feature = "hardware"))]
+    #[cfg(any(not(feature = "hardware"), not(target_os = "linux")))]
     let hw = {
         use doser_hardware::{SimulatedMotor, SimulatedScale};
         (SimulatedScale::new(), SimulatedMotor::default())
@@ -622,7 +622,7 @@ fn run_dose(
     });
     let (scale, motor) = hw;
     let estop_check: Option<Box<dyn Fn() -> bool + Send + Sync>> = {
-        #[cfg(feature = "hardware")]
+        #[cfg(all(feature = "hardware", target_os = "linux"))]
         {
             if let Some(pin) = _cfg.pins.estop_in {
                 match doser_hardware::make_estop_checker(
@@ -648,7 +648,7 @@ fn run_dose(
                 None
             }
         }
-        #[cfg(not(feature = "hardware"))]
+        #[cfg(not(all(feature = "hardware", target_os = "linux")))]
         {
             let _ = &_cfg; // silence unused
             None
@@ -657,11 +657,11 @@ fn run_dose(
     let sampling_mode = if direct {
         SamplingMode::Direct
     } else {
-        #[cfg(feature = "hardware")]
+        #[cfg(all(feature = "hardware", target_os = "linux"))]
         {
             SamplingMode::Event
         }
-        #[cfg(not(feature = "hardware"))]
+        #[cfg(not(all(feature = "hardware", target_os = "linux")))]
         {
             SamplingMode::Paced(_cfg.filter.sample_rate_hz)
         }
