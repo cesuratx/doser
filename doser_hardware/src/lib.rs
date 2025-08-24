@@ -602,9 +602,45 @@ pub mod hardware {
     /// Busy-wait for at least ~1 microsecond to cleanly separate edges.
     #[inline(always)]
     fn busy_wait_min_1us() {
-        // A small calibrated spin; exact duration is platform dependent
-        std::hint::spin_loop();
-        std::hint::spin_loop();
+        // Calibrate a rough spin count for ~1µs once per process, then spin that many times.
+        // This avoids relying on a fixed number of spin_loop() calls which varies by CPU.
+        #[inline]
+        fn spins_per_us() -> u32 {
+            use std::sync::OnceLock;
+            static SPINS: OnceLock<u32> = OnceLock::new();
+            *SPINS.get_or_init(|| {
+                use std::time::{Duration, Instant};
+                // Try increasing iteration counts until we measure ≥ 100µs to reduce timer noise.
+                let mut iters: u32 = 1_000;
+                let mut per_us: u32 = 2; // conservative fallback
+                for _ in 0..10 {
+                    let start = Instant::now();
+                    // Volatile loop to prevent unrolling/elimination
+                    let mut i = 0u32;
+                    while i < iters {
+                        std::hint::spin_loop();
+                        i = i.wrapping_add(1);
+                    }
+                    let dt = start.elapsed();
+                    if dt >= Duration::from_micros(100) {
+                        // per_us ≈ iters / elapsed_us
+                        let us = dt.as_micros().max(1) as u64;
+                        per_us = ((iters as u64 + us - 1) / us).clamp(1, 1_000_000) as u32;
+                        break;
+                    }
+                    // Increase work and try again
+                    iters = iters.saturating_mul(4).min(4_000_000);
+                }
+                per_us.max(1)
+            })
+        }
+
+        let n = spins_per_us();
+        let mut i = 0u32;
+        while i < n {
+            std::hint::spin_loop();
+            i = i.wrapping_add(1);
+        }
     }
 
     /// Sleep until an absolute deadline by sleeping the remaining delta.
