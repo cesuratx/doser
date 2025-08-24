@@ -13,7 +13,7 @@ nix = { version = "0.28", optional = true }
 [features]
 default = []
 hardware = ["dep:rppal"]
-rt = ["libc", "nix/sched", "nix/mman"]
+rt = ["libc"]
 
 [dev-dependencies]
 rstest = "0.23"

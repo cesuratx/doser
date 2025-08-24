@@ -617,20 +617,25 @@ pub mod hardware {
 
     #[cfg(all(feature = "rt", target_os = "linux"))]
     fn setup_realtime() -> Result<(), String> {
-        use nix::errno::Errno;
-        use nix::sched::{SchedParam, Scheduler, sched_setscheduler};
-        use nix::sys::mman::{MlockAllFlags, mlockall};
+        use libc::{
+            MCL_CURRENT, MCL_FUTURE, SCHED_FIFO, mlockall, sched_param, sched_setscheduler,
+        };
 
-        // Try to set FIFO priority (requires CAP_SYS_NICE); ignore failures with warning
-        let p = SchedParam { sched_priority: 10 };
-        if let Err(e) = sched_setscheduler(None, Scheduler::Fifo, &p) {
-            if e != Errno::EPERM {
-                return Err(format!("sched_setscheduler failed: {e}"));
+        // Try to set FIFO priority (requires CAP_SYS_NICE); ignore EPERM with warning upstream
+        let mut param = sched_param { sched_priority: 10 };
+        let rc = unsafe { sched_setscheduler(0, SCHED_FIFO, &mut param) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EPERM) {
+                return Err(format!("sched_setscheduler failed: {err}"));
             }
         }
-        if let Err(e) = mlockall(MlockAllFlags::MCL_CURRENT | MlockAllFlags::MCL_FUTURE) {
-            if e != Errno::EPERM {
-                return Err(format!("mlockall failed: {e}"));
+
+        let rc2 = unsafe { mlockall(MCL_CURRENT | MCL_FUTURE) };
+        if rc2 != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EPERM) {
+                return Err(format!("mlockall failed: {err}"));
             }
         }
         Ok(())

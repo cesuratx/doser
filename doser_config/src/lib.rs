@@ -479,10 +479,10 @@ impl Config {
         if self.filter.sample_rate_hz == 0 {
             eyre::bail!("filter.sample_rate_hz must be > 0");
         }
-        if let Some(alpha) = self.filter.ema_alpha {
-            if !(alpha > 0.0 && alpha <= 1.0) {
-                eyre::bail!("filter.ema_alpha must be in (0.0, 1.0]");
-            }
+        if let Some(alpha) = self.filter.ema_alpha
+            && !(alpha > 0.0 && alpha <= 1.0)
+        {
+            eyre::bail!("filter.ema_alpha must be in (0.0, 1.0]");
         }
 
         // Timeouts
