@@ -899,14 +899,13 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         let err = std::io::Error::last_os_error();
 
         // Fallback: if All failed due to permission or memory, try Current
-        if attempted_all {
-            if let Some(code) = err.raw_os_error() {
-                if code == libc::EPERM || code == libc::ENOMEM {
-                    let rc2 = unsafe { mlockall(MCL_CURRENT) };
-                    if rc2 == 0 {
-                        return Ok(());
-                    }
-                }
+        if attempted_all
+            && let Some(code) = err.raw_os_error()
+            && (code == libc::EPERM || code == libc::ENOMEM)
+        {
+            let rc2 = unsafe { mlockall(MCL_CURRENT) };
+            if rc2 == 0 {
+                return Ok(());
             }
         }
 
@@ -920,13 +919,13 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
             },
             err
         );
-        if let Some(code) = err.raw_os_error() {
-            if code == libc::EPERM || code == libc::ENOMEM {
-                if let Some(h) = memlock_limit_hint() {
-                    msg.push_str(&format!("; {h}"));
-                }
-                msg.push_str("; hint: needs CAP_IPC_LOCK (or root) and sufficient 'ulimit -l'");
+        if let Some(code) = err.raw_os_error()
+            && (code == libc::EPERM || code == libc::ENOMEM)
+        {
+            if let Some(h) = memlock_limit_hint() {
+                msg.push_str(&format!("; {h}"));
             }
+            msg.push_str("; hint: needs CAP_IPC_LOCK (or root) and sufficient 'ulimit -l'");
         }
         Err(std::io::Error::new(err.kind(), msg))
     }
