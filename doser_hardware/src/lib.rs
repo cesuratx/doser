@@ -139,17 +139,22 @@ mod pacing {
                         tv_nsec: 0,
                     };
                     if clock_gettime(CLOCK_MONOTONIC, &mut now_ts) == 0 {
-                        // Compute absolute target = now_ts + delta
-                        let add_ns = delta.as_nanos() as i128;
-                        let mut sec = now_ts.tv_sec as i128 + (add_ns / 1_000_000_000) as i128;
-                        let mut nsec = now_ts.tv_nsec as i128 + (add_ns % 1_000_000_000) as i128;
+                        // Compute absolute target = now_ts + delta.
+                        // Note: Avoid casting Duration::as_nanos() to i128, which can truncate/overflow on very large durations.
+                        // Instead, decompose into seconds and nanoseconds and normalize.
+                        let add_sec = delta.as_secs();
+                        let add_nsec = delta.subsec_nanos() as i64; // < 1e9
+                        // Clamp seconds addition to i64 range to avoid UB on extreme futures.
+                        let add_sec_i64 = i64::try_from(add_sec).unwrap_or(i64::MAX);
+                        let mut sec = now_ts.tv_sec.saturating_add(add_sec_i64);
+                        let mut nsec = now_ts.tv_nsec.saturating_add(add_nsec);
                         if nsec >= 1_000_000_000 {
-                            sec += 1;
+                            sec = sec.saturating_add(1);
                             nsec -= 1_000_000_000;
                         }
                         let target = timespec {
-                            tv_sec: sec as i64,
-                            tv_nsec: nsec as i64,
+                            tv_sec: sec,
+                            tv_nsec: nsec,
                         };
                         let rc = clock_nanosleep(
                             CLOCK_MONOTONIC,

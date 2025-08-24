@@ -419,15 +419,30 @@ fn real_main() -> eyre::Result<()> {
                 use libc::{SCHED_FIFO, sched_get_priority_min, sched_param, sched_setscheduler};
                 unsafe {
                     let prio = sched_get_priority_min(SCHED_FIFO);
-                    if prio >= 0 {
+                    if prio < 0 {
+                        eprintln!("SCHED_FIFO not available; falling back to normal scheduling.");
+                    } else {
                         let mut param = sched_param {
                             sched_priority: (prio + 1) as i32,
                         };
                         let rc = sched_setscheduler(0, SCHED_FIFO, &mut param);
                         if rc != 0 {
-                            eprintln!(
-                                "Realtime scheduling unavailable; expect higher jitter/overshoot."
-                            );
+                            let err = std::io::Error::last_os_error();
+                            let code = err.raw_os_error().unwrap_or(0);
+                            // Add actionable hints for common failures
+                            if code == libc::EPERM {
+                                eprintln!(
+                                    "Realtime scheduling denied (EPERM). Hint: needs CAP_SYS_NICE or root and an adequate RLIMIT_RTPRIO. ({err})"
+                                );
+                            } else if code == libc::EINVAL {
+                                eprintln!(
+                                    "Realtime scheduling failed (EINVAL). Hint: invalid parameters or unsupported policy/priority. ({err})"
+                                );
+                            } else {
+                                eprintln!(
+                                    "Realtime scheduling unavailable; expect higher jitter/overshoot. ({err})"
+                                );
+                            }
                         }
                     }
                 }

@@ -65,6 +65,8 @@ struct SimScaleLatency {
     delay_samples: usize,
     // conversion: grams to raw counts (e.g. 0.1 g/count)
     g_per_count: f32,
+    // configured sample rate in Hz for per-tick mass integration
+    sample_rate_hz: f32,
     // local PRNG
     rng: XorShift32,
     // latency buffer of raw counts
@@ -78,6 +80,7 @@ impl SimScaleLatency {
         noise_amp: f32,
         delay_samples: usize,
         g_per_count: f32,
+        sample_rate_hz: u32,
         seed: u32,
     ) -> Self {
         Self {
@@ -86,6 +89,7 @@ impl SimScaleLatency {
             noise_amp,
             delay_samples,
             g_per_count,
+            sample_rate_hz: sample_rate_hz as f32,
             rng: XorShift32::new(seed),
             buf: VecDeque::with_capacity(delay_samples + 4),
         }
@@ -95,12 +99,12 @@ impl SimScaleLatency {
 impl doser_traits::Scale for SimScaleLatency {
     fn read(&mut self, _timeout: std::time::Duration) -> Result<i32, Box<dyn Error + Send + Sync>> {
         // Advance plant one control tick worth of mass based on current sps and noise
-        // Control tick assumed at 50 Hz in this harness
+        // Use configured sample rate instead of assuming 50 Hz
         let mut st = self.st.lock().unwrap();
         let noise = self
             .rng
             .next_range(1.0 - self.noise_amp, 1.0 + self.noise_amp);
-        let delta_g = (st.sps as f32) * self.h_g_per_step * noise / 50.0; // per 50Hz tick
+        let delta_g = (st.sps as f32) * self.h_g_per_step * noise / self.sample_rate_hz; // per tick
         st.weight_g += delta_g.max(0.0);
 
         // Convert true grams to raw counts and push into latency buffer
@@ -151,6 +155,7 @@ impl doser_traits::clock::Clock for TestClock {
 #[rstest]
 fn predictor_reduces_overshoot_and_failures_under_latency() {
     const SAMPLE_RATE_HZ: u32 = 50;
+    let tick_ms: u64 = (1000.0 / SAMPLE_RATE_HZ as f64).round() as u64;
     const DELAY_MS: u64 = 40; // scale latency per spec
     let delay_samples = ((DELAY_MS as f32) * (SAMPLE_RATE_HZ as f32) / 1000.0).round() as usize; // ~2
     const G_PER_COUNT: f32 = 0.01; // calibration: 0.01 g/count (1 cg)
@@ -197,6 +202,7 @@ fn predictor_reduces_overshoot_and_failures_under_latency() {
                 NOISE_AMP,
                 delay_samples,
                 G_PER_COUNT,
+                SAMPLE_RATE_HZ,
                 0xACE1 + trial as u32,
             );
             let motor = SimMotor { st: st.clone() };
@@ -234,7 +240,7 @@ fn predictor_reduces_overshoot_and_failures_under_latency() {
             d.begin();
             let mut overshoot_abort = false;
             for _ in 0..1000 {
-                tclk.advance(20); // 50Hz
+                tclk.advance(tick_ms);
                 match d.step().unwrap() {
                     doser_core::DosingStatus::Aborted(e) => {
                         if format!("{e}").to_lowercase().contains("overshoot") {
@@ -266,6 +272,7 @@ fn predictor_reduces_overshoot_and_failures_under_latency() {
                 NOISE_AMP,
                 delay_samples,
                 G_PER_COUNT,
+                SAMPLE_RATE_HZ,
                 0xBEEF + trial as u32,
             );
             let motor = SimMotor { st: st.clone() };
@@ -310,7 +317,7 @@ fn predictor_reduces_overshoot_and_failures_under_latency() {
             d.begin();
             let mut overshoot_abort = false;
             for _ in 0..1000 {
-                tclk.advance(20); // 50Hz
+                tclk.advance(tick_ms);
                 match d.step().unwrap() {
                     doser_core::DosingStatus::Aborted(e) => {
                         if format!("{e}").to_lowercase().contains("overshoot") {

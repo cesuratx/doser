@@ -305,17 +305,18 @@ impl Calibration {
         let pts: Vec<(i64, f32)> = rows.iter().map(|r| (r.raw, r.grams)).collect();
         let (a0, b0) = fit(&pts)?;
         // Compute residuals and robust sigma estimate (RMS of residuals)
-        let residuals: Vec<f64> = pts
-            .iter()
-            .map(|(x, y)| (*y as f64) - (a0 * (*x as f64) + b0))
-            .collect();
-        let rms = {
-            if residuals.is_empty() {
-                0.0
-            } else {
-                let sumsq: f64 = residuals.iter().map(|r| r * r).sum();
-                (sumsq / (residuals.len() as f64)).sqrt()
-            }
+        let mut residuals: Vec<f64> = Vec::with_capacity(pts.len());
+        let mut sumsq: f64 = 0.0;
+        for (x, y) in &pts {
+            let r = (*y as f64) - (a0 * (*x as f64) + b0);
+            sumsq += r * r;
+            residuals.push(r);
+        }
+        let rms = if residuals.is_empty() {
+            0.0
+        } else {
+            let n = residuals.len() as f64;
+            (sumsq / n).sqrt()
         };
         // Reject outliers with |residual| > 2σ and refit if at least 2 remain
         let filtered: Vec<(i64, f32)> = if rms > 0.0 {
