@@ -33,3 +33,47 @@ pub fn period_ms(hz: u32) -> u64 {
     );
     (MILLIS_PER_SEC / u64::from(hz)).max(1)
 }
+
+/// Integer division rounded to nearest, with consistent behavior for negatives.
+///
+/// Behavior:
+/// - For positive numerators, computes `(n + d/2) / d`.
+/// - For negative numerators, computes `(n - d/2) / d`.
+/// - Rust division truncates toward zero; this biasing yields round-to-nearest with
+///   ties rounded away from zero (e.g., `-5/2 -> -3`, `5/2 -> 3`).
+///
+/// Parameters and constraints:
+/// - `denom` must be strictly greater than 0. If `denom <= 0`, this function panics.
+/// - Uses 64-bit intermediates, so no overflow occurs for any `i32` numerator and
+///   positive `i32` denominator.
+#[inline]
+pub(crate) fn div_round_nearest_i32(numer: i32, denom: i32) -> i32 {
+    assert!(denom > 0, "div_round_nearest_i32: denom must be > 0");
+    let n = numer as i64;
+    let d = denom as i64;
+    let q = if n >= 0 {
+        (n + (d / 2)) / d
+    } else {
+        (n - (d / 2)) / d
+    };
+    q as i32
+}
+
+#[cfg(test)]
+mod rounding_tests {
+    use super::div_round_nearest_i32;
+
+    #[test]
+    fn ties_away_from_zero() {
+        assert_eq!(div_round_nearest_i32(5, 2), 3);
+        assert_eq!(div_round_nearest_i32(-5, 2), -3);
+        assert_eq!(div_round_nearest_i32(7, 3), 2);
+        assert_eq!(div_round_nearest_i32(8, 3), 3);
+    }
+
+    #[test]
+    fn handles_extremes_without_overflow() {
+        assert_eq!(div_round_nearest_i32(i32::MAX, 2), (i32::MAX / 2) + 1);
+        assert_eq!(div_round_nearest_i32(i32::MIN, 2), i32::MIN / 2);
+    }
+}

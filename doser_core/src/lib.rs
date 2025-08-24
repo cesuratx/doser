@@ -30,38 +30,7 @@ use std::time::{Duration, Instant};
 // For typed hardware error mapping
 use doser_hardware::error::HwError;
 
-/// Integer division rounded to nearest, with consistent behavior for negatives.
-///
-/// Behavior:
-/// - For positive numerators, computes `(n + d/2) / d`.
-/// - For negative numerators, computes `(n - d/2) / d`.
-/// - Rust division truncates toward zero; this biasing yields round-to-nearest with
-///   ties rounded away from zero (e.g., `-5/2 -> -3`, `5/2 -> 3`).
-///
-/// Parameters and constraints:
-/// - `denom` must be strictly greater than 0. If `denom <= 0`, this function panics.
-/// - Uses 64-bit intermediates, so no overflow occurs for any `i32` numerator and
-///   positive `i32` denominator.
-///
-/// Examples (mathematical results shown):
-/// - `7 / 3 = 2.333…` -> 2
-/// - `8 / 3 = 2.666…` -> 3
-/// - `5 / 2 = 2.5` -> 3 (tie away from zero)
-/// - `-5 / 2 = -2.5` -> -3 (tie away from zero)
-/// - `-4 / 3 = -1.333…` -> -1; `-5 / 3 = -1.666…` -> -2
-/// - Extremes: `i32::MIN / 2` and `i32::MAX / 2` are handled without overflow.
-#[inline]
-fn div_round_nearest_i32(numer: i32, denom: i32) -> i32 {
-    assert!(denom > 0, "div_round_nearest_i32: denom must be > 0");
-    let n = numer as i64;
-    let d = denom as i64;
-    let q = if n >= 0 {
-        (n + (d / 2)) / d
-    } else {
-        (n - (d / 2)) / d
-    };
-    q as i32
-}
+use crate::util::div_round_nearest_i32;
 
 /// Average of two i32 values rounded to nearest with ties away from zero.
 /// Uses 64-bit intermediates; cannot overflow and the average fits in i32.
@@ -578,11 +547,12 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             }
             let sum_i64: i64 = self.ma_buf.iter().map(|&v| v as i64).sum();
             let len_i32 = self.ma_buf.len() as i32;
-            // Safe: sum fits in i64; convert rounded result back to i32
+            // Safe: sum fits in i64; convert rounded result back to i32.
+            // Avoid truncating to i32 before checking range; branch on range first.
             if len_i32 > 0 {
-                let rounded = div_round_nearest_i32(sum_i64 as i32, len_i32);
-                // If the absolute sum exceeds i32, take a slower path to avoid truncation
-                if sum_i64 > i32::MAX as i64 || sum_i64 < i32::MIN as i64 {
+                if (i32::MIN as i64..=i32::MAX as i64).contains(&sum_i64) {
+                    div_round_nearest_i32(sum_i64 as i32, len_i32)
+                } else {
                     let n = len_i32 as i64;
                     let q = if sum_i64 >= 0 {
                         (sum_i64 + n / 2) / n
@@ -590,8 +560,6 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
                         (sum_i64 - n / 2) / n
                     };
                     q as i32
-                } else {
-                    rounded
                 }
             } else {
                 0
