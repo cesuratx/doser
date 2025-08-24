@@ -164,12 +164,28 @@ fn predictor_reduces_overshoot_and_failures_under_latency() {
     const TARGET_G: f32 = 5.0;
     const TRIALS: usize = 20;
 
+    // Control band constants for readability
+    const AGGR_BAND1_THR_G: f32 = 1.0;
+    const AGGR_COARSE_SPS: u32 = 1200;
+    const AGGR_BAND2_THR_G: f32 = 0.2;
+    const AGGR_FINE_SPS: u32 = 600;
+
+    const PRED_BAND1_THR_G: f32 = 1.0;
+    const PRED_COARSE_SPS: u32 = 1200;
+    const PRED_BAND2_THR_G: f32 = 0.6;
+    const PRED_MEDIUM_SPS: u32 = 450;
+    const PRED_BAND3_THR_G: f32 = 0.2;
+    const PRED_FINE_SPS: u32 = 80;
+
     // Common configs (values used each iteration; instantiated per trial)
 
     // Case A: predictor OFF, 2-band speeds
     let control_a = ControlCfg {
         // Two-band control: aggressive fine speed to induce overshoot
-        speed_bands: vec![(1.0, 1200), (0.2, 600)],
+        speed_bands: vec![
+            (AGGR_BAND1_THR_G, AGGR_COARSE_SPS),
+            (AGGR_BAND2_THR_G, AGGR_FINE_SPS),
+        ],
         stable_ms: 0,
         epsilon_g: 0.0,
         ..ControlCfg::default()
@@ -177,7 +193,11 @@ fn predictor_reduces_overshoot_and_failures_under_latency() {
     // Case B: predictor ON, 3-band speeds
     let control_b = ControlCfg {
         // Three-band control: much slower near target
-        speed_bands: vec![(1.0, 1200), (0.6, 450), (0.2, 80)],
+        speed_bands: vec![
+            (PRED_BAND1_THR_G, PRED_COARSE_SPS),
+            (PRED_BAND2_THR_G, PRED_MEDIUM_SPS),
+            (PRED_BAND3_THR_G, PRED_FINE_SPS),
+        ],
         stable_ms: 0,
         epsilon_g: 0.0,
         ..ControlCfg::default()

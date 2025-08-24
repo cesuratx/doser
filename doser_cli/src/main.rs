@@ -422,8 +422,19 @@ fn real_main() -> eyre::Result<()> {
                     if prio < 0 {
                         eprintln!("SCHED_FIFO not available; falling back to normal scheduling.");
                     } else {
+                        // Use saturating add and clamp within scheduler bounds
+                        let mut req = prio.saturating_add(1);
+                        let maxp = sched_get_priority_max(SCHED_FIFO);
+                        if maxp >= 0 {
+                            if req > maxp {
+                                req = maxp;
+                            }
+                            if req < prio {
+                                req = prio;
+                            }
+                        }
                         let mut param = sched_param {
-                            sched_priority: (prio + 1) as i32,
+                            sched_priority: req,
                         };
                         let rc = sched_setscheduler(0, SCHED_FIFO, &mut param);
                         if rc != 0 {

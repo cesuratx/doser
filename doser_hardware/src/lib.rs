@@ -148,9 +148,11 @@ mod pacing {
                         let add_sec_i64 = i64::try_from(add_sec).unwrap_or(i64::MAX);
                         let mut sec = now_ts.tv_sec.saturating_add(add_sec_i64);
                         let mut nsec = now_ts.tv_nsec.saturating_add(add_nsec);
+                        // Normalize nanoseconds into seconds using division to handle any excess
                         if nsec >= 1_000_000_000 {
-                            sec = sec.saturating_add(1);
-                            nsec -= 1_000_000_000;
+                            let carry = nsec / 1_000_000_000;
+                            sec = sec.saturating_add(carry);
+                            nsec -= carry * 1_000_000_000;
                         }
                         let target = timespec {
                             tv_sec: sec,

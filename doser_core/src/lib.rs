@@ -1140,6 +1140,26 @@ impl<S, M, T> DoserBuilder<S, M, T> {
                 "sample_rate_hz must be > 0",
             )));
         }
+        // Validate speed band entries (if provided)
+        if !control.speed_bands.is_empty() {
+            for (thr_g, sps) in &control.speed_bands {
+                if !thr_g.is_finite() {
+                    return Err(eyre::Report::new(BuildError::InvalidConfig(
+                        "speed band threshold must be finite",
+                    )));
+                }
+                if *thr_g < 0.0 {
+                    return Err(eyre::Report::new(BuildError::InvalidConfig(
+                        "speed band threshold must be >= 0",
+                    )));
+                }
+                if *sps == 0 {
+                    return Err(eyre::Report::new(BuildError::InvalidConfig(
+                        "speed band speed must be > 0",
+                    )));
+                }
+            }
+        }
 
         // Capture capacities before moving filter
         let ma_cap = filter.ma_window.max(1);
@@ -1156,9 +1176,7 @@ impl<S, M, T> DoserBuilder<S, M, T> {
 
         // Sort speed bands descending by threshold and precompute integer thresholds in centigrams
         if !control.speed_bands.is_empty() {
-            control
-                .speed_bands
-                .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(core::cmp::Ordering::Equal));
+            control.speed_bands.sort_by(|a, b| b.0.total_cmp(&a.0));
         }
         // Precompute integer thresholds in centigrams
         let to_cg = |g: f32| ((g * 100.0).round()) as i32;
