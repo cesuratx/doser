@@ -50,12 +50,66 @@ impl Motor for SpyMotor {
 }
 
 #[rstest]
+fn ema_converges_on_step_input() {
+    // Step input: 0 for a few samples, then constant 100 (centigrams => 1g).
+    // EMA with alpha=0.5 should converge near 100 within tolerance after enough steps.
+    struct StepScale {
+        step_at: usize,
+        idx: usize,
+    }
+    impl StepScale {
+        fn new(step_at: usize) -> Self {
+            Self { step_at, idx: 0 }
+        }
+    }
+    impl Scale for StepScale {
+        fn read(&mut self, _timeout: Duration) -> Result<i32, Box<dyn Error + Send + Sync>> {
+            self.idx += 1;
+            if self.idx >= self.step_at {
+                Ok(100)
+            } else {
+                Ok(0)
+            }
+        }
+    }
+
+    let mut doser = Doser::builder()
+        .with_scale(StepScale::new(5))
+        .with_motor(SpyMotor { stopped: false })
+        .with_filter(FilterCfg {
+            ma_window: 1,
+            median_window: 1,
+            sample_rate_hz: 50,
+            ema_alpha: 0.5,
+        })
+        .with_control(ControlCfg {
+            speed_bands: vec![],
+            stable_ms: 0,
+            ..ControlCfg::default()
+        })
+        .with_timeouts(Timeouts { sensor_ms: 5 })
+        .with_target_grams(10.0)
+        .apply_calibration::<()>(None)
+        .build()
+        .unwrap();
+
+    // Run for sufficient steps post-step to converge near 100
+    for _ in 0..50 {
+        let _ = doser.step().unwrap();
+    }
+    let y = doser.last_weight();
+    // within 0.1g of the step level (1.0g) is acceptable for alpha=0.5 over 50 samples
+    assert!((y - 1.0).abs() <= 0.1, "EMA did not converge: y={y}");
+}
+
+#[rstest]
 fn completes_when_in_band_and_settled() {
     // Target exactly present in the sequence -> completes immediately when hit.
     let scale = SeqScale::new([10, 15, 17, 18]);
     let motor = SpyMotor { stopped: false };
 
     let control = ControlCfg {
+        speed_bands: vec![],
         slow_at_g: 1.0,
         hysteresis_g: 0.1, // ±0.1 g band
         stable_ms: 0,      // complete immediately when in-band
@@ -134,6 +188,7 @@ fn stops_immediately_when_target_crossed() {
         .with_motor(SpyMotor { stopped: false })
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg {
+            speed_bands: vec![],
             stable_ms: 0,
             ..ControlCfg::default()
         })
@@ -324,8 +379,10 @@ fn median_filter_suppresses_spike() {
             ma_window: 1,
             median_window: 3,
             sample_rate_hz: 50,
+            ema_alpha: 0.0,
         })
         .with_control(ControlCfg {
+            speed_bands: vec![],
             slow_at_g: 1000.0,
             hysteresis_g: 0.01,
             stable_ms: 0,
@@ -360,6 +417,7 @@ fn requires_time_to_settle_when_stable_ms_positive() {
         .with_motor(SpyMotor { stopped: false })
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg {
+            speed_bands: vec![],
             slow_at_g: 1.0,
             hysteresis_g: 1.0,
             stable_ms: 10_000,
@@ -440,6 +498,7 @@ fn aborts_on_no_progress_watchdog() {
         .with_motor(SpyMotor { stopped: false })
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg {
+            speed_bands: vec![],
             slow_at_g: 1.0,
             hysteresis_g: 100.0,
             stable_ms: 10_000,
@@ -564,6 +623,7 @@ fn estop_condition_latches_until_begin() {
         .with_motor(SpyMotor { stopped: false })
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg {
+            speed_bands: vec![],
             slow_at_g: 1.0,
             hysteresis_g: 100.0,
             stable_ms: 10_000,
@@ -596,5 +656,97 @@ fn estop_condition_latches_until_begin() {
     doser.begin();
     match doser.step().unwrap_or_else(|e| panic!("step: {e}")) {
         DosingStatus::Running | DosingStatus::Aborted(_) | DosingStatus::Complete => {}
+    }
+}
+
+#[rstest]
+fn overshoot_epsilon_regression() {
+    // Sim backends advance grams by DOSER_TEST_SIM_INC per read while motor is running.
+    // Configure a small overshoot limit that can be tripped when epsilon=0.0, and verify
+    // that with epsilon=0.08 the run avoids aborting and typically completes.
+    unsafe {
+        std::env::set_var("DOSER_TEST_SIM_INC", "0.12");
+    }
+
+    let base_filter = FilterCfg {
+        ma_window: 1,
+        median_window: 1,
+        sample_rate_hz: 50,
+        ema_alpha: 0.0,
+    };
+    let base_timeouts = Timeouts { sensor_ms: 10 };
+    let safety = SafetyCfg {
+        max_run_ms: 5_000,
+        max_overshoot_g: 0.05,
+        no_progress_epsilon_g: 0.0,
+        no_progress_ms: 0,
+    };
+
+    // epsilon 0.0
+    let mut doser_zero = Doser::builder()
+        .with_scale(doser_hardware::sim::SimulatedScale::new())
+        .with_motor(doser_hardware::sim::SimulatedMotor::default())
+        .with_filter(base_filter.clone())
+        .with_control(ControlCfg {
+            epsilon_g: 0.0,
+            ..ControlCfg::default()
+        })
+        .with_safety(safety.clone())
+        .with_timeouts(base_timeouts)
+        .with_target_grams(5.0)
+        .apply_calibration::<()>(None)
+        .build()
+        .unwrap();
+    doser_zero.begin();
+    let mut aborted_zero = false;
+    for _ in 0..200 {
+        if matches!(doser_zero.step().unwrap(), DosingStatus::Aborted(_)) {
+            aborted_zero = true;
+            break;
+        }
+    }
+
+    // epsilon 0.08
+    let mut doser_eps = Doser::builder()
+        .with_scale(doser_hardware::sim::SimulatedScale::new())
+        .with_motor(doser_hardware::sim::SimulatedMotor::default())
+        .with_filter(base_filter)
+        .with_control(ControlCfg {
+            epsilon_g: 0.08,
+            ..ControlCfg::default()
+        })
+        .with_safety(safety)
+        .with_timeouts(Timeouts { sensor_ms: 10 })
+        .with_target_grams(5.0)
+        .apply_calibration::<()>(None)
+        .build()
+        .unwrap();
+    doser_eps.begin();
+    let mut aborted_eps = false;
+    let mut _completed_eps = false;
+    for _ in 0..200 {
+        match doser_eps.step().unwrap() {
+            DosingStatus::Aborted(_) => {
+                aborted_eps = true;
+                break;
+            }
+            DosingStatus::Complete => {
+                _completed_eps = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    // If zero-epsilon aborted, then epsilon case should not also abort.
+    if aborted_zero {
+        assert!(
+            !aborted_eps,
+            "epsilon_g=0.08 should avoid overshoot abort compared to 0.0"
+        );
+    }
+    // cleanup env to not affect other tests
+    unsafe {
+        std::env::remove_var("DOSER_TEST_SIM_INC");
     }
 }

@@ -20,7 +20,7 @@ pub mod sampler;
 pub mod util;
 
 use crate::error::BuildError;
-use crate::error::{DoserError, Result};
+use crate::error::{AbortReason, DoserError, Result};
 use doser_traits::clock::{Clock, MonotonicClock};
 use eyre::WrapErr;
 use std::collections::VecDeque;
@@ -203,6 +203,18 @@ pub struct FilterCfg {
     pub median_window: usize,
     /// sampling rate in Hz (informational)
     pub sample_rate_hz: u32,
+    /// Optional EMA smoothing factor; when > 0, EMA is used instead of moving average.
+    /// Range: (0.0, 1.0]. 0.0 disables EMA and uses moving average when ma_window > 1.
+    pub ema_alpha: f32,
+}
+
+/// Filter selection for the smoothing stage (after optional median).
+/// This is informational; the active variant is derived from `FilterCfg`.
+#[derive(Debug, Clone, Copy)]
+pub enum FilterKind {
+    MovingAverage { window: usize },
+    Median { window: usize },
+    Ema { alpha: f32 }, // 0<alpha<=1
 }
 
 impl Default for FilterCfg {
@@ -211,6 +223,7 @@ impl Default for FilterCfg {
             ma_window: 1,
             median_window: 1,
             sample_rate_hz: 50,
+            ema_alpha: 0.0,
         }
     }
 }
@@ -218,9 +231,12 @@ impl Default for FilterCfg {
 /// Control configuration.
 #[derive(Debug, Clone)]
 pub struct ControlCfg {
-    /// Switch to fine speed once err <= slow_at_g
+    /// Optional speed table: each entry is (threshold_g, sps). Precedence over two-speed mode.
+    /// When non-empty, sorted descending by threshold during build.
+    pub speed_bands: Vec<(f32, u32)>,
+    /// Switch to fine speed once err <= slow_at_g (used when speed_bands.is_empty())
     pub slow_at_g: f32,
-    /// Consider “in band” if |err| <= hysteresis_g
+    /// Consider “in band” if |err| <= hysteresis_g. Default: 0.07 g.
     pub hysteresis_g: f32,
     /// Reported stable if weight stays within hysteresis for this many ms
     pub stable_ms: u64,
@@ -228,19 +244,47 @@ pub struct ControlCfg {
     pub coarse_speed: u32,
     /// Fine motor speed for the final approach
     pub fine_speed: u32,
-    /// Additional tolerance below target (grams) to consider completion zone
+    /// Additional tolerance below target (grams) to consider completion zone. Default: 0.08 g.
     pub epsilon_g: f32,
 }
 
 impl Default for ControlCfg {
     fn default() -> Self {
         Self {
+            // Default table (descending thresholds in build)
+            speed_bands: vec![(1.0, 1100), (0.5, 450), (0.2, 200)],
             slow_at_g: 1.0,
-            hysteresis_g: 0.05,
+            hysteresis_g: 0.07,
             stable_ms: 250,
             coarse_speed: 1200,
             fine_speed: 250,
-            epsilon_g: 0.0,
+            epsilon_g: 0.08,
+        }
+    }
+}
+
+/// Predictor configuration for early motor stop to reduce overshoot.
+///
+/// Disabled by default to preserve existing behavior unless explicitly enabled.
+#[derive(Debug, Clone)]
+pub struct PredictorCfg {
+    /// Enable the predictor logic.
+    pub enabled: bool,
+    /// Rolling window size for the slope estimate (in samples).
+    pub window: usize,
+    /// Extra latency margin (ms) to account for sensor/control/filter lag.
+    pub extra_latency_ms: u64,
+    /// Minimum fraction of target progress before predictor activates (0.0..=1.0).
+    pub min_progress_ratio: f32,
+}
+
+impl Default for PredictorCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            window: 6,
+            extra_latency_ms: 20,
+            min_progress_ratio: 0.10,
         }
     }
 }
@@ -308,6 +352,8 @@ pub struct DoserCore<S: doser_traits::Scale, M: doser_traits::Motor> {
     // Buffers for filtering (centigrams)
     ma_buf: VecDeque<i32>,
     med_buf: VecDeque<i32>,
+    // EMA state in centigrams (floating for fractional smoothing); None until first sample
+    ema_prev_cg: Option<f32>,
     // Temporary preallocated buffer to compute medians without per-step allocation
     tmp_med_buf: Vec<i32>,
     // Cached control-loop sleep period in microseconds to avoid repeated division
@@ -332,6 +378,14 @@ pub struct DoserCore<S: doser_traits::Scale, M: doser_traits::Motor> {
     // Debounce config and counter
     estop_debounce_n: u8,
     estop_count: u8,
+
+    // Stop-early predictor state
+    predictor: PredictorCfg,
+    pred_hist: VecDeque<(u64, i32)>, // (ms_since_epoch, weight_cg)
+    pred_latency_ms: u64,            // effective latency budget (ms)
+
+    // Cached speed bands (thresholds in centigrams), sorted descending by threshold
+    speed_bands_cg: Vec<(i32, u32)>,
 }
 
 impl<S: doser_traits::Scale, M: doser_traits::Motor> core::fmt::Debug for DoserCore<S, M> {
@@ -366,7 +420,7 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             if let Err(e) = self.motor_stop() {
                 tracing::warn!(error = %e, "motor_stop failed on estop");
             }
-            return Ok(DosingStatus::Aborted(DoserError::State("estop".into())));
+            return Ok(DosingStatus::Aborted(DoserError::Abort(AbortReason::Estop)));
         }
         let w_cg_raw = self.to_cg_cached(raw);
         let w_cg = self.apply_filter(w_cg_raw);
@@ -380,18 +434,25 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             if let Err(e) = self.motor_stop() {
                 tracing::warn!(error = %e, "motor_stop failed on max-run cap");
             }
-            return Ok(DosingStatus::Aborted(DoserError::State(
-                "max run time exceeded".into(),
+            return Ok(DosingStatus::Aborted(DoserError::Abort(
+                AbortReason::MaxRuntime,
             )));
         }
         if w_cg > self.target_cg + self.max_overshoot_cg {
             if let Err(e) = self.motor_stop() {
                 tracing::warn!(error = %e, "motor_stop failed on overshoot");
             }
-            return Ok(DosingStatus::Aborted(DoserError::State(
-                "max overshoot exceeded".into(),
+            return Ok(DosingStatus::Aborted(DoserError::Abort(
+                AbortReason::Overshoot,
             )));
         }
+        // Optional early-stop predictor to reduce overshoot under latency.
+        if self.maybe_early_stop(now, w_cg) {
+            // Throttle loop after issuing early stop
+            self.clock.sleep(Duration::from_micros(self.period_us));
+            return Ok(DosingStatus::Running);
+        }
+
         if w_cg + self.epsilon_cg >= self.target_cg {
             if let Err(e) = self.motor_stop() {
                 tracing::warn!(error = %e, "motor_stop failed entering settle zone");
@@ -413,14 +474,51 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             // Below target: not in completion zone; reset settle timer
             self.settled_since_ms = None;
         }
-        let target_speed = if self.slow_at_cg > 0 && abs_err_cg <= self.slow_at_cg as u32 {
-            let ratio = (abs_err_cg as f32 / self.slow_at_cg as f32).clamp(0.0, 1.0);
-            let min_frac = 0.2_f32;
-            let frac = min_frac + (1.0 - min_frac) * ratio;
-            ((self.control.fine_speed as f32 * frac).max(1.0)) as u32
+        // Speed selection: speed_bands take precedence when non-empty
+        let mut selected_band: Option<(i32, u32)> = None;
+        let mut target_speed = self.control.coarse_speed;
+        if !self.speed_bands_cg.is_empty() {
+            let err_g = (err_cg.max(0) as f32) / 100.0;
+            for (thr_cg, sps) in &self.speed_bands_cg {
+                if err_cg >= *thr_cg {
+                    selected_band = Some((*thr_cg, *sps));
+                    target_speed = *sps;
+                    break;
+                }
+            }
+            if selected_band.is_none() {
+                if let Some((thr_cg, sps)) = self.speed_bands_cg.last().copied() {
+                    selected_band = Some((thr_cg, sps));
+                    target_speed = sps;
+                }
+            }
+            let thr_g = selected_band
+                .map(|(cg, _)| (cg as f32) / 100.0)
+                .unwrap_or(0.0);
+            let sps = target_speed;
+            tracing::trace!(
+                err_g,
+                band_threshold_g = thr_g,
+                band_sps = sps,
+                "speed band select"
+            );
         } else {
-            self.control.coarse_speed
-        };
+            // fallback to legacy 2-speed proportional taper
+            if self.slow_at_cg > 0 && abs_err_cg <= self.slow_at_cg as u32 {
+                let ratio = (abs_err_cg as f32 / self.slow_at_cg as f32).clamp(0.0, 1.0);
+                let min_frac = 0.2_f32;
+                let frac = min_frac + (1.0 - min_frac) * ratio;
+                target_speed = ((self.control.fine_speed as f32 * frac).max(1.0)) as u32;
+            } else {
+                target_speed = self.control.coarse_speed;
+            }
+            tracing::trace!(
+                err_g = (err_cg.max(0) as f32) / 100.0,
+                band_threshold_g = 0.0,
+                band_sps = target_speed,
+                "speed band select (legacy)"
+            );
+        }
         if self.safety.no_progress_ms > 0 && self.no_progress_epsilon_cg > 0 && target_speed > 0 {
             let progress_delta_cg = abs_diff_i32_u32(w_cg, self.last_progress_cg);
             if progress_delta_cg >= self.no_progress_epsilon_cg as u32 {
@@ -430,8 +528,8 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
                 if let Err(e) = self.motor_stop() {
                     tracing::warn!(error = %e, "motor_stop failed on no-progress watchdog");
                 }
-                return Ok(DosingStatus::Aborted(DoserError::State(
-                    "no progress".into(),
+                return Ok(DosingStatus::Aborted(DoserError::Abort(
+                    AbortReason::NoProgress,
                 )));
             }
         }
@@ -468,12 +566,15 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
         // Clear filter state for a fresh run
         self.ma_buf.clear();
         self.med_buf.clear();
+        self.ema_prev_cg = None;
         self.last_weight_cg = 0;
         self.motor_started = false;
         self.last_progress_cg = 0;
         self.last_progress_at_ms = now;
         self.estop_latched = false;
         self.estop_count = 0;
+        // Reset predictor history
+        self.pred_hist.clear();
     }
 
     /// Stop the motor (best-effort).
@@ -502,6 +603,11 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
         // Ensure sane window sizes
         let med_win = self.filter.median_window.max(1);
         let ma_win = self.filter.ma_window.max(1);
+        let ema_alpha = if self.filter.ema_alpha.is_finite() {
+            self.filter.ema_alpha
+        } else {
+            0.0
+        };
 
         // Median prefilter over centigrams
         let after_median = if med_win > 1 {
@@ -543,8 +649,19 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             w_cg
         };
 
-        // Moving average over the median output (rounded to nearest)
-        if ma_win > 1 {
+        // Smoothing stage: EMA (when enabled) else Moving Average, else passthrough
+        if ema_alpha > 0.0 {
+            // Initialize EMA with first value to avoid startup bias
+            let x = after_median as f32;
+            let alpha = ema_alpha.clamp(0.0, 1.0);
+            let y = match self.ema_prev_cg {
+                None => x,
+                Some(prev) => alpha * x + (1.0 - alpha) * prev,
+            };
+            self.ema_prev_cg = Some(y);
+            // Round to nearest centigram
+            y.round() as i32
+        } else if ma_win > 1 {
             self.ma_buf.push_back(after_median);
             if self.ma_buf.len() > ma_win {
                 self.ma_buf.pop_front();
@@ -586,7 +703,7 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             if let Err(e) = self.motor_stop() {
                 tracing::warn!(error = %e, "motor_stop failed on estop");
             }
-            return Ok(DosingStatus::Aborted(DoserError::State("estop".into())));
+            return Ok(DosingStatus::Aborted(DoserError::Abort(AbortReason::Estop)));
         }
 
         // 1) read current weight
@@ -612,8 +729,8 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             if let Err(e) = self.motor_stop() {
                 tracing::warn!(error = %e, "motor_stop failed on max-run cap");
             }
-            return Ok(DosingStatus::Aborted(DoserError::State(
-                "max run time exceeded".into(),
+            return Ok(DosingStatus::Aborted(DoserError::Abort(
+                AbortReason::MaxRuntime,
             )));
         }
 
@@ -622,9 +739,16 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             if let Err(e) = self.motor_stop() {
                 tracing::warn!(error = %e, "motor_stop failed on overshoot");
             }
-            return Ok(DosingStatus::Aborted(DoserError::State(
-                "max overshoot exceeded".into(),
+            return Ok(DosingStatus::Aborted(DoserError::Abort(
+                AbortReason::Overshoot,
             )));
+        }
+
+        // Optional early-stop predictor to reduce overshoot under latency.
+        if self.maybe_early_stop(now, w_cg) {
+            // Throttle loop after issuing early stop
+            self.clock.sleep(Duration::from_micros(self.period_us));
+            return Ok(DosingStatus::Running);
         }
 
         // 2) Reached or exceeded target? Stop and settle (asymmetric completion)
@@ -650,15 +774,50 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             self.settled_since_ms = None;
         }
 
-        // 3) choose coarse or fine speed (use proportional taper with integer error)
-        let target_speed = if self.slow_at_cg > 0 && abs_err_cg <= self.slow_at_cg as u32 {
-            let ratio = (abs_err_cg as f32 / self.slow_at_cg as f32).clamp(0.0, 1.0);
-            let min_frac = 0.2_f32; // floor at 20% of fine speed
-            let frac = min_frac + (1.0 - min_frac) * ratio; // [min_frac, 1.0]
-            ((self.control.fine_speed as f32 * frac).max(1.0)) as u32
+        // 3) choose speed via bands or legacy fallback
+        let mut selected_band: Option<(i32, u32)> = None;
+        let mut target_speed = self.control.coarse_speed;
+        if !self.speed_bands_cg.is_empty() {
+            let err_g = (err_cg.max(0) as f32) / 100.0;
+            for (thr_cg, sps) in &self.speed_bands_cg {
+                if err_cg >= *thr_cg {
+                    selected_band = Some((*thr_cg, *sps));
+                    target_speed = *sps;
+                    break;
+                }
+            }
+            if selected_band.is_none() {
+                if let Some((thr_cg, sps)) = self.speed_bands_cg.last().copied() {
+                    selected_band = Some((thr_cg, sps));
+                    target_speed = sps;
+                }
+            }
+            let thr_g = selected_band
+                .map(|(cg, _)| (cg as f32) / 100.0)
+                .unwrap_or(0.0);
+            let sps = target_speed;
+            tracing::trace!(
+                err_g,
+                band_threshold_g = thr_g,
+                band_sps = sps,
+                "speed band select"
+            );
         } else {
-            self.control.coarse_speed
-        };
+            if self.slow_at_cg > 0 && abs_err_cg <= self.slow_at_cg as u32 {
+                let ratio = (abs_err_cg as f32 / self.slow_at_cg as f32).clamp(0.0, 1.0);
+                let min_frac = 0.2_f32; // floor at 20% of fine speed
+                let frac = min_frac + (1.0 - min_frac) * ratio; // [min_frac, 1.0]
+                target_speed = ((self.control.fine_speed as f32 * frac).max(1.0)) as u32;
+            } else {
+                target_speed = self.control.coarse_speed;
+            }
+            tracing::trace!(
+                err_g = (err_cg.max(0) as f32) / 100.0,
+                band_threshold_g = 0.0,
+                band_sps = target_speed,
+                "speed band select (legacy)"
+            );
+        }
 
         // 3a) no-progress watchdog (only while motor is commanded to run)
         if self.safety.no_progress_ms > 0 && self.no_progress_epsilon_cg > 0 && target_speed > 0 {
@@ -670,8 +829,8 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
                 if let Err(e) = self.motor_stop() {
                     tracing::warn!(error = %e, "motor_stop failed on no-progress watchdog");
                 }
-                return Ok(DosingStatus::Aborted(DoserError::State(
-                    "no progress".into(),
+                return Ok(DosingStatus::Aborted(DoserError::Abort(
+                    AbortReason::NoProgress,
                 )));
             }
         }
@@ -694,6 +853,77 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
         self.clock.sleep(Duration::from_micros(self.period_us));
 
         Ok(DosingStatus::Running)
+    }
+}
+
+impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
+    /// Update predictor history and decide whether to stop early this iteration.
+    /// Returns true if an early stop was issued.
+    #[inline]
+    fn maybe_early_stop(&mut self, now_ms: u64, w_cg: i32) -> bool {
+        if !self.predictor.enabled {
+            return false;
+        }
+        // Gate on minimum progress ratio to avoid triggering too early/noisy start.
+        if self.target_cg > 0 {
+            let progress = (w_cg as f32) / (self.target_cg as f32);
+            if progress < self.predictor.min_progress_ratio {
+                // Still update history for future iterations
+                self.pred_hist.push_back((now_ms, w_cg));
+                if self.pred_hist.len() > self.predictor.window.max(1) {
+                    self.pred_hist.pop_front();
+                }
+                return false;
+            }
+        }
+
+        // Maintain rolling window
+        self.pred_hist.push_back((now_ms, w_cg));
+        let max_len = self.predictor.window.max(1);
+        if self.pred_hist.len() > max_len {
+            self.pred_hist.pop_front();
+        }
+        if self.pred_hist.len() < 2 {
+            return false;
+        }
+        // Use simple slope estimate: (last - first) / dt
+        let (t0, w0) = self.pred_hist.front().copied().unwrap();
+        let dt_ms = now_ms.saturating_sub(t0);
+        if dt_ms == 0 {
+            return false;
+        }
+        let dw_cg = (w_cg as i64) - (w0 as i64);
+        if dw_cg <= 0 {
+            return false; // no upward trend
+        }
+
+        // inflight_cg = round(dw_cg * pred_latency_ms / dt_ms)
+        let num: i128 = (dw_cg as i128) * (self.pred_latency_ms as i128);
+        let den: i128 = (dt_ms as i128).max(1);
+        let inflight_i128 = if num >= 0 {
+            (num + den / 2) / den
+        } else {
+            (num - den / 2) / den
+        };
+        let inflight_cg = inflight_i128.clamp(i32::MIN as i128, i32::MAX as i128) as i32;
+
+        let predicted = w_cg
+            .saturating_add(inflight_cg)
+            .saturating_add(self.epsilon_cg);
+        if predicted >= self.target_cg {
+            if let Err(e) = self.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed on predictor early-stop");
+            }
+            tracing::debug!(
+                w_cg,
+                inflight_cg,
+                dt_ms,
+                window = self.pred_hist.len(),
+                "predictor early-stop issued"
+            );
+            return true;
+        }
+        false
     }
 }
 
@@ -799,6 +1029,8 @@ pub struct DoserBuilder<S, M, T> {
     clock: Option<Box<dyn Clock + Send + Sync>>,
     // E-stop debounce configuration
     estop_debounce_n: Option<u8>,
+    // Optional predictor configuration
+    predictor: Option<PredictorCfg>,
     // Type-state markers
     _s: PhantomData<S>,
     _m: PhantomData<M>,
@@ -820,6 +1052,7 @@ impl Default for DoserBuilder<Missing, Missing, Missing> {
             estop_check: None,
             clock: None,
             estop_debounce_n: None,
+            predictor: None,
             _s: PhantomData,
             _m: PhantomData,
             _t: PhantomData,
@@ -830,15 +1063,28 @@ impl Default for DoserBuilder<Missing, Missing, Missing> {
 impl<S, M, T> DoserBuilder<S, M, T> {
     /// Fallible build available in any type-state; returns detailed BuildError for missing pieces.
     pub fn try_build(self) -> Result<Doser> {
-        let scale = self
-            .scale
-            .ok_or_else(|| eyre::Report::new(BuildError::MissingScale))?;
-        let motor = self
-            .motor
-            .ok_or_else(|| eyre::Report::new(BuildError::MissingMotor))?;
-        let target_g = self
-            .target_g
-            .ok_or_else(|| eyre::Report::new(BuildError::MissingTarget))?;
+        let DoserBuilder {
+            scale,
+            motor,
+            filter,
+            control,
+            safety,
+            timeouts,
+            calibration,
+            target_g,
+            _calibration_loaded: _,
+            estop_check,
+            clock,
+            estop_debounce_n,
+            predictor,
+            _s: _,
+            _m: _,
+            _t: _,
+        } = self;
+
+        let scale = scale.ok_or_else(|| eyre::Report::new(BuildError::MissingScale))?;
+        let motor = motor.ok_or_else(|| eyre::Report::new(BuildError::MissingMotor))?;
+        let target_g = target_g.ok_or_else(|| eyre::Report::new(BuildError::MissingTarget))?;
 
         if !(0.1..=5000.0).contains(&target_g) {
             return Err(eyre::Report::new(BuildError::InvalidConfig(
@@ -846,16 +1092,17 @@ impl<S, M, T> DoserBuilder<S, M, T> {
             )));
         }
 
-        let filter = self.filter.unwrap_or_default();
-        let control = self.control.unwrap_or_default();
-        let safety = self.safety.unwrap_or_default();
-        let timeouts = self.timeouts.unwrap_or_default();
-        let calibration = self.calibration.unwrap_or_default();
-        let clock: Arc<dyn Clock + Send + Sync> = match self.clock {
+        let filter = filter.unwrap_or_default();
+        let mut control = control.unwrap_or_default();
+        let predictor = predictor.unwrap_or_default();
+        let safety = safety.unwrap_or_default();
+        let timeouts = timeouts.unwrap_or_default();
+        let calibration = calibration.unwrap_or_default();
+        let clock: Arc<dyn Clock + Send + Sync> = match clock {
             Some(b) => Arc::from(b),
             None => Arc::new(MonotonicClock::new()),
         };
-        let estop_debounce_n = self.estop_debounce_n.unwrap_or(2);
+        let estop_debounce_n = estop_debounce_n.unwrap_or(2);
 
         // Validate configs (non-panicking; return typed Config errors)
         if control.hysteresis_g.is_sign_negative() {
@@ -904,7 +1151,15 @@ impl<S, M, T> DoserBuilder<S, M, T> {
 
         // Precompute loop period (us)
         let period_us = crate::util::period_us(filter.sample_rate_hz);
+        let period_ms = period_us.div_ceil(1000);
+        let pred_latency_ms = period_ms.saturating_add(predictor.extra_latency_ms);
 
+        // Sort speed bands descending by threshold and precompute integer thresholds in centigrams
+        if !control.speed_bands.is_empty() {
+            control
+                .speed_bands
+                .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(core::cmp::Ordering::Equal));
+        }
         // Precompute integer thresholds in centigrams
         let to_cg = |g: f32| ((g * 100.0).round()) as i32;
         let target_cg = to_cg(target_g);
@@ -912,6 +1167,11 @@ impl<S, M, T> DoserBuilder<S, M, T> {
         let max_overshoot_cg = to_cg(safety.max_overshoot_g);
         let no_progress_epsilon_cg = to_cg(safety.no_progress_epsilon_g);
         let slow_at_cg = to_cg(control.slow_at_g);
+        let speed_bands_cg: Vec<(i32, u32)> = control
+            .speed_bands
+            .iter()
+            .map(|(g, sps)| (to_cg(*g), *sps))
+            .collect();
 
         // Precompute quantized calibration before moving `calibration` into the struct
         let cal_gain_cg_per_count = quantize_to_cg_i32(calibration.gain_g_per_count);
@@ -935,6 +1195,7 @@ impl<S, M, T> DoserBuilder<S, M, T> {
                 ma_buf: VecDeque::with_capacity(ma_cap),
                 med_buf: VecDeque::with_capacity(med_cap),
                 tmp_med_buf: Vec::with_capacity(med_cap),
+                ema_prev_cg: None,
                 period_us,
                 cal_gain_cg_per_count,
                 cal_offset_cg,
@@ -943,12 +1204,16 @@ impl<S, M, T> DoserBuilder<S, M, T> {
                 max_overshoot_cg,
                 no_progress_epsilon_cg,
                 motor_started: false,
-                estop_check: self.estop_check,
+                estop_check,
                 last_progress_cg: 0,
                 last_progress_at_ms: now,
                 estop_latched: false,
                 estop_debounce_n,
                 estop_count: 0,
+                predictor,
+                pred_hist: VecDeque::with_capacity(8),
+                pred_latency_ms,
+                speed_bands_cg,
             },
         })
     }
@@ -1002,6 +1267,11 @@ impl<S, M, T> DoserBuilder<S, M, T> {
         self.estop_debounce_n = Some(n.max(1));
         self
     }
+    /// Configure the stop-early predictor.
+    pub fn with_predictor(mut self, predictor: PredictorCfg) -> Self {
+        self.predictor = Some(predictor);
+        self
+    }
     /// Provide a custom clock implementation; defaults to MonotonicClock when not provided.
     pub fn with_clock(mut self, clock: Box<dyn Clock + Send + Sync>) -> Self {
         self.clock = Some(clock);
@@ -1030,6 +1300,7 @@ impl<M, T> DoserBuilder<Missing, M, T> {
             estop_check,
             clock,
             estop_debounce_n,
+            predictor,
             _s: _,
             _m: _,
             _t: _,
@@ -1047,6 +1318,7 @@ impl<M, T> DoserBuilder<Missing, M, T> {
             estop_check,
             clock,
             estop_debounce_n,
+            predictor,
             _s: PhantomData,
             _m: PhantomData,
             _t: PhantomData,
@@ -1069,6 +1341,7 @@ impl<S, T> DoserBuilder<S, Missing, T> {
             estop_check,
             clock,
             estop_debounce_n,
+            predictor,
             _s: _,
             _m: _,
             _t: _,
@@ -1086,6 +1359,7 @@ impl<S, T> DoserBuilder<S, Missing, T> {
             estop_check,
             clock,
             estop_debounce_n,
+            predictor,
             _s: PhantomData,
             _m: PhantomData,
             _t: PhantomData,
@@ -1108,6 +1382,7 @@ impl<S, M> DoserBuilder<S, M, Missing> {
             estop_check,
             clock,
             estop_debounce_n,
+            predictor,
             _s: _,
             _m: _,
             _t: _,
@@ -1125,6 +1400,7 @@ impl<S, M> DoserBuilder<S, M, Missing> {
             estop_check,
             clock,
             estop_debounce_n,
+            predictor,
             _s: PhantomData,
             _m: PhantomData,
             _t: PhantomData,
@@ -1213,16 +1489,33 @@ where
     let epoch = clock.now();
     let now = clock.ms_since(epoch);
     let period_us = crate::util::period_us(filter.sample_rate_hz);
+    let period_ms = period_us.div_ceil(1000);
     let to_cg = |g: f32| ((g * 100.0).round()) as i32;
     let target_cg = to_cg(target_g);
     let epsilon_cg = to_cg(control.epsilon_g);
     let max_overshoot_cg = to_cg(safety.max_overshoot_g);
     let no_progress_epsilon_cg = to_cg(safety.no_progress_epsilon_g);
     let slow_at_cg = to_cg(control.slow_at_g);
+    // Sort bands descending and cache cg thresholds
+    let mut control = control;
+    if !control.speed_bands.is_empty() {
+        control
+            .speed_bands
+            .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(core::cmp::Ordering::Equal));
+    }
+    let speed_bands_cg: Vec<(i32, u32)> = control
+        .speed_bands
+        .iter()
+        .map(|(g, sps)| (to_cg(*g), *sps))
+        .collect();
 
     // Precompute quantized calibration before moving `calibration` into the struct
     let cal_gain_cg_per_count = quantize_to_cg_i32(calibration.gain_g_per_count);
     let cal_offset_cg = quantize_to_cg_i32(calibration.offset_g);
+
+    // Predictor disabled by default for generic builder to preserve behavior.
+    let predictor = PredictorCfg::default();
+    let pred_latency_ms = period_ms.saturating_add(predictor.extra_latency_ms);
 
     Ok(DoserG {
         scale,
@@ -1241,6 +1534,7 @@ where
         ma_buf: VecDeque::with_capacity(ma_cap),
         med_buf: VecDeque::with_capacity(med_cap),
         tmp_med_buf: Vec::with_capacity(med_cap),
+        ema_prev_cg: None,
         period_us,
         cal_gain_cg_per_count,
         cal_offset_cg,
@@ -1255,5 +1549,9 @@ where
         estop_latched: false,
         estop_debounce_n,
         estop_count: 0,
+        predictor,
+        pred_hist: VecDeque::with_capacity(8),
+        pred_latency_ms,
+        speed_bands_cg,
     })
 }

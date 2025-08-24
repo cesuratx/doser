@@ -595,7 +595,7 @@ stateDiagram-v2
 
 1. Add a new safety check: Abort if weight decreases after reaching 80% of target.
 
-- Solution sketch: Track `min_w_after_80` and compare on each step; return `DosingStatus::Aborted(DoserError::State("backslide".into()))` if violated.
+- Solution sketch: Track `min_w_after_80` and compare on each step; return `DosingStatus::Aborted(DoserError::Abort(AbortReason::NoProgress))` if violated.
 
 2. Add a new motor backend.
 

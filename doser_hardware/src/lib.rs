@@ -104,10 +104,201 @@ pub mod sim {
     }
 }
 
+// Generic absolute-deadline pacer with pluggable sleeper for testability
+// When building without the `hardware` feature, these items may be unused; silence warnings.
+#[cfg_attr(not(feature = "hardware"), allow(dead_code))]
+mod pacing {
+    use std::time::{Duration, Instant};
+
+    #[allow(dead_code)]
+    pub trait Sleeper {
+        fn now(&self) -> Instant;
+        fn sleep_until(&self, deadline: Instant);
+    }
+
+    pub struct RealSleeper;
+    impl Sleeper for RealSleeper {
+        fn now(&self) -> Instant {
+            Instant::now()
+        }
+        fn sleep_until(&self, deadline: Instant) {
+            let now = Instant::now();
+            if deadline <= now {
+                return;
+            }
+            let delta = deadline - now;
+            #[cfg(feature = "rt")]
+            {
+                use libc::{
+                    CLOCK_MONOTONIC, TIMER_ABSTIME, clock_gettime, clock_nanosleep, timespec,
+                };
+                // Get current monotonic time
+                unsafe {
+                    let mut now_ts = timespec {
+                        tv_sec: 0,
+                        tv_nsec: 0,
+                    };
+                    if clock_gettime(CLOCK_MONOTONIC, &mut now_ts) == 0 {
+                        // Compute absolute target = now_ts + delta
+                        let add_ns = delta.as_nanos() as i128;
+                        let mut sec = now_ts.tv_sec as i128 + (add_ns / 1_000_000_000) as i128;
+                        let mut nsec = now_ts.tv_nsec as i128 + (add_ns % 1_000_000_000) as i128;
+                        if nsec >= 1_000_000_000 {
+                            sec += 1;
+                            nsec -= 1_000_000_000;
+                        }
+                        let target = timespec {
+                            tv_sec: sec as i64,
+                            tv_nsec: nsec as i64,
+                        };
+                        let rc = clock_nanosleep(
+                            CLOCK_MONOTONIC,
+                            TIMER_ABSTIME,
+                            &target,
+                            std::ptr::null_mut(),
+                        );
+                        if rc == 0 {
+                            return;
+                        }
+                    }
+                }
+            }
+            // Fallback: relative sleep
+            std::thread::sleep(delta);
+        }
+    }
+
+    #[allow(dead_code)]
+    pub struct Pacer {
+        next_deadline: Instant,
+        initialized: bool,
+        jitter_accum_us: u128,
+        jitter_count: u32,
+        pub avg_jitter_us: u32,
+    }
+
+    impl Default for Pacer {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+    #[allow(dead_code)]
+    impl Pacer {
+        pub fn new() -> Self {
+            Self {
+                next_deadline: Instant::now(),
+                initialized: false,
+                jitter_accum_us: 0,
+                jitter_count: 0,
+                avg_jitter_us: 0,
+            }
+        }
+        #[inline]
+        pub fn reset(&mut self) {
+            self.initialized = false;
+        }
+
+        /// Run one full period paced by absolute deadlines, invoking `mid_hook` exactly at half period.
+        /// Returns Some(avg_jitter_us) whenever the internal window (256) completes.
+        pub fn step_with<F, S: Sleeper>(
+            &mut self,
+            sleeper: &S,
+            period_us: u64,
+            mut mid_hook: F,
+        ) -> Option<u32>
+        where
+            F: FnMut(),
+        {
+            let period = Duration::from_micros(period_us.max(1));
+            let half = period / 2;
+            if !self.initialized {
+                self.next_deadline = sleeper.now() + period;
+                self.initialized = true;
+            }
+            let mid = self.next_deadline - half;
+            sleeper.sleep_until(mid);
+            mid_hook();
+            sleeper.sleep_until(self.next_deadline);
+            // measure jitter vs deadline
+            let now = sleeper.now();
+            let jitter = if now >= self.next_deadline {
+                now - self.next_deadline
+            } else {
+                self.next_deadline - now
+            };
+            self.jitter_accum_us = self.jitter_accum_us.saturating_add(jitter.as_micros());
+            self.jitter_count = self.jitter_count.saturating_add(1);
+            // advance deadline for next cycle
+            self.next_deadline += period;
+            if self.jitter_count >= 256 {
+                let avg = (self.jitter_accum_us / (self.jitter_count as u128)) as u32;
+                self.avg_jitter_us = avg;
+                self.jitter_accum_us = 0;
+                self.jitter_count = 0;
+                Some(avg)
+            } else {
+                None
+            }
+        }
+
+        /// Convenience: step without a mid hook.
+        pub fn step<S: Sleeper>(&mut self, sleeper: &S, period_us: u64) -> Option<u32> {
+            self.step_with(sleeper, period_us, || {})
+        }
+    }
+
+    #[cfg(test)]
+    pub struct FakeSleeper {
+        origin: Instant,
+        offset: std::sync::Arc<std::sync::Mutex<Duration>>,
+    }
+    #[cfg(test)]
+    impl FakeSleeper {
+        pub fn new() -> Self {
+            Self {
+                origin: Instant::now(),
+                offset: std::sync::Arc::new(std::sync::Mutex::new(Duration::ZERO)),
+            }
+        }
+        pub fn elapsed(&self) -> Duration {
+            *self.offset.lock().unwrap()
+        }
+    }
+    #[cfg(test)]
+    impl Sleeper for FakeSleeper {
+        fn now(&self) -> Instant {
+            self.origin + *self.offset.lock().unwrap()
+        }
+        fn sleep_until(&self, deadline: Instant) {
+            let mut off = self.offset.lock().unwrap();
+            let dur = deadline.saturating_duration_since(self.origin);
+            *off = dur;
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn no_drift_after_many_cycles_with_fake_sleep() {
+            let mut pacer = Pacer::new();
+            let sleeper = FakeSleeper::new();
+            let period_us = 1000u64;
+            for _ in 0..10_000u32 {
+                let _ = pacer.step(&sleeper, period_us);
+            }
+            // Expect elapsed to be exactly N*period with the fake sleeper
+            let expected = Duration::from_micros(period_us * 10_000);
+            assert_eq!(sleeper.elapsed(), expected);
+        }
+    }
+}
+
 #[cfg(feature = "hardware")]
 pub mod hardware {
     use crate::error::{HwError, Result as HwResult};
     use crate::hx711::Hx711;
+    use crate::pacing::{Pacer, RealSleeper, Sleeper};
     use doser_traits::clock::{Clock, MonotonicClock};
     use doser_traits::{Motor, Scale};
     use rppal::gpio::{Gpio, OutputPin};
@@ -194,6 +385,8 @@ pub mod hardware {
         sps: Arc<AtomicU32>,
         handle: Option<JoinHandle<()>>,
         shutdown_tx: mpsc::Sender<()>,
+        // Expose rough jitter stat (average over last window) for observability
+        avg_jitter_us: Arc<AtomicU32>,
     }
 
     impl HardwareMotor {
@@ -234,30 +427,45 @@ pub mod hardware {
 
             let running_bg = running.clone();
             let sps_bg = sps.clone();
+            let avg_jitter_us = Arc::new(AtomicU32::new(0));
+            let avg_jitter_us_bg = avg_jitter_us.clone();
             // Move STEP into the background thread; not used elsewhere.
             let handle = thread::spawn(move || {
                 let clock = MonotonicClock::new();
+                // Optional: try to elevate RT priority and lock memory when feature is enabled
+                #[cfg(feature = "rt")]
+                if let Err(e) = setup_realtime() {
+                    tracing::warn!(error = %e, "rt setup failed; continuing non-RT");
+                }
+
+                let mut pacer = Pacer::new();
+                let sleeper = RealSleeper;
+
                 loop {
                     if shutdown_rx.try_recv().is_ok() {
                         break;
                     }
+
                     let is_running = running_bg.load(Ordering::Relaxed);
                     let sps_val = sps_bg.load(Ordering::Relaxed).clamp(0, 5_000);
-                    if is_running && sps_val > 0 {
-                        let period_us = 1_000_000u32 / sps_val; // total period in microseconds
-                        let half = (period_us / 2).max(1);
-                        // Rising edge
-                        let _ = step.set_high();
-                        spin_delay_min();
-                        // High hold
-                        spin_sleep_us(half as u64);
-                        // Falling edge
+                    if !(is_running && sps_val > 0) {
+                        clock.sleep(Duration::from_millis(2));
+                        pacer.reset();
+                        continue;
+                    }
+
+                    let period_us = (1_000_000u32 / sps_val).max(1) as u64; // us
+                    // Rising edge
+                    let _ = step.set_high();
+                    spin_delay_min();
+                    busy_wait_min_1us();
+                    // High hold until mid, then fall and hold until end
+                    if let Some(avg) = pacer.step_with(&sleeper, period_us, || {
                         let _ = step.set_low();
                         spin_delay_min();
-                        // Low hold
-                        spin_sleep_us(half as u64);
-                    } else {
-                        clock.sleep(Duration::from_millis(2));
+                        busy_wait_min_1us();
+                    }) {
+                        avg_jitter_us_bg.store(avg, Ordering::Relaxed);
                     }
                 }
             });
@@ -269,6 +477,7 @@ pub mod hardware {
                 sps,
                 handle: Some(handle),
                 shutdown_tx,
+                avg_jitter_us,
             };
             // Default: disabled
             let _ = motor.set_enabled(false);
@@ -340,6 +549,13 @@ pub mod hardware {
         }
     }
 
+    /// Return average jitter in microseconds over the last window (approximate).
+    impl HardwareMotor {
+        pub fn avg_jitter_us(&self) -> u32 {
+            self.avg_jitter_us.load(Ordering::Relaxed)
+        }
+    }
+
     /// Very small spin to make edges clean.
     #[inline(always)]
     fn spin_delay_min() {
@@ -348,8 +564,44 @@ pub mod hardware {
 
     /// Sleep for microseconds using std; coarse but sufficient for <= 5 kHz.
     fn spin_sleep_us(us: u64) {
-        // Use monotonic clock for consistency
         MonotonicClock::new().sleep(Duration::from_micros(us));
+    }
+
+    /// Busy-wait for at least ~1 microsecond to cleanly separate edges.
+    #[inline(always)]
+    fn busy_wait_min_1us() {
+        // A small calibrated spin; exact duration is platform dependent
+        std::hint::spin_loop();
+        std::hint::spin_loop();
+    }
+
+    /// Sleep until an absolute deadline by sleeping the remaining delta.
+    fn sleep_until(deadline: std::time::Instant) {
+        let now = std::time::Instant::now();
+        if deadline > now {
+            MonotonicClock::new().sleep(deadline - now);
+        }
+    }
+
+    #[cfg(feature = "rt")]
+    fn setup_realtime() -> Result<(), String> {
+        use nix::errno::Errno;
+        use nix::sched::{SchedParam, Scheduler, sched_setscheduler};
+        use nix::sys::mman::{MlockAllFlags, mlockall};
+
+        // Try to set FIFO priority (requires CAP_SYS_NICE); ignore failures with warning
+        let p = SchedParam { sched_priority: 10 };
+        if let Err(e) = sched_setscheduler(None, Scheduler::Fifo, &p) {
+            if e != Errno::EPERM {
+                return Err(format!("sched_setscheduler failed: {e}"));
+            }
+        }
+        if let Err(e) = mlockall(MlockAllFlags::MCL_CURRENT | MlockAllFlags::MCL_FUTURE) {
+            if e != Errno::EPERM {
+                return Err(format!("mlockall failed: {e}"));
+            }
+        }
+        Ok(())
     }
 
     /// E-stop checker: on ARM, read from a GPIO and expose as closure.
@@ -385,3 +637,5 @@ pub use sim::{SimulatedMotor, SimulatedScale};
 
 #[cfg(feature = "hardware")]
 pub use hardware::{HardwareMotor, HardwareScale, make_estop_checker};
+
+// Note: end-to-end pacing behavior is covered in the pacing::tests module using FakeSleeper.

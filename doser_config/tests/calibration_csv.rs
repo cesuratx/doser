@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::Write;
 
-use doser_config::{load_calibration_csv, Calibration, CalibrationRow};
+use doser_config::{Calibration, CalibrationRow, load_calibration_csv};
 use rstest::rstest;
 use tempfile::tempdir;
 
@@ -80,9 +80,11 @@ fn calibration_rejects_non_monotonic_zigzag() {
         },
     ];
     let err = Calibration::from_rows(rows).expect_err("should fail on non-monotonic raw");
-    assert!(format!("{err}")
-        .to_lowercase()
-        .contains("monotonic (strictly increasing or strictly decreasing)"));
+    assert!(
+        format!("{err}")
+            .to_lowercase()
+            .contains("monotonic (strictly increasing or strictly decreasing)")
+    );
 }
 
 #[rstest]
@@ -110,4 +112,37 @@ fn csv_with_non_numeric_errors() {
 
     let err = load_calibration_csv(&path).expect_err("should error on non-numeric");
     assert!(format!("{err}").contains("invalid CSV row"));
+}
+
+#[rstest]
+fn calibration_with_noise_and_outliers_recovers_params() {
+    // Ground truth: grams = 0.5*raw - 50
+    let true_gain = 0.5f32;
+    let true_offset_raw = 100i64; // because grams=0 at raw=100 => zero_counts=100
+    // Generate samples across a range with small Gaussian-like noise and a couple outliers
+    let mut rows = Vec::new();
+    for i in 0..50i64 {
+        let raw = 50 + i * 10; // 50..=540
+        let ideal = true_gain * (raw as f32) - 50.0;
+        // pseudo-random noise in [-1.0, 1.0]
+        let noise = ((i as f32 * 37.0).sin()) * 0.5;
+        rows.push(doser_config::CalibrationRow {
+            raw,
+            grams: ideal + noise,
+        });
+    }
+    // Inject a couple of strong outliers (> 2σ) by replacing in-range points to keep raw monotonic
+    let idx1 = 15usize; // corresponds to raw around 200
+    let idx2 = 35usize; // corresponds to raw around 400
+    rows[idx1].grams = 500.0; // extreme high outlier
+    rows[idx2].grams = -500.0; // extreme low outlier
+
+    let c = doser_config::Calibration::from_rows(rows).unwrap();
+    // scale_factor should be within 1% of true_gain
+    let rel_err_gain = (c.scale_factor - true_gain).abs() / true_gain;
+    assert!(rel_err_gain <= 0.01, "gain rel err {rel_err_gain}");
+    // offset should be within 1% of 100 counts
+    let rel_err_off =
+        ((c.offset as f32) - (true_offset_raw as f32)).abs() / (true_offset_raw as f32);
+    assert!(rel_err_off <= 0.01, "offset rel err {rel_err_off}");
 }

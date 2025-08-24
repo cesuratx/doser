@@ -1,18 +1,29 @@
 use std::{fs, path::PathBuf};
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
-use doser_config::{load_calibration_csv, Calibration, Config};
+use doser_config::{Calibration, Config, load_calibration_csv};
 use doser_core::error::Result as CoreResult;
 use eyre::WrapErr;
 
 use std::sync::OnceLock;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use doser_core::runner::SamplingMode;
 
 // Local NoopScale for sampler-driven mode (removed; orchestration moved to core runner)
 
 static FILE_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
+// Remember whether the user asked for JSON output (controls structured error output)
+static JSON_MODE: OnceLock<bool> = OnceLock::new();
+// Remember effective safety knobs used for the current run (for JSON details)
+#[derive(Copy, Clone, Debug)]
+struct CliSafety {
+    max_run_ms: u64,
+    max_overshoot_g: f32,
+    no_progress_ms: u64,
+    no_progress_epsilon_g: f32,
+}
+static LAST_SAFETY: OnceLock<CliSafety> = OnceLock::new();
 
 fn humanize(err: &eyre::Report) -> String {
     use doser_core::error::{BuildError, DoserError};
@@ -40,20 +51,15 @@ fn humanize(err: &eyre::Report) -> String {
         if matches!(de, DoserError::Timeout) {
             return "What happened: Scale read timed out.\nLikely causes: HX711 not wired correctly, no power/ground, or timeout too low.\nHow to fix: Verify DT/SCK pins and power, and consider increasing hardware.sensor_read_timeout_ms in the config.".to_string();
         }
-        if let DoserError::State(s) = de {
-            let lower = s.to_ascii_lowercase();
-            if lower.contains("estop") {
-                return "What happened: Emergency stop was triggered.\nLikely causes: E-stop button pressed or input pin active.\nHow to fix: Release E-stop, ensure wiring is correct, then start a new run.".to_string();
-            }
-            if lower.contains("no progress") {
-                return "What happened: No progress watchdog tripped.\nLikely causes: Jammed auger, empty hopper, or scale not changing within threshold.\nHow to fix: Check mechanics and materials; adjust safety.no_progress_* in config if needed.".to_string();
-            }
-            if lower.contains("max run time exceeded") {
-                return "max run time was exceeded.\nLikely causes: Too conservative speeds, high target, or stalls.\nHow to fix: Increase safety.max_run_ms or adjust speeds/target.".to_string();
-            }
-            if lower.contains("max overshoot exceeded") {
-                return "What happened: Overshoot beyond safety limit.\nLikely causes: Inertia or too high coarse/fine speed near target.\nHow to fix: Lower speeds or increase safety.max_overshoot_g and tune epsilon/slow_at.".to_string();
-            }
+        if let DoserError::Abort(reason) = de {
+            use doser_core::error::AbortReason::*;
+            return match reason {
+                Estop => "What happened: Emergency stop was triggered.\nLikely causes: E-stop button pressed or input pin active.\nHow to fix: Release E-stop, ensure wiring is correct, then start a new run.".to_string(),
+                NoProgress => "What happened: No progress watchdog tripped.\nLikely causes: Jammed auger, empty hopper, or scale not changing within threshold.\nHow to fix: Check mechanics and materials; adjust safety.no_progress_* in config if needed.".to_string(),
+                MaxRuntime => "max run time was exceeded.\nLikely causes: Too conservative speeds, high target, or stalls.\nHow to fix: Increase safety.max_run_ms or adjust speeds/target.".to_string(),
+                Overshoot => "What happened: Overshoot beyond safety limit.\nLikely causes: Inertia or too high coarse/fine speed near target.\nHow to fix: Lower speeds or increase safety.max_overshoot_g and tune epsilon/slow_at.".to_string(),
+                MaxAttempts => "What happened: Internal strategy aborted after maximum attempts.\nLikely causes: Conservative settings or unexpected stall in strategy loop.\nHow to fix: Increase attempts or review control/safety settings.".to_string(),
+            };
         }
         // Fallback to generic for other domain errors
         return format!(
@@ -92,6 +98,87 @@ fn humanize(err: &eyre::Report) -> String {
     }
     format!(
         "Something went wrong.{cause}\nHow to fix: Re-run with --log-level=debug for details. Original: {msg}"
+    )
+}
+
+/// Map AbortReason (if present) to stable exit codes; non-abort errors return 2.
+fn exit_code_for_error(err: &eyre::Report) -> i32 {
+    use doser_core::error::DoserError;
+    if let Some(DoserError::Abort(reason)) = err.downcast_ref::<DoserError>() {
+        return match reason {
+            doser_core::error::AbortReason::Estop => 2,
+            doser_core::error::AbortReason::NoProgress => 3,
+            doser_core::error::AbortReason::MaxRuntime => 4,
+            doser_core::error::AbortReason::Overshoot => 5,
+            doser_core::error::AbortReason::MaxAttempts => 6,
+        };
+    }
+    1
+}
+
+fn abort_reason_name(r: &doser_core::error::AbortReason) -> &'static str {
+    use doser_core::error::AbortReason::*;
+    match r {
+        Estop => "Estop",
+        NoProgress => "NoProgress",
+        MaxRuntime => "MaxRuntime",
+        Overshoot => "Overshoot",
+        MaxAttempts => "MaxAttempts",
+    }
+}
+
+/// Structured JSON for errors when --json is enabled.
+fn format_error_json(err: &eyre::Report) -> String {
+    use doser_core::error::DoserError;
+    if let Some(DoserError::Abort(reason)) = err.downcast_ref::<DoserError>() {
+        // Keep schema small and stable for scripts
+        let msg = humanize(err).replace('"', "\\\"");
+        let details = LAST_SAFETY.get();
+        match reason {
+            doser_core::error::AbortReason::Overshoot => {
+                if let Some(s) = details {
+                    return format!(
+                        "{{\"reason\":\"{}\",\"details\":{{\"max_overshoot_g\":{}}},\"message\":\"{}\"}}",
+                        abort_reason_name(reason),
+                        s.max_overshoot_g,
+                        msg
+                    );
+                }
+            }
+            doser_core::error::AbortReason::MaxRuntime => {
+                if let Some(s) = details {
+                    return format!(
+                        "{{\"reason\":\"{}\",\"details\":{{\"max_run_ms\":{}}},\"message\":\"{}\"}}",
+                        abort_reason_name(reason),
+                        s.max_run_ms,
+                        msg
+                    );
+                }
+            }
+            doser_core::error::AbortReason::NoProgress => {
+                if let Some(s) = details {
+                    return format!(
+                        "{{\"reason\":\"{}\",\"details\":{{\"no_progress_ms\":{},\"epsilon_g\":{}}},\"message\":\"{}\"}}",
+                        abort_reason_name(reason),
+                        s.no_progress_ms,
+                        s.no_progress_epsilon_g,
+                        msg
+                    );
+                }
+            }
+            _ => {}
+        }
+        // Fallback without details
+        return format!(
+            "{{\"reason\":\"{}\",\"message\":\"{}\"}}",
+            abort_reason_name(reason),
+            msg
+        );
+    }
+    // Generic error JSON
+    format!(
+        "{{\"reason\":\"Error\",\"message\":\"{}\"}}",
+        humanize(err).replace('"', "\\\"")
     )
 }
 
@@ -245,14 +332,22 @@ enum Commands {
 
 fn main() -> eyre::Result<()> {
     if let Err(e) = real_main() {
-        eprintln!("{}", humanize(&e));
-        std::process::exit(2);
+        let json = *JSON_MODE.get().unwrap_or(&false);
+        let code = exit_code_for_error(&e);
+        if json {
+            // Emit a one-line JSON object for scripts
+            println!("{}", format_error_json(&e));
+        } else {
+            eprintln!("{}", humanize(&e));
+        }
+        std::process::exit(code);
     }
     Ok(())
 }
 
 fn real_main() -> eyre::Result<()> {
     let cli = Cli::parse();
+    let _ = JSON_MODE.set(cli.json);
 
     // 1) Load typed config from TOML (for logging.file)
     let cfg_text = fs::read_to_string(&cli.config)
@@ -270,14 +365,18 @@ fn real_main() -> eyre::Result<()> {
         cfg.logging.rotation.as_deref(),
     );
 
-    // 2) Load calibration if provided
-    let calib: Option<Calibration> = match &cli.calibration {
-        Some(p) => {
-            let c = load_calibration_csv(p)
-                .map_err(|e| eyre::eyre!("parse calibration {:?}: {}", p, e))?;
-            Some(c)
-        }
-        None => None,
+    // 2) Load calibration: prefer persisted in TOML if present; else optional CSV
+    let calib: Option<Calibration> = if let Some(pc) = cfg.calibration {
+        Some(Calibration {
+            offset: pc.zero_counts,
+            scale_factor: pc.gain_g_per_count,
+        })
+    } else if let Some(p) = &cli.calibration {
+        let c =
+            load_calibration_csv(p).map_err(|e| eyre::eyre!("parse calibration {:?}: {}", p, e))?;
+        Some(c)
+    } else {
+        None
     };
 
     // 3) Build hardware (feature-gated) or sim
@@ -308,34 +407,59 @@ fn real_main() -> eyre::Result<()> {
     match cli.cmd {
         Commands::SelfCheck => {
             tracing::info!("self-check starting");
-            use doser_traits::{Motor, Scale};
-            use std::time::Duration;
+            use doser_traits::Scale;
+            use std::time::{Duration, Instant};
 
             // Move hw so we can probe it here; the process exits after SelfCheck.
-            let (mut scale, mut motor) = hw;
+            let (mut scale, _motor) = hw;
 
-            // Probe scale read with configured timeout
-            match scale.read(Duration::from_millis(cfg.timeouts.sample_ms)) {
-                Ok(_v) => tracing::info!("scale read ok"),
-                Err(e) => {
-                    tracing::error!(error = %e, "scale read failed");
-                    return Err(eyre::eyre!("scale read failed: {}", e));
+            // Attempt RT elevation on Linux when built with hardware; warn on failure
+            #[cfg(all(target_os = "linux", feature = "hardware", feature = "rt"))]
+            {
+                use libc::{SCHED_FIFO, sched_get_priority_min, sched_param, sched_setscheduler};
+                unsafe {
+                    let prio = sched_get_priority_min(SCHED_FIFO);
+                    if prio >= 0 {
+                        let mut param = sched_param {
+                            sched_priority: (prio + 1) as i32,
+                        };
+                        let rc = sched_setscheduler(0, SCHED_FIFO, &mut param);
+                        if rc != 0 {
+                            eprintln!(
+                                "Realtime scheduling unavailable; expect higher jitter/overshoot."
+                            );
+                        }
+                    }
                 }
             }
 
-            // Probe motor lifecycle (non-destructive): start -> set_speed(0) -> stop
-            if let Err(e) = motor.start() {
-                tracing::error!(error = %e, "motor start failed");
-                return Err(eyre::eyre!("motor start failed: {}", e));
+            // Repeatedly read scale to estimate HX711 SPS (10 vs 80) by inter-arrival time
+            let timeout = Duration::from_millis(cfg.timeouts.sample_ms.max(1));
+            let t_end = Instant::now() + Duration::from_millis(1000);
+            let mut stamps = Vec::new();
+            while Instant::now() < t_end {
+                match scale.read(timeout) {
+                    Ok(_v) => stamps.push(Instant::now()),
+                    Err(e) => {
+                        tracing::error!(error = %e, "scale read failed");
+                        return Err(eyre::eyre!("scale read failed: {}", e));
+                    }
+                }
             }
-            let _ = motor.set_speed(0); // ignore errors here, stop will follow
-            if let Err(e) = motor.stop() {
-                tracing::error!(error = %e, "motor stop failed");
-                return Err(eyre::eyre!("motor stop failed: {}", e));
-            }
-
-            tracing::info!("self-check ok");
-            println!("OK");
+            // Compute median delta
+            let mut deltas_us: Vec<u64> = stamps
+                .windows(2)
+                .map(|w| (w[1] - w[0]).as_micros() as u64)
+                .collect();
+            deltas_us.sort_unstable();
+            let median_us = if deltas_us.is_empty() {
+                0
+            } else {
+                deltas_us[deltas_us.len() / 2]
+            };
+            // Classify: <50ms => 80 SPS, else 10 SPS (HX711 modes are ~12.5ms or ~100ms)
+            let sps = if median_us < 50_000 { 80 } else { 10 };
+            println!("Detected HX711 rate: {sps} SPS");
             Ok(())
         }
         Commands::Dose {
@@ -427,8 +551,10 @@ fn run_dose(
         ma_window: _cfg.filter.ma_window,
         median_window: _cfg.filter.median_window,
         sample_rate_hz: _cfg.filter.sample_rate_hz,
+        ema_alpha: _cfg.filter.ema_alpha.unwrap_or(0.0),
     };
     let control = doser_core::ControlCfg {
+        speed_bands: _cfg.control.speed_bands.clone(),
         coarse_speed: _cfg.control.coarse_speed,
         fine_speed: _cfg.control.fine_speed,
         slow_at_g: _cfg.control.slow_at_g,
@@ -456,6 +582,12 @@ fn run_dose(
         no_progress_epsilon_g: _cfg.safety.no_progress_epsilon_g,
         no_progress_ms: _cfg.safety.no_progress_ms,
     };
+    let _ = LAST_SAFETY.set(CliSafety {
+        max_run_ms: safety.max_run_ms,
+        max_overshoot_g: safety.max_overshoot_g,
+        no_progress_ms: safety.no_progress_ms,
+        no_progress_epsilon_g: safety.no_progress_epsilon_g,
+    });
     let calibration_core = calib.map(|c| doser_core::Calibration {
         gain_g_per_count: c.scale_factor,
         zero_counts: c.offset,
@@ -681,13 +813,6 @@ const MAX_CPUSET_BITS: usize = std::mem::size_of::<libc::cpu_set_t>() * 8;
 #[cfg(target_os = "linux")]
 fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize>) {
     use libc::{
-        // Memory locking
-        mlockall,
-        // Scheduling (FIFO priority)
-        sched_get_priority_max,
-        sched_get_priority_min,
-        sched_param,
-        sched_setscheduler,
         // CPU affinity helpers
         CPU_ISSET,
         CPU_SET,
@@ -695,6 +820,13 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         MCL_CURRENT,
         MCL_FUTURE,
         SCHED_FIFO,
+        // Memory locking
+        mlockall,
+        // Scheduling (FIFO priority)
+        sched_get_priority_max,
+        sched_get_priority_min,
+        sched_param,
+        sched_setscheduler,
     };
     use std::sync::OnceLock;
     static RT_ONCE: OnceLock<()> = OnceLock::new();
@@ -905,7 +1037,7 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
 
 #[cfg(target_os = "macos")]
 fn setup_rt_once(rt: bool, lock: RtLock) {
-    use libc::{mlockall, MCL_CURRENT, MCL_FUTURE};
+    use libc::{MCL_CURRENT, MCL_FUTURE, mlockall};
     use std::sync::OnceLock;
     static RT_ONCE: OnceLock<()> = OnceLock::new();
     if !rt {
