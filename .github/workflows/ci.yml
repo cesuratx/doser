@@ -62,7 +62,8 @@ jobs:
   test-hardware-feature:
     name: test-hardware-feature
     runs-on: ubuntu-latest
-  continue-on-error: false
+    # continue-on-error defaults to false; uncomment to allow soft-failures
+    # continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
