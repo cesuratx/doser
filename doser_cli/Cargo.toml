@@ -7,6 +7,9 @@ edition = "2021"
 # CLI
 clap = { version = "4.5", features = ["derive"] }
 
+# For real-time system calls
+libc = "0.2"
+
 # Error & logging (CLI only)
 eyre = "0.6"
 tracing = "0.1"

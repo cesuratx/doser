@@ -270,6 +270,7 @@ dependencies = [
  "doser_hardware",
  "doser_traits",
  "eyre",
+ "libc",
  "predicates",
  "rstest",
  "tempfile",

@@ -2,8 +2,22 @@
 //! - Keeps all hardware behind doser_traits::Scale/Motor
 //! - Exposes a small builder to wire config + traits
 //! - One-step control loop (call step() from the CLI or a strategy)
+//!
+//! Fixed-point arithmetic strategy
+//! - Internals operate primarily in integer centigrams (cg, 1 cg = 0.01 g) to avoid
+//!   per-sample floating-point math in the control loop and to keep thresholds in a
+//!   single unit. See `Calibration::to_cg` for the conversion path and quantization.
+//! - The helper `div_round_nearest_i32` provides round-to-nearest integer division with
+//!   ties away from zero, which is used to compute unbiased medians and moving averages
+//!   in cg space.
+//! - Saturating arithmetic is used where appropriate (e.g., `saturating_sub/mul/add`) to
+//!   prevent overflow with extreme parameters while preserving monotonicity.
 
 pub mod error;
+pub mod mocks;
+pub mod runner;
+pub mod sampler;
+pub mod util;
 
 use crate::error::BuildError;
 use crate::error::{DoserError, Result};
@@ -16,6 +30,97 @@ use std::time::{Duration, Instant};
 // For typed hardware error mapping
 use doser_hardware::error::HwError;
 
+use crate::util::div_round_nearest_i32;
+
+/// Average of two i32 values rounded to nearest with ties away from zero.
+/// Uses 64-bit intermediates; cannot overflow and the average fits in i32.
+#[inline]
+fn avg2_round_nearest_i32(a: i32, b: i32) -> i32 {
+    let s = (a as i64) + (b as i64);
+    if s >= 0 {
+        ((s + 1) / 2) as i32
+    } else {
+        ((s - 1) / 2) as i32
+    }
+}
+
+/// Quantize a floating-point grams value to integer centigrams (cg), rounding to nearest
+/// and clamping to the i32 range. Non-finite values (NaN/±Inf) map to 0.
+#[inline]
+fn quantize_to_cg_i32(x_g: f32) -> i32 {
+    if !x_g.is_finite() {
+        return 0;
+    }
+    let scaled = (x_g * 100.0).round();
+    if scaled >= i32::MAX as f32 {
+        i32::MAX
+    } else if scaled <= i32::MIN as f32 {
+        i32::MIN
+    } else {
+        scaled as i32
+    }
+}
+
+/// Absolute difference of two i32 values as u32 without overflow.
+///
+/// Notes:
+/// - Uses 64-bit intermediates to avoid overflow during subtraction.
+/// - For any `i32` inputs, `|a - b| <= u32::MAX` (the maximum occurs for
+///   `(i32::MIN, i32::MAX)`), so the final cast to `u32` is always lossless.
+#[inline]
+fn abs_diff_i32_u32(a: i32, b: i32) -> u32 {
+    let diff = (a as i64) - (b as i64);
+    let mag = if diff >= 0 {
+        diff as u64
+    } else {
+        (-diff) as u64
+    };
+    debug_assert!(
+        mag <= u32::MAX as u64,
+        "abs_diff_i32_u32: magnitude out of u32 range: {mag}"
+    );
+    mag as u32
+}
+
+#[cfg(test)]
+mod abs_diff_tests {
+    use super::abs_diff_i32_u32;
+
+    #[test]
+    fn handles_extremes_losslessly() {
+        let v = abs_diff_i32_u32(i32::MIN, i32::MAX);
+        assert_eq!(v, u32::MAX);
+    }
+
+    #[test]
+    fn simple_pairs() {
+        assert_eq!(abs_diff_i32_u32(123, -456), 579);
+        assert_eq!(abs_diff_i32_u32(-456, 123), 579);
+        assert_eq!(abs_diff_i32_u32(0, 0), 0);
+    }
+}
+
+#[cfg(test)]
+mod avg2_tests {
+    use super::avg2_round_nearest_i32;
+
+    #[test]
+    fn extremes_and_signs() {
+        assert_eq!(avg2_round_nearest_i32(i32::MAX, i32::MAX), i32::MAX);
+        assert_eq!(avg2_round_nearest_i32(i32::MIN, i32::MIN), i32::MIN);
+        // Cross extremes: sum = -1 -> avg = -0.5 -> away from zero => -1
+        assert_eq!(avg2_round_nearest_i32(i32::MAX, i32::MIN), -1);
+    }
+
+    #[test]
+    fn simple_pairs() {
+        assert_eq!(avg2_round_nearest_i32(1, 2), 2); // 1.5 -> 2
+        assert_eq!(avg2_round_nearest_i32(-1, 0), -1); // -0.5 -> -1
+        assert_eq!(avg2_round_nearest_i32(10, 10), 10);
+        assert_eq!(avg2_round_nearest_i32(-5, -6), -6); // -5.5 -> -6
+    }
+}
+
 /// Simple linear calibration from raw scale counts to grams.
 /// grams = gain_g_per_count * (raw - zero_counts) + offset_g
 #[derive(Debug, Clone)]
@@ -27,6 +132,45 @@ pub struct Calibration {
 impl Calibration {
     pub fn to_grams(&self, raw: i32) -> f32 {
         self.gain_g_per_count * ((raw - self.zero_counts) as f32) + self.offset_g
+    }
+    /// Convert raw counts directly to centigrams (cg, where 1 cg = 0.01 g)
+    /// using integer fixed-point arithmetic.
+    ///
+    /// Definition (continuous):
+    ///   grams = gain_g_per_count * (raw - zero_counts) + offset_g
+    ///   centigrams = round(100 * grams)
+    ///
+    /// Implementation (fixed-point):
+    /// - gain_cg_per_count = round(100 * gain_g_per_count)
+    /// - offset_cg = round(100 * offset_g)
+    /// - result_cg = saturating_mul(gain_cg_per_count, raw - zero_counts) + offset_cg
+    ///
+    /// Rationale:
+    /// - Avoids per-sample floating-point math in the control loop.
+    /// - Keeps all controller thresholds and comparisons in one integer unit (cg).
+    /// - Uses saturating arithmetic operations (saturating_sub/mul/add) to avoid
+    ///   overflow on extreme inputs/parameters.
+    ///
+    /// Rounding and error bounds:
+    /// - `gain_g_per_count` and `offset_g` are rounded to the nearest centigram
+    ///   before use. The returned value is typically within ~0.5 cg of
+    ///   `round(100 * to_grams(raw))` given stable parameters.
+    /// - Non-finite parameters (NaN/±Inf) are treated as 0 during quantization.
+    ///
+    /// Units:
+    /// - Input: `raw` is ADC counts.
+    /// - Output: integer centigrams (cg).
+    ///
+    /// Example:
+    /// - If `gain_g_per_count = 0.01`, `zero_counts = 0`, `offset_g = 0.0`,
+    ///   and `raw = 123`, then `to_cg(123) == 123` (i.e., 1.23 g).
+    pub fn to_cg(&self, raw: i32) -> i32 {
+        let delta = raw.saturating_sub(self.zero_counts);
+        let gain_cg_per_count = quantize_to_cg_i32(self.gain_g_per_count);
+        let offset_cg = quantize_to_cg_i32(self.offset_g);
+        gain_cg_per_count
+            .saturating_mul(delta)
+            .saturating_add(offset_cg)
     }
 }
 impl Default for Calibration {
@@ -140,34 +284,48 @@ impl Default for Timeouts {
     }
 }
 
-/// Main core object — owns the Scale/Motor and executes the control loop.
-pub struct Doser {
-    scale: Box<dyn doser_traits::Scale>,
-    motor: Box<dyn doser_traits::Motor>,
+/// Unified core for both dynamic (boxed) and generic (static dispatch) variants.
+pub struct DoserCore<S: doser_traits::Scale, M: doser_traits::Motor> {
+    scale: S,
+    motor: M,
     filter: FilterCfg,
     control: ControlCfg,
     safety: SafetyCfg,
     timeouts: Timeouts,
     calibration: Calibration,
-    target_g: f32,
+    // Target in centigrams (fixed-point: 1 = 0.01 g)
+    target_cg: i32,
     // Unified clock for deterministic time in tests
     pub(crate) clock: Arc<dyn Clock + Send + Sync>,
     // Epoch Instant for computing monotonic milliseconds
     epoch: Instant,
 
-    last_weight_g: f32,
+    // Last observed weight in centigrams
+    last_weight_cg: i32,
     settled_since_ms: Option<u64>,
     // Track when the dosing run started to enforce a max runtime (ms since epoch at begin)
     start_ms: u64,
-    // Buffers for filtering
-    ma_buf: VecDeque<f32>,
-    med_buf: VecDeque<f32>,
+    // Buffers for filtering (centigrams)
+    ma_buf: VecDeque<i32>,
+    med_buf: VecDeque<i32>,
+    // Temporary preallocated buffer to compute medians without per-step allocation
+    tmp_med_buf: Vec<i32>,
+    // Cached control-loop sleep period in microseconds to avoid repeated division
+    period_us: u64,
+    // Cached quantized calibration parameters (centigrams per count and offset)
+    cal_gain_cg_per_count: i32,
+    cal_offset_cg: i32,
+    // Cached integer thresholds (centigrams)
+    slow_at_cg: i32,
+    epsilon_cg: i32,
+    max_overshoot_cg: i32,
+    no_progress_epsilon_cg: i32,
     // Motor lifecycle
     motor_started: bool,
     // Optional E-stop callback; if returns true, abort immediately (after debounce)
     estop_check: Option<Box<dyn Fn() -> bool>>,
-    // No-progress watchdog
-    last_progress_w: f32,
+    // No-progress watchdog uses centigrams
+    last_progress_cg: i32,
     last_progress_at_ms: u64,
     // Latch E-stop condition until begin() is called again
     estop_latched: bool,
@@ -176,25 +334,20 @@ pub struct Doser {
     estop_count: u8,
 }
 
-impl core::fmt::Debug for Doser {
+impl<S: doser_traits::Scale, M: doser_traits::Motor> core::fmt::Debug for DoserCore<S, M> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Doser")
-            .field("target_g", &self.target_g)
-            .field("last_weight_g", &self.last_weight_g)
+        f.debug_struct("DoserCore")
+            .field("target_g", &((self.target_cg as f32) / 100.0))
+            .field("last_weight_g", &((self.last_weight_cg as f32) / 100.0))
             .field("motor_started", &self.motor_started)
             .finish()
     }
 }
 
-impl Doser {
-    /// Start building a Doser.
-    pub fn builder() -> DoserBuilder<Missing, Missing, Missing> {
-        DoserBuilder::default()
-    }
-
+impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
     /// Return the last observed weight in grams.
     pub fn last_weight(&self) -> f32 {
-        self.last_weight_g
+        (self.last_weight_cg as f32) / 100.0
     }
 
     /// Optionally set the tare baseline in raw counts.
@@ -207,6 +360,104 @@ impl Doser {
         &self.filter
     }
 
+    /// Process a pre-sampled raw reading (centers Phase 3 sampler integration).
+    pub fn step_from_raw(&mut self, raw: i32) -> Result<DosingStatus> {
+        if self.estop_latched || self.poll_estop() {
+            if let Err(e) = self.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed on estop");
+            }
+            return Ok(DosingStatus::Aborted(DoserError::State("estop".into())));
+        }
+        let w_cg_raw = self.to_cg_cached(raw);
+        let w_cg = self.apply_filter(w_cg_raw);
+        self.last_weight_cg = w_cg;
+        let err_cg = self.target_cg - w_cg;
+        // unsigned_abs() returns u32, which safely represents |i32::MIN| without overflow.
+        // Equivalent to `err_cg.abs() as u32`, but without the potential panic on i32::MIN.
+        let abs_err_cg = err_cg.unsigned_abs();
+        let now = self.clock.ms_since(self.epoch);
+        if now.saturating_sub(self.start_ms) >= self.safety.max_run_ms {
+            if let Err(e) = self.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed on max-run cap");
+            }
+            return Ok(DosingStatus::Aborted(DoserError::State(
+                "max run time exceeded".into(),
+            )));
+        }
+        if w_cg > self.target_cg + self.max_overshoot_cg {
+            if let Err(e) = self.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed on overshoot");
+            }
+            return Ok(DosingStatus::Aborted(DoserError::State(
+                "max overshoot exceeded".into(),
+            )));
+        }
+        if w_cg + self.epsilon_cg >= self.target_cg {
+            if let Err(e) = self.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed entering settle zone");
+            }
+            // Start settling window unconditionally once in completion zone.
+            if self.settled_since_ms.is_none() {
+                self.settled_since_ms = Some(now);
+            }
+            if let Some(since) = self.settled_since_ms
+                && now.saturating_sub(since) >= self.control.stable_ms
+            {
+                return Ok(DosingStatus::Complete);
+            }
+            // Keep polling while settled window accrues.
+            // Throttle loop to the configured sample rate.
+            self.clock.sleep(Duration::from_micros(self.period_us));
+            return Ok(DosingStatus::Running);
+        } else {
+            // Below target: not in completion zone; reset settle timer
+            self.settled_since_ms = None;
+        }
+        let target_speed = if self.slow_at_cg > 0 && abs_err_cg <= self.slow_at_cg as u32 {
+            let ratio = (abs_err_cg as f32 / self.slow_at_cg as f32).clamp(0.0, 1.0);
+            let min_frac = 0.2_f32;
+            let frac = min_frac + (1.0 - min_frac) * ratio;
+            ((self.control.fine_speed as f32 * frac).max(1.0)) as u32
+        } else {
+            self.control.coarse_speed
+        };
+        if self.safety.no_progress_ms > 0 && self.no_progress_epsilon_cg > 0 && target_speed > 0 {
+            let progress_delta_cg = abs_diff_i32_u32(w_cg, self.last_progress_cg);
+            if progress_delta_cg >= self.no_progress_epsilon_cg as u32 {
+                self.last_progress_cg = w_cg;
+                self.last_progress_at_ms = now;
+            } else if now.saturating_sub(self.last_progress_at_ms) >= self.safety.no_progress_ms {
+                if let Err(e) = self.motor_stop() {
+                    tracing::warn!(error = %e, "motor_stop failed on no-progress watchdog");
+                }
+                return Ok(DosingStatus::Aborted(DoserError::State(
+                    "no progress".into(),
+                )));
+            }
+        }
+        if !self.motor_started {
+            self.motor
+                .start()
+                .map_err(|e| eyre::Report::new(map_hw_error_dyn(&*e)))
+                .wrap_err("motor start")?;
+            self.motor_started = true;
+        }
+        self.motor
+            .set_speed(target_speed)
+            .map_err(|e| eyre::Report::new(map_hw_error_dyn(&*e)))
+            .wrap_err("set_speed")?;
+        self.clock.sleep(Duration::from_micros(self.period_us));
+        Ok(DosingStatus::Running)
+    }
+
+    #[inline]
+    fn to_cg_cached(&self, raw: i32) -> i32 {
+        let delta = raw.saturating_sub(self.calibration.zero_counts);
+        self.cal_gain_cg_per_count
+            .saturating_mul(delta)
+            .saturating_add(self.cal_offset_cg)
+    }
+
     /// Reset per-run state (start time, settling window). Call before a new dose.
     pub fn begin(&mut self) {
         // Reset epoch; subsequent ms are measured from here
@@ -217,9 +468,9 @@ impl Doser {
         // Clear filter state for a fresh run
         self.ma_buf.clear();
         self.med_buf.clear();
-        self.last_weight_g = 0.0;
+        self.last_weight_cg = 0;
         self.motor_started = false;
-        self.last_progress_w = 0.0;
+        self.last_progress_cg = 0;
         self.last_progress_at_ms = now;
         self.estop_latched = false;
         self.estop_count = 0;
@@ -247,52 +498,94 @@ impl Doser {
         }
         self.estop_latched
     }
-
-    fn apply_filter(&mut self, w: f32) -> f32 {
+    fn apply_filter(&mut self, w_cg: i32) -> i32 {
         // Ensure sane window sizes
         let med_win = self.filter.median_window.max(1);
         let ma_win = self.filter.ma_window.max(1);
 
-        // Median prefilter over grams
+        // Median prefilter over centigrams
         let after_median = if med_win > 1 {
-            self.med_buf.push_back(w);
+            self.med_buf.push_back(w_cg);
             if self.med_buf.len() > med_win {
                 self.med_buf.pop_front();
             }
-            let mut tmp: Vec<f32> = self.med_buf.iter().copied().collect();
-            tmp.sort_by(|a, b| a.total_cmp(b));
-            let mid = tmp.len() / 2;
-            if tmp.len() % 2 == 0 {
-                (tmp[mid - 1] + tmp[mid]) / 2.0
+            // Reuse a preallocated buffer to avoid per-step allocations
+            self.tmp_med_buf.clear();
+            self.tmp_med_buf.extend(self.med_buf.iter().copied());
+            self.tmp_med_buf.sort_unstable();
+            let n = self.tmp_med_buf.len();
+            // Invariants (only applicable when med_win > 1, i.e., when this branch executes):
+            // - We just pushed `w_cg` into `med_buf`, so `med_buf.len() >= 1`.
+            // - After the optional pop, `med_buf.len() <= med_win`.
+            // - `tmp_med_buf` is a copy of `med_buf`, so lengths match and `n >= 1`.
+            // The debug assertions below validate these invariants to guard the safe
+            // indexing that follows (accessing `mid` and `mid-1` on even `n`). If future
+            // changes break the push/pop discipline or window sizing, these will trip in
+            // debug builds and surface the logic error early.
+            #[cfg(debug_assertions)]
+            {
+                let med_len = self.med_buf.len();
+                debug_assert!(n > 0, "median buffer unexpectedly empty");
+                debug_assert_eq!(med_len, n);
+                debug_assert!(n <= med_win, "median buffer exceeded window size");
+            }
+            let mid = n / 2;
+            if n % 2 == 0 {
+                // n >= 2 here, so mid >= 1 and mid-1 is safe
+                let a = self.tmp_med_buf[mid - 1];
+                let b = self.tmp_med_buf[mid];
+                // Use a specialized avg(2) helper to avoid any panic path and keep ties away from zero.
+                avg2_round_nearest_i32(a, b)
             } else {
-                tmp[mid]
+                self.tmp_med_buf[mid]
             }
         } else {
-            w
+            w_cg
         };
 
-        // Moving average over the median output
+        // Moving average over the median output (rounded to nearest)
         if ma_win > 1 {
             self.ma_buf.push_back(after_median);
             if self.ma_buf.len() > ma_win {
                 self.ma_buf.pop_front();
             }
-            let sum: f32 = self.ma_buf.iter().copied().sum();
-            sum / (self.ma_buf.len() as f32)
+            // Sum in i128 to avoid overflow for any realistic window size. Even at extreme
+            // values, the average of i32 samples is guaranteed to fit in i32.
+            let sum_i128: i128 = self.ma_buf.iter().map(|&v| v as i128).sum();
+            let len_i32 = self.ma_buf.len() as i32;
+            // Avoid truncating before range checks; prefer the fast i32 path when safe.
+            if len_i32 > 0 {
+                if (i32::MIN as i128..=i32::MAX as i128).contains(&sum_i128) {
+                    div_round_nearest_i32(sum_i128 as i32, len_i32)
+                } else {
+                    let n = len_i32 as i128;
+                    let q = if sum_i128 >= 0 {
+                        (sum_i128 + n / 2) / n
+                    } else {
+                        (sum_i128 - n / 2) / n
+                    };
+                    #[cfg(debug_assertions)]
+                    debug_assert!(
+                        (i32::MIN as i128..=i32::MAX as i128).contains(&q),
+                        "moving-average result out of i32 range"
+                    );
+                    q as i32
+                }
+            } else {
+                0
+            }
         } else {
             after_median
         }
     }
 
-    /// One iteration of the dosing loop:
-    /// - reads the scale with a timeout
-    /// - adjusts motor speed (coarse/fine)
-    /// - tracks settling window inside the hysteresis band
-    /// - returns `Running`, `Complete`, or `Aborted(err)`
+    /// One iteration of the dosing loop
     pub fn step(&mut self) -> Result<DosingStatus> {
         // If previously estopped, keep aborting until reset via begin()
         if self.estop_latched || self.poll_estop() {
-            let _ = self.motor_stop();
+            if let Err(e) = self.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed on estop");
+            }
             return Ok(DosingStatus::Aborted(DoserError::State("estop".into())));
         }
 
@@ -304,64 +597,63 @@ impl Doser {
             .map_err(|e| eyre::Report::new(map_hw_error_dyn(&*e)))
             .wrap_err("reading scale")?;
 
-        // Apply calibration (raw counts -> grams) and filtering
-        let w_raw = self.calibration.to_grams(raw);
-        let w = self.apply_filter(w_raw);
+        // Apply calibration (raw counts -> centigrams) via cached integer path and filtering
+        let w_cg_raw = self.to_cg_cached(raw);
+        let w_cg = self.apply_filter(w_cg_raw);
 
-        self.last_weight_g = w;
-        let err = self.target_g - w;
-        let abs_err = err.abs();
+        self.last_weight_cg = w_cg;
+        let err_cg = self.target_cg - w_cg;
+        let abs_err_cg = err_cg.unsigned_abs();
 
         let now = self.clock.ms_since(self.epoch);
 
         // 1a) hard runtime cap (>= to allow deterministic tests with 0ms)
         if now.saturating_sub(self.start_ms) >= self.safety.max_run_ms {
-            let _ = self.motor_stop();
+            if let Err(e) = self.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed on max-run cap");
+            }
             return Ok(DosingStatus::Aborted(DoserError::State(
                 "max run time exceeded".into(),
             )));
         }
 
         // 1b) excessive overshoot guard
-        if w > self.target_g + self.safety.max_overshoot_g {
-            let _ = self.motor_stop();
+        if w_cg > self.target_cg + self.max_overshoot_cg {
+            if let Err(e) = self.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed on overshoot");
+            }
             return Ok(DosingStatus::Aborted(DoserError::State(
                 "max overshoot exceeded".into(),
             )));
         }
 
         // 2) Reached or exceeded target? Stop and settle (asymmetric completion)
-        if w + self.control.epsilon_g >= self.target_g {
-            let _ = self.motor_stop();
+        if w_cg + self.epsilon_cg >= self.target_cg {
+            if let Err(e) = self.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed entering settle zone");
+            }
             // Start settling window unconditionally once in completion zone.
             if self.settled_since_ms.is_none() {
                 self.settled_since_ms = Some(now);
             }
-            if let Some(since) = self.settled_since_ms {
-                let stable_for_ms = now.saturating_sub(since);
-                if stable_for_ms >= self.control.stable_ms {
-                    return Ok(DosingStatus::Complete);
-                }
+            if let Some(since) = self.settled_since_ms
+                && now.saturating_sub(since) >= self.control.stable_ms
+            {
+                return Ok(DosingStatus::Complete);
             }
             // Keep polling while settled window accrues.
             // Throttle loop to the configured sample rate.
-            let period_us = 1_000_000u64 / (self.filter.sample_rate_hz as u64);
-            self.clock.sleep(Duration::from_micros(period_us));
+            self.clock.sleep(Duration::from_micros(self.period_us));
             return Ok(DosingStatus::Running);
         } else {
             // Below target: not in completion zone; reset settle timer
             self.settled_since_ms = None;
         }
 
-        // 3) choose coarse or fine speed
-        let target_speed = if abs_err <= self.control.slow_at_g {
-            // Proportional taper: as error -> 0, reduce speed toward a floor (20% of fine_speed)
-            let ratio = if self.control.slow_at_g > 0.0 {
-                (abs_err / self.control.slow_at_g).clamp(0.0, 1.0)
-            } else {
-                1.0
-            };
-            let min_frac = 0.2_f32; // floor at 20% of fine speed to keep motion
+        // 3) choose coarse or fine speed (use proportional taper with integer error)
+        let target_speed = if self.slow_at_cg > 0 && abs_err_cg <= self.slow_at_cg as u32 {
+            let ratio = (abs_err_cg as f32 / self.slow_at_cg as f32).clamp(0.0, 1.0);
+            let min_frac = 0.2_f32; // floor at 20% of fine speed
             let frac = min_frac + (1.0 - min_frac) * ratio; // [min_frac, 1.0]
             ((self.control.fine_speed as f32 * frac).max(1.0)) as u32
         } else {
@@ -369,15 +661,15 @@ impl Doser {
         };
 
         // 3a) no-progress watchdog (only while motor is commanded to run)
-        if self.safety.no_progress_ms > 0
-            && self.safety.no_progress_epsilon_g > 0.0
-            && target_speed > 0
-        {
-            if (w - self.last_progress_w).abs() >= self.safety.no_progress_epsilon_g {
-                self.last_progress_w = w;
+        if self.safety.no_progress_ms > 0 && self.no_progress_epsilon_cg > 0 && target_speed > 0 {
+            let progress_delta_cg = abs_diff_i32_u32(w_cg, self.last_progress_cg);
+            if progress_delta_cg >= self.no_progress_epsilon_cg as u32 {
+                self.last_progress_cg = w_cg;
                 self.last_progress_at_ms = now;
             } else if now.saturating_sub(self.last_progress_at_ms) >= self.safety.no_progress_ms {
-                let _ = self.motor_stop();
+                if let Err(e) = self.motor_stop() {
+                    tracing::warn!(error = %e, "motor_stop failed on no-progress watchdog");
+                }
                 return Ok(DosingStatus::Aborted(DoserError::State(
                     "no progress".into(),
                 )));
@@ -399,10 +691,69 @@ impl Doser {
             .wrap_err("set_speed")?;
 
         // Throttle loop to the configured sample rate.
-        let period_us = 1_000_000u64 / (self.filter.sample_rate_hz as u64);
-        self.clock.sleep(Duration::from_micros(period_us));
+        self.clock.sleep(Duration::from_micros(self.period_us));
 
         Ok(DosingStatus::Running)
+    }
+}
+
+/// Public dynamic (boxed) doser that preserves the existing API via composition.
+pub struct Doser {
+    inner: DoserCore<Box<dyn doser_traits::Scale>, Box<dyn doser_traits::Motor>>,
+}
+
+impl core::fmt::Debug for Doser {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Doser")
+            .field("target_g", &((self.inner.target_cg as f32) / 100.0))
+            .field(
+                "last_weight_g",
+                &((self.inner.last_weight_cg as f32) / 100.0),
+            )
+            .field("motor_started", &self.inner.motor_started)
+            .finish()
+    }
+}
+
+impl Doser {
+    /// Start building a Doser.
+    pub fn builder() -> DoserBuilder<Missing, Missing, Missing> {
+        DoserBuilder::default()
+    }
+
+    /// Return the last observed weight in grams.
+    pub fn last_weight(&self) -> f32 {
+        self.inner.last_weight()
+    }
+
+    /// Optionally set the tare baseline in raw counts.
+    pub fn set_tare_counts(&mut self, zero_counts: i32) {
+        self.inner.set_tare_counts(zero_counts);
+    }
+
+    /// Return the configured filter parameters (currently informational).
+    pub fn filter_cfg(&self) -> &FilterCfg {
+        self.inner.filter_cfg()
+    }
+
+    /// Process a pre-sampled raw reading (centers Phase 3 sampler integration).
+    pub fn step_from_raw(&mut self, raw: i32) -> Result<DosingStatus> {
+        self.inner.step_from_raw(raw)
+    }
+
+    /// Reset per-run state (start time, settling window). Call before a new dose.
+    pub fn begin(&mut self) {
+        self.inner.begin();
+    }
+
+    /// One iteration of the dosing loop
+    pub fn step(&mut self) -> Result<DosingStatus> {
+        self.inner.step()
+    }
+
+    /// Stop the motor (best-effort).
+    pub fn motor_stop(&mut self) -> Result<()> {
+        self.inner.motor_stop()
     }
 }
 
@@ -551,29 +902,54 @@ impl<S, M, T> DoserBuilder<S, M, T> {
         let epoch = clock.now();
         let now = clock.ms_since(epoch); // 0
 
+        // Precompute loop period (us)
+        let period_us = crate::util::period_us(filter.sample_rate_hz);
+
+        // Precompute integer thresholds in centigrams
+        let to_cg = |g: f32| ((g * 100.0).round()) as i32;
+        let target_cg = to_cg(target_g);
+        let epsilon_cg = to_cg(control.epsilon_g);
+        let max_overshoot_cg = to_cg(safety.max_overshoot_g);
+        let no_progress_epsilon_cg = to_cg(safety.no_progress_epsilon_g);
+        let slow_at_cg = to_cg(control.slow_at_g);
+
+        // Precompute quantized calibration before moving `calibration` into the struct
+        let cal_gain_cg_per_count = quantize_to_cg_i32(calibration.gain_g_per_count);
+        let cal_offset_cg = quantize_to_cg_i32(calibration.offset_g);
+
         Ok(Doser {
-            scale,
-            motor,
-            filter,
-            control,
-            safety,
-            timeouts,
-            calibration,
-            target_g,
-            clock,
-            epoch,
-            last_weight_g: 0.0,
-            settled_since_ms: None,
-            start_ms: now,
-            ma_buf: VecDeque::with_capacity(ma_cap),
-            med_buf: VecDeque::with_capacity(med_cap),
-            motor_started: false,
-            estop_check: self.estop_check,
-            last_progress_w: 0.0,
-            last_progress_at_ms: now,
-            estop_latched: false,
-            estop_debounce_n,
-            estop_count: 0,
+            inner: DoserCore {
+                scale,
+                motor,
+                filter,
+                control,
+                safety,
+                timeouts,
+                calibration,
+                target_cg,
+                clock,
+                epoch,
+                last_weight_cg: 0,
+                settled_since_ms: None,
+                start_ms: now,
+                ma_buf: VecDeque::with_capacity(ma_cap),
+                med_buf: VecDeque::with_capacity(med_cap),
+                tmp_med_buf: Vec::with_capacity(med_cap),
+                period_us,
+                cal_gain_cg_per_count,
+                cal_offset_cg,
+                slow_at_cg,
+                epsilon_cg,
+                max_overshoot_cg,
+                no_progress_epsilon_cg,
+                motor_started: false,
+                estop_check: self.estop_check,
+                last_progress_cg: 0,
+                last_progress_at_ms: now,
+                estop_latched: false,
+                estop_debounce_n,
+                estop_count: 0,
+            },
         })
     }
 }
@@ -761,4 +1137,123 @@ impl DoserBuilder<Set, Set, Set> {
     pub fn build(self) -> Result<Doser> {
         self.try_build()
     }
+}
+
+/// Generic, statically-dispatched alias using the unified core.
+pub type DoserG<S, M> = DoserCore<S, M>;
+
+/// Build a generic, statically-dispatched DoserG from concrete scale and motor.
+#[allow(clippy::too_many_arguments)]
+pub fn build_doser<S, M>(
+    scale: S,
+    motor: M,
+    filter: FilterCfg,
+    control: ControlCfg,
+    safety: SafetyCfg,
+    timeouts: Timeouts,
+    calibration: Option<Calibration>,
+    target_g: f32,
+    estop_check: Option<Box<dyn Fn() -> bool>>,
+    clock: Option<Box<dyn Clock + Send + Sync>>,
+    estop_debounce_n: Option<u8>,
+) -> Result<DoserG<S, M>>
+where
+    S: doser_traits::Scale + 'static,
+    M: doser_traits::Motor + 'static,
+{
+    if !(0.1..=5000.0).contains(&target_g) {
+        return Err(eyre::Report::new(BuildError::InvalidConfig(
+            "target grams out of range",
+        )));
+    }
+    if control.hysteresis_g.is_sign_negative() {
+        return Err(eyre::Report::new(BuildError::InvalidConfig(
+            "hysteresis_g must be >= 0",
+        )));
+    }
+    if control.slow_at_g.is_sign_negative() {
+        return Err(eyre::Report::new(BuildError::InvalidConfig(
+            "slow_at_g must be >= 0",
+        )));
+    }
+    if control.coarse_speed == 0 || control.fine_speed == 0 {
+        return Err(eyre::Report::new(BuildError::InvalidConfig(
+            "motor speeds must be > 0",
+        )));
+    }
+    if timeouts.sensor_ms == 0 {
+        return Err(eyre::Report::new(BuildError::InvalidConfig(
+            "sensor_ms must be >= 1",
+        )));
+    }
+    if safety.max_overshoot_g.is_sign_negative() {
+        return Err(eyre::Report::new(BuildError::InvalidConfig(
+            "max_overshoot_g must be >= 0",
+        )));
+    }
+    if safety.no_progress_epsilon_g.is_sign_negative() {
+        return Err(eyre::Report::new(BuildError::InvalidConfig(
+            "no_progress_epsilon_g must be > 0",
+        )));
+    }
+    if filter.sample_rate_hz == 0 {
+        return Err(eyre::Report::new(BuildError::InvalidConfig(
+            "sample_rate_hz must be > 0",
+        )));
+    }
+    let calibration = calibration.unwrap_or_default();
+    let clock: Arc<dyn Clock + Send + Sync> = match clock {
+        Some(b) => Arc::from(b),
+        None => Arc::new(MonotonicClock::new()),
+    };
+    let estop_debounce_n = estop_debounce_n.unwrap_or(2);
+
+    let ma_cap = filter.ma_window.max(1);
+    let med_cap = filter.median_window.max(1);
+    let epoch = clock.now();
+    let now = clock.ms_since(epoch);
+    let period_us = crate::util::period_us(filter.sample_rate_hz);
+    let to_cg = |g: f32| ((g * 100.0).round()) as i32;
+    let target_cg = to_cg(target_g);
+    let epsilon_cg = to_cg(control.epsilon_g);
+    let max_overshoot_cg = to_cg(safety.max_overshoot_g);
+    let no_progress_epsilon_cg = to_cg(safety.no_progress_epsilon_g);
+    let slow_at_cg = to_cg(control.slow_at_g);
+
+    // Precompute quantized calibration before moving `calibration` into the struct
+    let cal_gain_cg_per_count = quantize_to_cg_i32(calibration.gain_g_per_count);
+    let cal_offset_cg = quantize_to_cg_i32(calibration.offset_g);
+
+    Ok(DoserG {
+        scale,
+        motor,
+        filter,
+        control,
+        safety,
+        timeouts,
+        calibration,
+        target_cg,
+        clock,
+        epoch,
+        last_weight_cg: 0,
+        settled_since_ms: None,
+        start_ms: now,
+        ma_buf: VecDeque::with_capacity(ma_cap),
+        med_buf: VecDeque::with_capacity(med_cap),
+        tmp_med_buf: Vec::with_capacity(med_cap),
+        period_us,
+        cal_gain_cg_per_count,
+        cal_offset_cg,
+        slow_at_cg,
+        epsilon_cg,
+        max_overshoot_cg,
+        no_progress_epsilon_cg,
+        motor_started: false,
+        estop_check,
+        last_progress_cg: 0,
+        last_progress_at_ms: now,
+        estop_latched: false,
+        estop_debounce_n,
+        estop_count: 0,
+    })
 }

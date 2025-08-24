@@ -104,7 +104,7 @@ motor_step = 13
 motor_dir = 19
 # Optional enable (active-low)
 motor_en = 21
-# Optional E-Stop input (active-low)
+# Optional E-Stop input (active-low by default; configurable below)
 estop_in = 26
 
 [filter]
@@ -134,6 +134,21 @@ no_progress_ms = 1200
 file = "doser.log"
 # Log rotation policy: "never" | "daily" | "hourly"
 rotation = "never"
+
+# Optional hardware-specific settings
+[hardware]
+# Max time to wait for HX711 data-ready before returning a timeout
+sensor_read_timeout_ms = 150
+
+# Optional E‑stop configuration (used when pins.estop_in is set)
+[estop]
+active_low = true     # treat low level as pressed
+debounce_n = 2        # consecutive polls required to latch
+poll_ms = 5           # polling interval for GPIO-backed checker
+
+# Runner/orchestration defaults: "sampler" (default) or "direct"
+[runner]
+mode = "sampler"
 ```
 
 Notes:
@@ -141,6 +156,7 @@ Notes:
 - Missing [safety] values fall back to safe defaults; CLI flags take precedence.
 - no_progress_ms must be >= 1 (0 is invalid).
 - Console log level is controlled by the CLI flag `--log-level` or `RUST_LOG`. The `[logging]` section configures only the optional file sink (`file`, `rotation`).
+- On hardware builds, sampling is event-driven using HX711 DRDY; in simulation, sampling is paced by `filter.sample_rate_hz`.
 
 ## Precision tuning
 
