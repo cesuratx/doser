@@ -518,6 +518,10 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             // - We just pushed `w_cg` into `med_buf`, so `med_buf.len() >= 1`.
             // - After the optional pop, `med_buf.len() <= med_win`.
             // - `tmp_med_buf` is a copy of `med_buf`, so lengths match and `n >= 1`.
+            // The debug assertions below validate these invariants to guard the safe
+            // indexing that follows (accessing `mid` and `mid-1` on even `n`). If future
+            // changes break the push/pop discipline or window sizing, these will trip in
+            // debug builds and surface the logic error early.
             #[cfg(debug_assertions)]
             {
                 let med_len = self.med_buf.len();

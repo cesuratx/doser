@@ -12,10 +12,7 @@ pub const MILLIS_PER_SEC: u64 = 1_000;
 ///   and is floored to 1µs as the minimum representable unit.
 #[inline]
 pub fn period_us(hz: u32) -> u64 {
-    assert!(
-        hz > 0,
-        "sample_rate_hz must be > 0; use validation to enforce this"
-    );
+    assert!(hz > 0, "hz must be > 0; validate at callsite");
     (MICROS_PER_SEC / u64::from(hz)).max(1)
 }
 
@@ -27,10 +24,7 @@ pub fn period_us(hz: u32) -> u64 {
 ///   at higher rates, use `period_us`.
 #[inline]
 pub fn period_ms(hz: u32) -> u64 {
-    assert!(
-        hz > 0,
-        "sample_rate_hz must be > 0; use validation to enforce this"
-    );
+    assert!(hz > 0, "hz must be > 0; validate at callsite");
     (MILLIS_PER_SEC / u64::from(hz)).max(1)
 }
 

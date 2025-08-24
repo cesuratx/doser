@@ -675,8 +675,20 @@ fn run_dose(
 #[cfg(target_os = "linux")]
 fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize>) {
     use libc::{
-        mlockall, sched_get_priority_max, sched_get_priority_min, sched_param, sched_setscheduler,
-        CPU_ISSET, CPU_SET, CPU_ZERO, MCL_CURRENT, MCL_FUTURE, SCHED_FIFO,
+        // Memory locking
+        mlockall,
+        // Scheduling (FIFO priority)
+        sched_get_priority_max,
+        sched_get_priority_min,
+        sched_param,
+        sched_setscheduler,
+        // CPU affinity helpers
+        CPU_ISSET,
+        CPU_SET,
+        CPU_ZERO,
+        MCL_CURRENT,
+        MCL_FUTURE,
+        SCHED_FIFO,
     };
     use std::sync::OnceLock;
     static RT_ONCE: OnceLock<()> = OnceLock::new();

@@ -27,14 +27,14 @@ fn period_ms_minimum_and_resolution_note() {
 // In debug builds we assert on hz=0 to catch misconfiguration early.
 #[cfg(debug_assertions)]
 #[test]
-#[should_panic(expected = "sample_rate_hz must be > 0")]
+#[should_panic(expected = "hz must be > 0")]
 fn period_us_panics_on_zero_hz_in_debug() {
     let _ = period_us(0);
 }
 
 #[cfg(debug_assertions)]
 #[test]
-#[should_panic(expected = "sample_rate_hz must be > 0")]
+#[should_panic(expected = "hz must be > 0")]
 fn period_ms_panics_on_zero_hz_in_debug() {
     let _ = period_ms(0);
 }

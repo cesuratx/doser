@@ -26,8 +26,8 @@ pub enum SamplingMode {
 ///   doesn't immediately trip the watchdog. There is no hard upper bound enforced here;
 ///   extremely large periods are handled via saturating arithmetic and capping to `max_run_ms`.
 /// - `max_run_ms`: configured hard cap for a dosing run. Expected ≥ 1. The stall threshold
-///   is kept strictly below this cap when `max_run_ms` is smaller than two periods to avoid
-///   underflow and guarantee the stall watchdog can still fire before the hard cap.
+///   is kept strictly below this cap when `max_run_ms` is smaller than two periods to ensure
+///   the threshold remains meaningful and the stall watchdog can still fire before the hard cap.
 ///
 /// Rationale:
 /// - Start from a "fast" threshold based on the sensor timeout (4x) to catch stalls promptly.
@@ -203,7 +203,7 @@ where
 
     let period_us = crate::util::period_us(filter.sample_rate_hz);
     let period_ms = crate::util::period_ms(filter.sample_rate_hz);
-    // Bound stall threshold by max_run_ms to avoid underflow
+    // Bound stall threshold by max_run_ms to keep it meaningful and allow early watchdog firing
     let stall_threshold_ms =
         compute_stall_threshold_ms(timeouts.sensor_ms, period_ms, safety.max_run_ms);
 
