@@ -673,6 +673,12 @@ fn run_dose(
 }
 
 #[cfg(target_os = "linux")]
+// Capacity of cpu_set_t in CPU indices (bits). cpu_set_t is a fixed-size bitset; its
+// usable CPU index range is the number of bits it can hold. size_of returns bytes,
+// so multiply by 8 to get bits.
+const MAX_CPUSET_BITS: usize = std::mem::size_of::<libc::cpu_set_t>() * 8;
+
+#[cfg(target_os = "linux")]
 fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize>) {
     use libc::{
         // Memory locking
@@ -802,10 +808,7 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         online_cpus: &OnceLock<libc::c_long>,
         mask: &OnceLock<libc::cpu_set_t>,
     ) -> std::io::Result<()> {
-        // Capacity of cpu_set_t in CPU indices (bits). cpu_set_t is a fixed-size bitset; its
-        // usable CPU index range is the number of bits it can hold. size_of returns bytes,
-        // so multiply by 8 to get bits.
-        const MAX_CPUSET_BITS: usize = std::mem::size_of::<libc::cpu_set_t>() * 8;
+        // Capacity reference: see module-level MAX_CPUSET_BITS.
         // Cache online CPUs
         let _ = online_cpus.get_or_init(|| unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) });
         // Get current allowed mask; on failure, fallback to [0..online_cpus)
