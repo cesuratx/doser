@@ -132,50 +132,40 @@ mod pacing {
                 use libc::{
                     CLOCK_MONOTONIC, TIMER_ABSTIME, clock_gettime, clock_nanosleep, timespec,
                 };
-                // Get current monotonic time
                 unsafe {
                     let mut now_ts = timespec {
                         tv_sec: 0,
                         tv_nsec: 0,
                     };
                     if clock_gettime(CLOCK_MONOTONIC, &mut now_ts) == 0 {
-                        // Compute absolute target = now_ts + delta.
-                        // Note: Avoid casting Duration::as_nanos() to i128, which can truncate/overflow on very large durations.
-                        // Instead, decompose into seconds and nanoseconds and normalize.
-                        let add_sec = delta.as_secs();
-                        let add_nsec = delta.subsec_nanos() as i64; // < 1e9
-                        // Clamp seconds addition to i64 range to avoid UB on extreme futures.
-                        let add_sec_i64 = i64::try_from(add_sec).unwrap_or(i64::MAX);
-                        let mut sec = now_ts.tv_sec.saturating_add(add_sec_i64);
-                        let mut nsec = now_ts.tv_nsec.saturating_add(add_nsec);
-                        // Normalize nanoseconds into seconds using division to handle any excess
-                        if nsec >= 1_000_000_000 {
-                            let carry = nsec / 1_000_000_000;
-                            sec = sec.saturating_add(carry);
-                            nsec -= carry * 1_000_000_000;
-                        }
+                        let (sec, nsec) =
+                            add_duration_to_timespec(now_ts.tv_sec, now_ts.tv_nsec, delta);
                         let target = timespec {
                             tv_sec: sec,
                             tv_nsec: nsec,
                         };
-                        let rc = clock_nanosleep(
-                            CLOCK_MONOTONIC,
-                            TIMER_ABSTIME,
-                            &target,
-                            std::ptr::null_mut(),
-                        );
-                        if rc == 0 {
-                            return;
+                        loop {
+                            let rc = clock_nanosleep(
+                                CLOCK_MONOTONIC,
+                                TIMER_ABSTIME,
+                                &target,
+                                std::ptr::null_mut(),
+                            );
+                            if rc == 0 {
+                                return;
+                            }
+                            if rc != libc::EINTR {
+                                break;
+                            }
                         }
                     }
                 }
             }
-            // Fallback: relative sleep
             std::thread::sleep(delta);
         }
     }
 
-    #[allow(dead_code)]
+    /// Absolute-deadline pacer; measures jitter and exposes rolling average.
     pub struct Pacer {
         next_deadline: Instant,
         initialized: bool,
@@ -184,12 +174,6 @@ mod pacing {
         pub avg_jitter_us: u32,
     }
 
-    impl Default for Pacer {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-    #[allow(dead_code)]
     impl Pacer {
         pub fn new() -> Self {
             Self {
@@ -200,7 +184,6 @@ mod pacing {
                 avg_jitter_us: 0,
             }
         }
-        #[inline]
         pub fn reset(&mut self) {
             self.initialized = false;
         }
@@ -226,7 +209,7 @@ mod pacing {
             sleeper.sleep_until(mid);
             mid_hook();
             sleeper.sleep_until(self.next_deadline);
-            // measure jitter vs deadline
+
             let now = sleeper.now();
             let jitter = if now >= self.next_deadline {
                 now - self.next_deadline
@@ -235,7 +218,6 @@ mod pacing {
             };
             self.jitter_accum_us = self.jitter_accum_us.saturating_add(jitter.as_micros());
             self.jitter_count = self.jitter_count.saturating_add(1);
-            // advance deadline for next cycle
             self.next_deadline += period;
             if self.jitter_count >= 256 {
                 let avg = (self.jitter_accum_us / (self.jitter_count as u128)) as u32;
@@ -248,12 +230,73 @@ mod pacing {
             }
         }
 
-        /// Convenience: step without a mid hook.
         pub fn step<S: Sleeper>(&mut self, sleeper: &S, period_us: u64) -> Option<u32> {
             self.step_with(sleeper, period_us, || {})
         }
     }
 
+    /// Add a Duration to a timespec-like (sec, nsec) pair, normalizing nanoseconds and saturating seconds.
+    #[inline]
+    fn add_duration_to_timespec(now_sec: i64, now_nsec: i64, delta: Duration) -> (i64, i64) {
+        let add_sec_i64 = i64::try_from(delta.as_secs()).unwrap_or(i64::MAX);
+        let add_nsec_i64 = delta.subsec_nanos() as i64; // < 1e9
+        let mut sec = now_sec.saturating_add(add_sec_i64);
+        let mut nsec = now_nsec.saturating_add(add_nsec_i64);
+        if nsec >= 1_000_000_000 {
+            let carry = nsec / 1_000_000_000;
+            sec = sec.saturating_add(carry);
+            nsec -= carry * 1_000_000_000;
+        } else if nsec < 0 {
+            let borrow = 1 + ((-nsec) / 1_000_000_000);
+            sec = sec.saturating_sub(borrow);
+            nsec += borrow * 1_000_000_000;
+        }
+        (sec, nsec)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn add_no_carry() {
+            let (s, ns) =
+                add_duration_to_timespec(10, 500_000_000, Duration::from_nanos(400_000_000));
+            assert_eq!((s, ns), (10, 900_000_000));
+        }
+        #[test]
+        fn add_single_carry() {
+            let (s, ns) =
+                add_duration_to_timespec(10, 700_000_000, Duration::from_nanos(500_000_000));
+            assert_eq!((s, ns), (11, 200_000_000));
+        }
+        #[test]
+        fn add_multi_second_carry() {
+            let (s, ns) = add_duration_to_timespec(10, 900_000_000, Duration::new(3, 200_000_000));
+            assert_eq!((s, ns), (14, 100_000_000));
+        }
+        #[test]
+        fn saturate_on_large_secs() {
+            let (s, ns) =
+                add_duration_to_timespec(i64::MAX - 5, 0, Duration::new(u64::MAX, 999_999_999));
+            assert_eq!(s, i64::MAX);
+            assert!(ns < 1_000_000_000);
+        }
+
+        #[test]
+        fn no_drift_after_many_cycles_with_fake_sleep() {
+            let mut pacer = Pacer::new();
+            let sleeper = FakeSleeper::new();
+            let period_us = 1000u64;
+            for _ in 0..10_000u32 {
+                let _ = pacer.step(&sleeper, period_us);
+            }
+            let expected = Duration::from_micros(period_us * 10_000);
+            assert_eq!(sleeper.elapsed(), expected);
+        }
+    }
+
+    // Test-only fake sleeper that advances a virtual clock.
     #[cfg(test)]
     pub struct FakeSleeper {
         origin: Instant,
@@ -280,23 +323,6 @@ mod pacing {
             let mut off = self.offset.lock().unwrap();
             let dur = deadline.saturating_duration_since(self.origin);
             *off = dur;
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        #[test]
-        fn no_drift_after_many_cycles_with_fake_sleep() {
-            let mut pacer = Pacer::new();
-            let sleeper = FakeSleeper::new();
-            let period_us = 1000u64;
-            for _ in 0..10_000u32 {
-                let _ = pacer.step(&sleeper, period_us);
-            }
-            // Expect elapsed to be exactly N*period with the fake sleeper
-            let expected = Duration::from_micros(period_us * 10_000);
-            assert_eq!(sleeper.elapsed(), expected);
         }
     }
 }

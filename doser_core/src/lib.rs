@@ -898,14 +898,16 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
         }
 
         // inflight_cg = round(dw_cg * pred_latency_ms / dt_ms)
-        let num: i128 = (dw_cg as i128) * (self.pred_latency_ms as i128);
-        let den: i128 = (dt_ms as i128).max(1);
-        let inflight_i128 = if num >= 0 {
-            (num + den / 2) / den
+        // Use i64 with saturating_mul; preserve sign-aware rounding semantics.
+        let num: i64 = (dw_cg as i64).saturating_mul(self.pred_latency_ms as i64);
+        let den: i64 = (dt_ms as i64).max(1);
+        let half = den >> 1;
+        let inflight_i64 = if num >= 0 {
+            (num + half) / den
         } else {
-            (num - den / 2) / den
+            (num - half) / den
         };
-        let inflight_cg = inflight_i128.clamp(i32::MIN as i128, i32::MAX as i128) as i32;
+        let inflight_cg = inflight_i64.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
 
         let predicted = w_cg
             .saturating_add(inflight_cg)

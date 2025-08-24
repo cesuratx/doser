@@ -416,23 +416,25 @@ fn real_main() -> eyre::Result<()> {
             // Attempt RT elevation on Linux when built with hardware; warn on failure
             #[cfg(all(target_os = "linux", feature = "hardware", feature = "rt"))]
             {
-                use libc::{SCHED_FIFO, sched_get_priority_min, sched_param, sched_setscheduler};
+                use libc::{
+                    SCHED_FIFO, sched_get_priority_max, sched_get_priority_min, sched_param,
+                    sched_setscheduler,
+                };
                 unsafe {
-                    let prio = sched_get_priority_min(SCHED_FIFO);
-                    if prio < 0 {
+                    let minp = sched_get_priority_min(SCHED_FIFO);
+                    let maxp = sched_get_priority_max(SCHED_FIFO);
+                    if minp < 0 || maxp < 0 || minp > maxp {
                         eprintln!("SCHED_FIFO not available; falling back to normal scheduling.");
                     } else {
-                        // Use saturating add and clamp within scheduler bounds
-                        let mut req = prio.saturating_add(1);
-                        let maxp = sched_get_priority_max(SCHED_FIFO);
-                        if maxp >= 0 {
-                            if req > maxp {
-                                req = maxp;
-                            }
-                            if req < prio {
-                                req = prio;
-                            }
+                        // Request a low FIFO prio above min, clamped to [minp, maxp]
+                        let mut req = minp.saturating_add(1);
+                        if req > maxp {
+                            req = maxp;
                         }
+                        if req < minp {
+                            req = minp;
+                        }
+
                         let mut param = sched_param {
                             sched_priority: req,
                         };
@@ -440,7 +442,6 @@ fn real_main() -> eyre::Result<()> {
                         if rc != 0 {
                             let err = std::io::Error::last_os_error();
                             let code = err.raw_os_error().unwrap_or(0);
-                            // Add actionable hints for common failures
                             if code == libc::EPERM {
                                 eprintln!(
                                     "Realtime scheduling denied (EPERM). Hint: needs CAP_SYS_NICE or root and an adequate RLIMIT_RTPRIO. ({err})"

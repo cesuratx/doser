@@ -304,33 +304,69 @@ impl Calibration {
         // Initial fit
         let pts: Vec<(i64, f32)> = rows.iter().map(|r| (r.raw, r.grams)).collect();
         let (a0, b0) = fit(&pts)?;
-        // Compute residuals and robust sigma estimate (RMS of residuals)
-        let mut residuals: Vec<f64> = Vec::with_capacity(pts.len());
+        // Compute robust sigma estimate (RMS of residuals) without allocating residuals
         let mut sumsq: f64 = 0.0;
         for (x, y) in &pts {
             let r = (*y as f64) - (a0 * (*x as f64) + b0);
             sumsq += r * r;
-            residuals.push(r);
         }
-        let rms = if residuals.is_empty() {
+        let n_pts = pts.len();
+        let rms = if n_pts == 0 {
             0.0
         } else {
-            let n = residuals.len() as f64;
-            (sumsq / n).sqrt()
-        };
-        // Reject outliers with |residual| > 2σ and refit if at least 2 remain
-        let filtered: Vec<(i64, f32)> = if rms > 0.0 {
-            pts.iter()
-                .zip(residuals.iter())
-                .filter(|&(_, &r)| r.abs() <= 2.0 * rms)
-                .map(|(p, _)| *p)
-                .collect()
-        } else {
-            pts.clone()
+            (sumsq / (n_pts as f64)).sqrt()
         };
 
-        let (a, b) = if filtered.len() >= 2 && filtered.len() < pts.len() {
-            fit(&filtered)?
+        // Reject outliers with |residual| > 2σ and refit if at least 2 remain, using two filtered passes (no Vec)
+        let (a, b) = if rms > 0.0 {
+            // Count inliers
+            let mut count = 0usize;
+            for (x, y) in &pts {
+                let r = (*y as f64) - (a0 * (*x as f64) + b0);
+                if r.abs() <= 2.0 * rms {
+                    count += 1;
+                }
+            }
+            if count >= 2 && count < n_pts {
+                // First pass: sums
+                let mut sum_x: f64 = 0.0;
+                let mut sum_y: f64 = 0.0;
+                for (x, y) in &pts {
+                    let r = (*y as f64) - (a0 * (*x as f64) + b0);
+                    if r.abs() <= 2.0 * rms {
+                        sum_x += *x as f64;
+                        sum_y += *y as f64;
+                    }
+                }
+                let n = count as f64;
+                let mean_x = sum_x / n;
+                let mean_y = sum_y / n;
+                // Second pass: sxx, sxy
+                let mut sxx: f64 = 0.0;
+                let mut sxy: f64 = 0.0;
+                for (x, y) in &pts {
+                    let r = (*y as f64) - (a0 * (*x as f64) + b0);
+                    if r.abs() <= 2.0 * rms {
+                        let dx = (*x as f64) - mean_x;
+                        let dy = (*y as f64) - mean_y;
+                        sxx += dx * dx;
+                        sxy += dx * dy;
+                    }
+                }
+                if !sxx.is_finite() || sxx == 0.0 {
+                    (a0, b0)
+                } else {
+                    let a = sxy / sxx;
+                    if !a.is_finite() || a == 0.0 {
+                        (a0, b0)
+                    } else {
+                        let b = mean_y - a * mean_x;
+                        (a, b)
+                    }
+                }
+            } else {
+                (a0, b0)
+            }
         } else {
             (a0, b0)
         };
