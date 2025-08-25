@@ -1,4 +1,4 @@
-use crate::error::{DoserError, Result as CoreResult};
+use crate::error::{AbortReason, DoserError, Result as CoreResult};
 use crate::sampler::Sampler;
 use crate::{Calibration, ControlCfg, DosingStatus, FilterCfg, SafetyCfg, Timeouts};
 use doser_traits::clock::MonotonicClock;
@@ -258,8 +258,8 @@ where
             if let Err(e) = doser.motor_stop() {
                 tracing::warn!(error = %e, "motor_stop failed on max-run cap");
             }
-            return Err(crate::error::Report::new(DoserError::State(
-                "max run time exceeded".into(),
+            return Err(crate::error::Report::new(DoserError::Abort(
+                AbortReason::MaxRuntime,
             )));
         }
 

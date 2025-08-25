@@ -1,9 +1,9 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::trace;
 
-use crate::error::{HwError, Result};
+use crate::error::Result;
 use crate::util::wait_until_low_with_timeout;
-use doser_traits::clock::{Clock, MonotonicClock};
+use doser_traits::clock::MonotonicClock;
 
 pub struct Hx711 {
     dt: rppal::gpio::InputPin,

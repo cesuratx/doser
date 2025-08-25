@@ -1,7 +1,7 @@
 [package]
 name = "doser_cli"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 
 [dependencies]
 # CLI
@@ -20,8 +20,8 @@ tracing-subscriber = { version = "0.3", features = [
 ] }
 tracing-appender = "0.2"
 
-# Parse the Config TOML text right here
-toml = "0.8"
+# Parse the Config TOML text right here (use workspace-pinned version)
+toml = { workspace = true }
 
 # Workspace crates
 doser_core = { path = "../doser_core" }
@@ -32,6 +32,7 @@ doser_hardware = { path = "../doser_hardware" }
 [features]
 default = []
 hardware = ["doser_hardware/hardware"]
+rt = ["doser_hardware/rt"]
 
 [dev-dependencies]
 assert_cmd = "2"

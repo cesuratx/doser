@@ -1,5 +1,26 @@
 use thiserror::Error;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AbortReason {
+    Estop,
+    NoProgress,
+    MaxRuntime,
+    Overshoot,
+    MaxAttempts,
+}
+
+impl core::fmt::Display for AbortReason {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            AbortReason::Estop => write!(f, "estop"),
+            AbortReason::NoProgress => write!(f, "no progress"),
+            AbortReason::MaxRuntime => write!(f, "max run time exceeded"),
+            AbortReason::Overshoot => write!(f, "max overshoot exceeded"),
+            AbortReason::MaxAttempts => write!(f, "max attempts exceeded"),
+        }
+    }
+}
+
 #[derive(Debug, Error, Clone)]
 pub enum DoserError {
     #[error("hardware error: {0}")]
@@ -10,8 +31,8 @@ pub enum DoserError {
     Config(String),
     #[error("timeout waiting for sensor")]
     Timeout,
-    #[error("invalid state: {0}")]
-    State(String),
+    #[error("aborted: {0}")]
+    Abort(AbortReason),
     #[error("io error: {0}")]
     Io(String),
 }
@@ -30,3 +51,16 @@ pub enum BuildError {
 
 pub type Result<T> = eyre::Result<T>;
 pub use eyre::Report;
+
+#[cfg(test)]
+mod tests {
+    use super::AbortReason::*;
+    #[test]
+    fn abort_reason_display_is_stable() {
+        assert_eq!(Estop.to_string(), "estop");
+        assert_eq!(NoProgress.to_string(), "no progress");
+        assert_eq!(MaxRuntime.to_string(), "max run time exceeded");
+        assert_eq!(Overshoot.to_string(), "max overshoot exceeded");
+        assert_eq!(MaxAttempts.to_string(), "max attempts exceeded");
+    }
+}

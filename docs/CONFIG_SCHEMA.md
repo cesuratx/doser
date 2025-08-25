@@ -35,9 +35,9 @@ Example minimal file: see `etc/doser_config.toml`.
 - coarse_speed: u32 (> 0). Default: 1200
 - fine_speed: u32 (> 0). Default: 250
 - slow_at_g: f32 (>= 0). Default: 1.0
-- hysteresis_g: f32 (>= 0). Default: 0.05
+- hysteresis_g: f32 (>= 0). Default: 0.07
 - stable_ms: u64 (<= 300_000). Default: 250
-- epsilon_g: f32 ([0.0, 1.0]). Default: 0.0
+- epsilon_g: f32 ([0.0, 1.0]). Default: 0.08
 
 Semantics:
 

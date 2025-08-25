@@ -57,6 +57,7 @@ fn timeouts_map_to_dosererror_timeout() {
         .with_motor(NopMotor)
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg {
+            speed_bands: vec![],
             slow_at_g: 1.0,
             hysteresis_g: 0.1,
             stable_ms: 0,

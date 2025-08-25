@@ -1,4 +1,4 @@
-use crate::{Doser, DosingStatus, error::Result};
+use crate::{Doser, DosingStatus, error::AbortReason, error::DoserError, error::Result};
 
 pub struct DefaultDosingStrategy {
     pub max_attempts: u32,
@@ -26,7 +26,7 @@ impl DefaultDosingStrategy {
             }
             if attempts >= self.max_attempts {
                 let _ = doser.motor_stop();
-                return Err(DoserError::State("max attempts exceeded".into()));
+                return Err(DoserError::Abort(AbortReason::MaxAttempts));
             }
         }
     }

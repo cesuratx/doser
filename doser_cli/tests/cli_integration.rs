@@ -122,3 +122,15 @@ fn cli_reports_bad_calibration_header() {
         .failure()
         .stderr(predicate::str::contains("Invalid headers"));
 }
+
+#[rstest]
+fn cli_self_check_reports_sps() {
+    let dir = tempdir().unwrap();
+    let cfg = write_valid_config(&dir);
+    let mut cmd = Command::cargo_bin("doser_cli").unwrap();
+    cmd.arg("--config").arg(&cfg).arg("self-check");
+    let out = cmd.assert().success().get_output().stdout.clone();
+    let s = String::from_utf8_lossy(&out);
+    // Sim backend increments per read and should easily meet <50ms median for 80 SPS classification
+    assert!(s.contains("Detected HX711 rate: 80 SPS") || s.contains("Detected HX711 rate: 10 SPS"));
+}
