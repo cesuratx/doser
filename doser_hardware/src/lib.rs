@@ -106,10 +106,9 @@ pub mod sim {
     }
 }
 
-// Generic absolute-deadline pacer with pluggable sleeper for testability
-// When not building Linux+hardware, these items may be unused; silence warnings.
-#[cfg_attr(not(all(feature = "hardware", target_os = "linux")), allow(dead_code))]
-mod pacing {
+// Generic absolute-deadline pacer with pluggable sleeper for testability.
+// Expose publicly so other crates/binaries can reuse pacing on any platform.
+pub mod pacing {
     use std::time::{Duration, Instant};
 
     #[allow(dead_code)]
@@ -176,6 +175,12 @@ mod pacing {
         pub avg_jitter_us: u32,
     }
 
+    impl Default for Pacer {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl Pacer {
         pub fn new() -> Self {
             Self {
@@ -238,6 +243,7 @@ mod pacing {
     }
 
     /// Add a Duration to a timespec-like (sec, nsec) pair, normalizing nanoseconds and saturating seconds.
+    #[cfg_attr(not(all(feature = "rt", target_os = "linux")), allow(dead_code))]
     #[inline]
     fn add_duration_to_timespec(now_sec: i64, now_nsec: i64, delta: Duration) -> (i64, i64) {
         let add_sec_i64 = i64::try_from(delta.as_secs()).unwrap_or(i64::MAX);
