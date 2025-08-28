@@ -34,9 +34,11 @@ no_progress_ms = 1200
 
     let cfg = load_toml(toml).expect("parse TOML");
     let err = cfg.validate().expect_err("should reject sample_rate_hz=0");
-    assert!(format!("{err}")
-        .to_lowercase()
-        .contains("sample_rate_hz must be > 0"));
+    assert!(
+        format!("{err}")
+            .to_lowercase()
+            .contains("sample_rate_hz must be > 0")
+    );
 }
 
 #[test]

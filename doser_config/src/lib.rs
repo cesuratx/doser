@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use serde::de::Deserializer;
 
 /// Calibration CSV schema.
 ///
@@ -30,6 +31,9 @@ pub struct FilterCfg {
     pub ma_window: usize,
     pub median_window: usize,
     pub sample_rate_hz: u32,
+    /// Optional EMA smoothing factor; when set, EMA is used in the core smoothing stage.
+    /// Range: (0.0, 1.0]. If absent or <= 0, EMA is disabled.
+    pub ema_alpha: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,11 +46,22 @@ pub struct ControlCfg {
     pub stable_ms: u64,
     /// Additional control epsilon in grams used for stability/approach decisions
     pub epsilon_g: f32,
+    /// Optional speed table. Accepts either:
+    /// - array of tables: [{ threshold_g = 1.0, sps = 1100 }, ...]
+    /// - array of tuples: [[1.0, 1100], [0.5, 450], ...]
+    #[serde(default, deserialize_with = "de_speed_bands")]
+    pub speed_bands: Vec<(f32, u32)>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct Timeouts {
+    /// Sampling timeout per read (ms). Also accepts alias "sensor_ms".
+    #[serde(alias = "sensor_ms")]
     pub sample_ms: u64,
+    /// Optional settle window override mistakenly placed under [timeouts] in some configs.
+    /// Parsed and ignored to keep backward compatibility.
+    #[serde(default)]
+    pub settle_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +172,29 @@ pub struct Config {
     /// Runner/orchestration defaults
     #[serde(default)]
     pub runner: RunnerCfg,
+    /// Optional persisted calibration; preferred at runtime over CSV when present.
+    #[serde(default)]
+    pub calibration: Option<PersistedCalibration>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+pub struct PersistedCalibration {
+    /// grams per count
+    pub gain_g_per_count: f32,
+    /// tare zero in raw counts
+    pub zero_counts: i32,
+    /// additive offset in grams (rarely needed; default 0.0)
+    #[serde(default)]
+    pub offset_g: f32,
+}
+
+impl From<PersistedCalibration> for Calibration {
+    fn from(p: PersistedCalibration) -> Self {
+        Calibration {
+            offset: p.zero_counts,
+            scale_factor: p.gain_g_per_count,
+        }
+    }
 }
 
 pub fn load_toml(s: &str) -> Result<Config, toml::de::Error> {
@@ -172,8 +210,33 @@ impl Default for ControlCfg {
             hysteresis_g: 0.05,
             stable_ms: 250,
             epsilon_g: 0.0,
+            speed_bands: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum BandToml {
+    Tuple((f32, u32)),
+    Table { threshold_g: f32, sps: u32 },
+}
+
+fn de_speed_bands<'de, D>(deserializer: D) -> Result<Vec<(f32, u32)>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt: Option<Vec<BandToml>> = Option::deserialize(deserializer)?;
+    let mut out = Vec::new();
+    if let Some(items) = opt {
+        for b in items {
+            match b {
+                BandToml::Tuple((thr, sps)) => out.push((thr, sps)),
+                BandToml::Table { threshold_g, sps } => out.push((threshold_g, sps)),
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Debug)]
@@ -206,34 +269,56 @@ impl Calibration {
             if dir == 0 {
                 dir = step_dir;
             } else if dir != step_dir {
-                eyre::bail!("calibration raw values must be monotonic (strictly increasing or strictly decreasing)");
+                eyre::bail!(
+                    "calibration raw values must be monotonic (strictly increasing or strictly decreasing)"
+                );
             }
         }
 
-        // OLS fit in f64 for numerical stability
-        let n = rows.len() as f64;
-        let sum_x: f64 = rows.iter().map(|r| r.raw as f64).sum();
-        let sum_y: f64 = rows.iter().map(|r| r.grams as f64).sum();
-        let mean_x = sum_x / n;
-        let mean_y = sum_y / n;
+        // Closure: OLS fit in f64 for numerical stability
+        let fit = |pts: &[(i64, f32)]| -> eyre::Result<(f64, f64)> {
+            let n = pts.len() as f64;
+            let sum_x: f64 = pts.iter().map(|r| r.0 as f64).sum();
+            let sum_y: f64 = pts.iter().map(|r| r.1 as f64).sum();
+            let mean_x = sum_x / n;
+            let mean_y = sum_y / n;
+            let mut sxx = 0.0f64;
+            let mut sxy = 0.0f64;
+            for (rx, gy) in pts {
+                let x = *rx as f64 - mean_x;
+                let y = *gy as f64 - mean_y;
+                sxx += x * x;
+                sxy += x * y;
+            }
+            if !sxx.is_finite() || sxx == 0.0 {
+                eyre::bail!("calibration cannot determine slope (degenerate X variance)");
+            }
+            let a = sxy / sxx;
+            if !a.is_finite() || a == 0.0 {
+                eyre::bail!("calibration produced invalid nonzero slope: {}", a);
+            }
+            let b = mean_y - a * mean_x;
+            Ok((a, b))
+        };
 
-        let mut sxx = 0.0f64;
-        let mut sxy = 0.0f64;
-        for r in &rows {
-            let x = r.raw as f64 - mean_x;
-            let y = r.grams as f64 - mean_y;
-            sxx += x * x;
-            sxy += x * y;
+        // Initial fit
+        let pts: Vec<(i64, f32)> = rows.iter().map(|r| (r.raw, r.grams)).collect();
+        let (a0, b0) = fit(&pts)?;
+        // Compute robust sigma estimate (RMS of residuals) without allocating residuals
+        let mut sumsq: f64 = 0.0;
+        for (x, y) in &pts {
+            let r = (*y as f64) - (a0 * (*x as f64) + b0);
+            sumsq += r * r;
         }
-        if !sxx.is_finite() || sxx == 0.0 {
-            eyre::bail!("calibration cannot determine slope (degenerate X variance)");
-        }
+        let n_pts = pts.len();
+        let rms = if n_pts == 0 {
+            0.0
+        } else {
+            (sumsq / (n_pts as f64)).sqrt()
+        };
 
-        let a = sxy / sxx; // grams per count
-        if !a.is_finite() || a == 0.0 {
-            eyre::bail!("calibration produced invalid nonzero slope: {}", a);
-        }
-        let b = mean_y - a * mean_x;
+        // Reject outliers with |residual| > 2σ and refit if at least 2 remain.
+        let (a, b) = robust_refit(&pts, a0, b0, rms, 2.0).unwrap_or((a0, b0));
 
         // Convert to core representation: grams = a * (raw - offset) + 0
         let zero_counts = -b / a; // where grams==0
@@ -246,6 +331,65 @@ impl Calibration {
             offset: offset_i32,
             scale_factor: a as f32,
         })
+    }
+}
+
+/// Perform a single-step robust refit by rejecting outliers defined by |residual| > k * rms
+/// around the initial line y = a0*x + b0. Uses an online (Welford/Chan) covariance update
+/// over inliers only to compute slope and intercept. Returns None when refit is not applicable
+/// (e.g., non-finite/zero rms, <2 inliers, or degenerate variance), in which case the caller
+/// should keep the original (a0, b0).
+fn robust_refit(pts: &[(i64, f32)], a0: f64, b0: f64, rms: f64, k: f64) -> Option<(f64, f64)> {
+    if !(rms.is_finite() && rms > 0.0 && k.is_finite() && k > 0.0) {
+        return None;
+    }
+    let n_pts = pts.len();
+    if n_pts < 2 {
+        return None;
+    }
+
+    let thr = k * rms;
+    // Online means and covariance accumulators for inliers
+    let mut n_in: usize = 0;
+    let mut mean_x = 0.0f64;
+    let mut mean_y = 0.0f64;
+    let mut cxx = 0.0f64;
+    let mut cxy = 0.0f64;
+
+    for (x_i, y_i) in pts.iter() {
+        let x = *x_i as f64;
+        let y = *y_i as f64;
+        let r = y - (a0 * x + b0);
+        if r.abs() <= thr {
+            // Inlier: update online means and covariances
+            let n_old = n_in as f64;
+            n_in += 1;
+            let n_new = n_in as f64;
+            let dx = x - mean_x;
+            let dy = y - mean_y;
+            let mean_x_new = mean_x + dx / n_new;
+            let mean_y_new = mean_y + dy / n_new;
+            // Chan's update for covariance terms
+            cxx += dx * (x - mean_x_new);
+            cxy += dx * (y - mean_y_new);
+            mean_x = mean_x_new;
+            mean_y = mean_y_new;
+            let _ = n_old; // silence unused in optimized builds
+        }
+    }
+
+    if n_in >= 2 && n_in < n_pts {
+        if !(cxx.is_finite()) || cxx == 0.0 {
+            return None;
+        }
+        let a = cxy / cxx;
+        if !a.is_finite() || a == 0.0 {
+            return None;
+        }
+        let b = mean_y - a * mean_x;
+        Some((a, b))
+    } else {
+        None
     }
 }
 
@@ -342,6 +486,11 @@ impl Config {
         }
         if self.filter.sample_rate_hz == 0 {
             eyre::bail!("filter.sample_rate_hz must be > 0");
+        }
+        if let Some(alpha) = self.filter.ema_alpha
+            && !(alpha > 0.0 && alpha <= 1.0)
+        {
+            eyre::bail!("filter.ema_alpha must be in (0.0, 1.0]");
         }
 
         // Timeouts

@@ -117,8 +117,8 @@ fn cli_self_check_prints_ok(#[case] json: bool) {
         "CLI exited with non-zero status.\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}\n"
     );
     assert!(
-        stdout.contains("OK"),
-        "Expected OK from self-check; got:\n{stdout}\n"
+        stdout.contains("Detected HX711 rate: "),
+        "Expected SPS line from self-check; got:\n{stdout}\n"
     );
 }
 
