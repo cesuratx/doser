@@ -146,3 +146,52 @@ fn calibration_with_noise_and_outliers_recovers_params() {
         ((c.offset as f32) - (true_offset_raw as f32)).abs() / (true_offset_raw as f32);
     assert!(rel_err_off <= 0.01, "offset rel err {rel_err_off}");
 }
+
+#[rstest]
+fn calibration_horizontal_line_errors() {
+    // grams constant despite changing raw -> horizontal line (slope 0), should error
+    let rows = vec![
+        CalibrationRow {
+            raw: 100,
+            grams: 50.0,
+        },
+        CalibrationRow {
+            raw: 200,
+            grams: 50.0,
+        },
+        CalibrationRow {
+            raw: 300,
+            grams: 50.0,
+        },
+    ];
+    let err = Calibration::from_rows(rows).expect_err("should fail on zero slope (horizontal)");
+    assert!(
+        format!("{err}")
+            .to_lowercase()
+            .contains("invalid nonzero slope")
+    );
+}
+
+#[rstest]
+fn calibration_all_inliers_no_refit_matches_ols() {
+    // Near-perfect line with small noise; no outliers beyond 2σ, refit should be skipped
+    let true_gain = 1.25f32;
+    let true_offset_raw = 80i64; // grams = a*raw - a*offset
+    let mut rows = Vec::new();
+    for i in 0..40i64 {
+        let raw = 40 + i * 5; // strictly increasing
+        let ideal = true_gain * (raw as f32) - true_gain * (true_offset_raw as f32);
+        // tiny bounded noise to keep all points inliers
+        let noise = ((i as f32 * 13.0).cos()) * 0.05;
+        rows.push(CalibrationRow {
+            raw,
+            grams: ideal + noise,
+        });
+    }
+    let c = Calibration::from_rows(rows).unwrap();
+    let rel_err_gain = (c.scale_factor - true_gain).abs() / true_gain;
+    assert!(rel_err_gain <= 0.01, "gain rel err {rel_err_gain}");
+    let rel_err_off =
+        ((c.offset as f32) - (true_offset_raw as f32)).abs() / (true_offset_raw as f32);
+    assert!(rel_err_off <= 0.02, "offset rel err {rel_err_off}");
+}

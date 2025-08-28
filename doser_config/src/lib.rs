@@ -317,59 +317,8 @@ impl Calibration {
             (sumsq / (n_pts as f64)).sqrt()
         };
 
-        // Reject outliers with |residual| > 2σ and refit if at least 2 remain, using two filtered passes (no Vec)
-        let (a, b) = if rms > 0.0 {
-            // Count inliers
-            let mut count = 0usize;
-            for (x, y) in &pts {
-                let r = (*y as f64) - (a0 * (*x as f64) + b0);
-                if r.abs() <= 2.0 * rms {
-                    count += 1;
-                }
-            }
-            if count >= 2 && count < n_pts {
-                // First pass: sums
-                let mut sum_x: f64 = 0.0;
-                let mut sum_y: f64 = 0.0;
-                for (x, y) in &pts {
-                    let r = (*y as f64) - (a0 * (*x as f64) + b0);
-                    if r.abs() <= 2.0 * rms {
-                        sum_x += *x as f64;
-                        sum_y += *y as f64;
-                    }
-                }
-                let n = count as f64;
-                let mean_x = sum_x / n;
-                let mean_y = sum_y / n;
-                // Second pass: sxx, sxy
-                let mut sxx: f64 = 0.0;
-                let mut sxy: f64 = 0.0;
-                for (x, y) in &pts {
-                    let r = (*y as f64) - (a0 * (*x as f64) + b0);
-                    if r.abs() <= 2.0 * rms {
-                        let dx = (*x as f64) - mean_x;
-                        let dy = (*y as f64) - mean_y;
-                        sxx += dx * dx;
-                        sxy += dx * dy;
-                    }
-                }
-                if !sxx.is_finite() || sxx == 0.0 {
-                    (a0, b0)
-                } else {
-                    let a = sxy / sxx;
-                    if !a.is_finite() || a == 0.0 {
-                        (a0, b0)
-                    } else {
-                        let b = mean_y - a * mean_x;
-                        (a, b)
-                    }
-                }
-            } else {
-                (a0, b0)
-            }
-        } else {
-            (a0, b0)
-        };
+        // Reject outliers with |residual| > 2σ and refit if at least 2 remain.
+        let (a, b) = robust_refit(&pts, a0, b0, rms, 2.0).unwrap_or((a0, b0));
 
         // Convert to core representation: grams = a * (raw - offset) + 0
         let zero_counts = -b / a; // where grams==0
@@ -382,6 +331,65 @@ impl Calibration {
             offset: offset_i32,
             scale_factor: a as f32,
         })
+    }
+}
+
+/// Perform a single-step robust refit by rejecting outliers defined by |residual| > k * rms
+/// around the initial line y = a0*x + b0. Uses an online (Welford/Chan) covariance update
+/// over inliers only to compute slope and intercept. Returns None when refit is not applicable
+/// (e.g., non-finite/zero rms, <2 inliers, or degenerate variance), in which case the caller
+/// should keep the original (a0, b0).
+fn robust_refit(pts: &[(i64, f32)], a0: f64, b0: f64, rms: f64, k: f64) -> Option<(f64, f64)> {
+    if !(rms.is_finite() && rms > 0.0 && k.is_finite() && k > 0.0) {
+        return None;
+    }
+    let n_pts = pts.len();
+    if n_pts < 2 {
+        return None;
+    }
+
+    let thr = k * rms;
+    // Online means and covariance accumulators for inliers
+    let mut n_in: usize = 0;
+    let mut mean_x = 0.0f64;
+    let mut mean_y = 0.0f64;
+    let mut cxx = 0.0f64;
+    let mut cxy = 0.0f64;
+
+    for (x_i, y_i) in pts.iter() {
+        let x = *x_i as f64;
+        let y = *y_i as f64;
+        let r = y - (a0 * x + b0);
+        if r.abs() <= thr {
+            // Inlier: update online means and covariances
+            let n_old = n_in as f64;
+            n_in += 1;
+            let n_new = n_in as f64;
+            let dx = x - mean_x;
+            let dy = y - mean_y;
+            let mean_x_new = mean_x + dx / n_new;
+            let mean_y_new = mean_y + dy / n_new;
+            // Chan's update for covariance terms
+            cxx += dx * (x - mean_x_new);
+            cxy += dx * (y - mean_y_new);
+            mean_x = mean_x_new;
+            mean_y = mean_y_new;
+            let _ = n_old; // silence unused in optimized builds
+        }
+    }
+
+    if n_in >= 2 && n_in < n_pts {
+        if !(cxx.is_finite()) || cxx == 0.0 {
+            return None;
+        }
+        let a = cxy / cxx;
+        if !a.is_finite() || a == 0.0 {
+            return None;
+        }
+        let b = mean_y - a * mean_x;
+        Some((a, b))
+    } else {
+        None
     }
 }
 

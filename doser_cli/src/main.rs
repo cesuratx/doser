@@ -868,6 +868,10 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
     // Security/privileges: may require CAP_IPC_LOCK or a sufficient memlock ulimit.
     #[inline]
     fn try_apply_mem_lock(lock: RtLock) -> std::io::Result<()> {
+        #[inline]
+        fn is_retryable_memlock_error(err: &std::io::Error) -> bool {
+            matches!(err.raw_os_error(), Some(code) if code == libc::EPERM || code == libc::ENOMEM)
+        }
         // Helper: read current memlock rlimit for diagnostics
         #[inline]
         fn memlock_limit_hint() -> Option<String> {
@@ -899,13 +903,13 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         let err = std::io::Error::last_os_error();
 
         // Fallback: if All failed due to permission or memory, try Current
-        if attempted_all
-            && let Some(code) = err.raw_os_error()
-            && (code == libc::EPERM || code == libc::ENOMEM)
-        {
+        let mut fallback_err: Option<std::io::Error> = None;
+        if attempted_all && is_retryable_memlock_error(&err) {
             let rc2 = unsafe { mlockall(MCL_CURRENT) };
             if rc2 == 0 {
                 return Ok(());
+            } else {
+                fallback_err = Some(std::io::Error::last_os_error());
             }
         }
 
@@ -919,13 +923,14 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
             },
             err
         );
-        if let Some(code) = err.raw_os_error()
-            && (code == libc::EPERM || code == libc::ENOMEM)
-        {
+        if is_retryable_memlock_error(&err) {
             if let Some(h) = memlock_limit_hint() {
                 msg.push_str(&format!("; {h}"));
             }
             msg.push_str("; hint: needs CAP_IPC_LOCK (or root) and sufficient 'ulimit -l'");
+            if let Some(e2) = fallback_err {
+                msg.push_str(&format!("; fallback mlockall(current) also failed: {e2}"));
+            }
         }
         Err(std::io::Error::new(err.kind(), msg))
     }

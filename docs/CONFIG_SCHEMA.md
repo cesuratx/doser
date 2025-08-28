@@ -81,3 +81,9 @@ Notes:
 - At least 2 rows; raw values must be strictly monotonic (no duplicates, no zig‑zag)
 - OLS fit across all rows computes `grams = a*raw + b`
 - Produced calibration used by core as: `scale_factor = a`; `offset` is tare counts `round(-b/a)`
+
+Outlier handling (robust refit):
+
+- After the initial OLS fit, RMS residual is computed. Points with |residual| > 2×RMS are considered outliers and excluded from a one‑pass refit using numerically stable online covariance updates.
+- If fewer than 2 inliers remain, or X variance is degenerate, the initial fit is kept.
+- Zero slope (perfectly horizontal grams) is treated as invalid for calibration; raw must vary and map to varying grams.
