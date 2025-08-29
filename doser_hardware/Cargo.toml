@@ -8,7 +8,6 @@ doser_traits = { path = "../doser_traits" }
 thiserror = { workspace = true }
 tracing = "0.1"
 libc = { version = "0.2", optional = true }
-nix = { version = "0.28", optional = true }
 
 [features]
 default = []

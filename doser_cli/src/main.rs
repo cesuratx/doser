@@ -1,3 +1,9 @@
+#![cfg_attr(all(not(debug_assertions), not(test)), deny(warnings))]
+#![cfg_attr(
+    all(not(debug_assertions), not(test)),
+    deny(clippy::all, clippy::pedantic, clippy::nursery)
+)]
+#![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
 use std::{fs, path::PathBuf};
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
@@ -24,6 +30,13 @@ struct CliSafety {
     no_progress_epsilon_g: f32,
 }
 static LAST_SAFETY: OnceLock<CliSafety> = OnceLock::new();
+
+#[derive(Clone, Copy, Default)]
+struct JsonTelemetry {
+    slope_ema_gps: Option<f32>,
+    stop_at_g: Option<f32>,
+    coast_comp_g: Option<f32>,
+}
 
 fn humanize(err: &eyre::Report) -> String {
     use doser_core::error::{BuildError, DoserError};
@@ -249,36 +262,47 @@ struct Cli {
     #[arg(long, action = ArgAction::SetTrue)]
     json: bool,
 
-    /// Log level: trace,debug,info,warn,error
-    #[arg(long, value_name = "LEVEL", default_value = "info")]
+    /// Console log level (error|warn|info|debug|trace)
+    #[arg(long = "log-level", value_name = "LEVEL", default_value = "info")]
     log_level: String,
 
+    /// Command to execute
     #[command(subcommand)]
     cmd: Commands,
 }
 
+/// Memory locking mode for real-time operation
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum RtLock {
+    /// Do not lock memory
     None,
+    /// Lock currently resident pages
     Current,
+    /// Lock current and future pages
     All,
 }
 
 impl RtLock {
+    #[inline]
     fn os_default() -> Self {
-        if cfg!(target_os = "linux") {
-            RtLock::Current
-        } else {
-            // macOS and others default to no lock to minimize impact
-            RtLock::None
+        #[cfg(target_os = "linux")]
+        {
+            return RtLock::Current;
         }
+        #[cfg(target_os = "macos")]
+        {
+            return RtLock::None;
+        }
+        #[allow(unreachable_code)]
+        RtLock::None
     }
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Run a dose to a target in grams
+    /// Dispense a target amount of material
     Dose {
+        /// Target grams to dispense
         #[arg(long)]
         grams: f32,
         /// Override safety: max run time in ms (takes precedence over config)
@@ -525,12 +549,71 @@ fn real_main() -> eyre::Result<()> {
                 rt_cpu,
                 stats,
             );
-            res?;
-            if print_runtime {
-                let ms = t0.elapsed().as_millis();
-                eprintln!("runtime: {ms} ms");
+            match res {
+                Ok((final_g, tel)) => {
+                    if print_runtime {
+                        let ms = t0.elapsed().as_millis();
+                        eprintln!("runtime: {ms} ms");
+                    }
+                    if cli.json {
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        let ts_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0);
+                        let profile =
+                            std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+                        let slope = tel
+                            .slope_ema_gps
+                            .map(|v| format!("{v:.6}"))
+                            .unwrap_or_else(|| "null".to_string());
+                        let stop_at = tel
+                            .stop_at_g
+                            .map(|v| format!("{v:.3}"))
+                            .unwrap_or_else(|| "null".to_string());
+                        let coast = tel
+                            .coast_comp_g
+                            .map(|v| format!("{v:.3}"))
+                            .unwrap_or_else(|| "null".to_string());
+                        println!(
+                            "{{\"timestamp\":{ts_ms},\"target_g\":{grams:.3},\"final_g\":{final_g:.3},\"duration_ms\":{},\"profile\":\"{}\",\"slope_ema\":{},\"stop_at_g\":{},\"coast_comp_g\":{},\"abort_reason\":null}}",
+                            t0.elapsed().as_millis(),
+                            profile,
+                            slope,
+                            stop_at,
+                            coast
+                        );
+                    } else {
+                        println!("final: {final_g:.2} g");
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    if cli.json {
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        let ts_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0);
+                        let profile =
+                            std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+                        // Try to extract abort reason name
+                        let abort = if let Some(doser_core::error::DoserError::Abort(reason)) =
+                            e.downcast_ref::<doser_core::error::DoserError>()
+                        {
+                            abort_reason_name(&reason)
+                        } else {
+                            "Error"
+                        };
+                        println!(
+                            "{{\"timestamp\":{ts_ms},\"target_g\":{grams:.3},\"final_g\":null,\"duration_ms\":{},\"profile\":\"{}\",\"slope_ema\":null,\"stop_at_g\":null,\"coast_comp_g\":null,\"abort_reason\":\"{abort}\"}}",
+                            t0.elapsed().as_millis(),
+                            profile
+                        );
+                    }
+                    Err(e)
+                }
             }
-            Ok(())
         }
     }
 }
@@ -553,7 +636,7 @@ fn run_dose(
     rt_lock: Option<RtLock>,
     rt_cpu: Option<usize>,
     stats: bool,
-) -> CoreResult<()> {
+) -> CoreResult<(f32, JsonTelemetry)> {
     // Real-time mode setup (Linux/macOS) — run once per process
     #[cfg(target_os = "linux")]
     {
@@ -714,8 +797,38 @@ fn run_dose(
                 doser_core::DosingStatus::Complete => {
                     let final_g = doser.last_weight();
                     tracing::info!(final_g, "dose complete");
-                    println!("final: {final_g:.2} g");
-                    break;
+                    if stats && !latencies.is_empty() {
+                        let expected_period_us =
+                            doser_core::util::period_us(_cfg.filter.sample_rate_hz);
+                        let min = *latencies.iter().min().unwrap();
+                        let max = *latencies.iter().max().unwrap();
+                        let avg = latencies.iter().sum::<u64>() as f64 / latencies.len() as f64;
+                        let stdev = if latencies.len() > 1 {
+                            let mean = avg;
+                            let var = latencies
+                                .iter()
+                                .map(|&x| (x as f64 - mean).powi(2))
+                                .sum::<f64>()
+                                / (latencies.len() as f64 - 1.0);
+                            var.sqrt()
+                        } else {
+                            0.0
+                        };
+                        eprintln!("\n--- Doser Stats ---");
+                        eprintln!("Samples: {sample_count}");
+                        eprintln!("Period (us): {expected_period_us}");
+                        eprintln!(
+                            "Latency min/avg/max/stdev (us): {min:.0} / {avg:.1} / {max:.0} / {stdev:.1}"
+                        );
+                        eprintln!("Missed deadlines (> period): {missed_deadlines}");
+                        eprintln!("-------------------\n");
+                    }
+                    let tel = JsonTelemetry {
+                        slope_ema_gps: doser.last_slope_ema_gps(),
+                        stop_at_g: doser.early_stop_at_g(),
+                        coast_comp_g: doser.last_inflight_g(),
+                    };
+                    return Ok((final_g, tel));
                 }
                 doser_core::DosingStatus::Aborted(e) => {
                     let _ = doser.motor_stop();
@@ -776,8 +889,38 @@ fn run_dose(
                 doser_core::DosingStatus::Complete => {
                     let final_g = doser.last_weight();
                     tracing::info!(final_g, "dose complete");
-                    println!("final: {final_g:.2} g");
-                    break;
+                    if stats && !latencies.is_empty() {
+                        let expected_period_us =
+                            doser_core::util::period_us(_cfg.filter.sample_rate_hz);
+                        let min = *latencies.iter().min().unwrap();
+                        let max = *latencies.iter().max().unwrap();
+                        let avg = latencies.iter().sum::<u64>() as f64 / latencies.len() as f64;
+                        let stdev = if latencies.len() > 1 {
+                            let mean = avg;
+                            let var = latencies
+                                .iter()
+                                .map(|&x| (x as f64 - mean).powi(2))
+                                .sum::<f64>()
+                                / (latencies.len() as f64 - 1.0);
+                            var.sqrt()
+                        } else {
+                            0.0
+                        };
+                        eprintln!("\n--- Doser Stats ---");
+                        eprintln!("Samples: {sample_count}");
+                        eprintln!("Period (us): {expected_period_us}");
+                        eprintln!(
+                            "Latency min/avg/max/stdev (us): {min:.0} / {avg:.1} / {max:.0} / {stdev:.1}"
+                        );
+                        eprintln!("Missed deadlines (> period): {missed_deadlines}");
+                        eprintln!("-------------------\n");
+                    }
+                    let tel = JsonTelemetry {
+                        slope_ema_gps: doser.last_slope_ema_gps(),
+                        stop_at_g: doser.early_stop_at_g(),
+                        coast_comp_g: doser.last_inflight_g(),
+                    };
+                    return Ok((final_g, tel));
                 }
                 doser_core::DosingStatus::Aborted(e) => {
                     let _ = doser.motor_stop();
@@ -802,33 +945,13 @@ fn run_dose(
             prefer_timeout_first,
             sampling_mode,
         )?;
-        println!("final: {final_g:.2} g");
+        // Telemetry not available through runner; return nulls
+        let tel = JsonTelemetry::default();
+        return Ok((final_g, tel));
     }
-
-    if stats && !latencies.is_empty() {
-        let expected_period_us = doser_core::util::period_us(_cfg.filter.sample_rate_hz);
-        let min = *latencies.iter().min().unwrap();
-        let max = *latencies.iter().max().unwrap();
-        let avg = latencies.iter().sum::<u64>() as f64 / latencies.len() as f64;
-        let stdev = if latencies.len() > 1 {
-            let mean = avg;
-            let var = latencies
-                .iter()
-                .map(|&x| (x as f64 - mean).powi(2))
-                .sum::<f64>()
-                / (latencies.len() as f64 - 1.0);
-            var.sqrt()
-        } else {
-            0.0
-        };
-        eprintln!("\n--- Doser Stats ---");
-        eprintln!("Samples: {sample_count}");
-        eprintln!("Period (us): {expected_period_us}");
-        eprintln!("Latency min/avg/max/stdev (us): {min:.0} / {avg:.1} / {max:.0} / {stdev:.1}");
-        eprintln!("Missed deadlines (> period): {missed_deadlines}");
-        eprintln!("-------------------\n");
-    }
-    Ok(())
+    // Unreachable
+    #[allow(unreachable_code)]
+    Ok((0.0, JsonTelemetry::default()))
 }
 
 #[cfg(target_os = "linux")]
@@ -844,11 +967,8 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         CPU_ISSET,
         CPU_SET,
         CPU_ZERO,
-        MCL_CURRENT,
-        MCL_FUTURE,
         SCHED_FIFO,
-        // Memory locking
-        mlockall,
+        // Memory locking (used by affinity helpers; mlockall imported inside helper if needed)
         // Scheduling (FIFO priority)
         sched_get_priority_max,
         sched_get_priority_min,
@@ -872,44 +992,67 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         fn is_retryable_memlock_error(err: &std::io::Error) -> bool {
             matches!(err.raw_os_error(), Some(code) if code == libc::EPERM || code == libc::ENOMEM)
         }
+        use libc::{MCL_CURRENT, MCL_FUTURE, mlockall};
+
         // Helper: read current memlock rlimit for diagnostics
         #[inline]
         fn memlock_limit_hint() -> Option<String> {
-            let mut lim: libc::rlimit = unsafe { std::mem::zeroed() };
-            let rc = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut lim) };
-            if rc == 0 {
-                let cur = lim.rlim_cur;
-                if cur == libc::RLIM_INFINITY {
-                    Some("memlock limit: unlimited".to_string())
+            // Best-effort portability: use libc getrlimit when available
+            unsafe {
+                let mut rlim = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+                let rc = libc::getrlimit(libc::RLIMIT_MEMLOCK, rlim.as_mut_ptr());
+                if rc == 0 {
+                    let r = rlim.assume_init();
+                    let cur = r.rlim_cur as u64;
+                    if cur == libc::RLIM_INFINITY as u64 {
+                        Some("memlock limit: unlimited".to_string())
+                    } else {
+                        Some(format!("memlock limit: {} KiB", cur / 1024))
+                    }
                 } else {
-                    Some(format!("memlock limit: {} KiB", cur / 1024))
+                    None
                 }
-            } else {
-                None
             }
         }
 
-        // SAFETY: mlockall is an FFI call with constant flags; no pointers are used.
-        let (rc, attempted_all) = unsafe {
-            match lock {
-                RtLock::None => return Ok(()),
-                RtLock::Current => (mlockall(MCL_CURRENT), false),
-                RtLock::All => (mlockall(MCL_CURRENT | MCL_FUTURE), true),
+        #[inline]
+        fn lock_current() -> std::io::Result<()> {
+            // SAFETY: mlockall is a pure syscall; no pointers passed.
+            let rc = unsafe { mlockall(MCL_CURRENT) };
+            if rc != 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
             }
+        }
+        #[inline]
+        fn lock_all() -> std::io::Result<()> {
+            // SAFETY: mlockall is a pure syscall; no pointers passed.
+            let rc = unsafe { mlockall(MCL_CURRENT | MCL_FUTURE) };
+            if rc != 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
+
+        let attempted_all = matches!(lock, RtLock::All);
+        let result = match lock {
+            RtLock::None => Ok(()),
+            RtLock::Current => lock_current(),
+            RtLock::All => lock_all(),
         };
-        if rc == 0 {
+        if result.is_ok() {
             return Ok(());
         }
-        let err = std::io::Error::last_os_error();
+        let err = result.err().unwrap();
 
         // Fallback: if All failed due to permission or memory, try Current
         let mut fallback_err: Option<std::io::Error> = None;
         if attempted_all && is_retryable_memlock_error(&err) {
-            let rc2 = unsafe { mlockall(MCL_CURRENT) };
-            if rc2 == 0 {
-                return Ok(());
-            } else {
-                fallback_err = Some(std::io::Error::last_os_error());
+            match lock_current() {
+                Ok(()) => return Ok(()),
+                Err(e2) => fallback_err = Some(e2),
             }
         }
 

@@ -1,0 +1,13 @@
+edition = "2021"
+newline_style = "Unix"
+max_width = 100
+use_field_init_shorthand = true
+reorder_imports = true
+
+# Nightly-only rustfmt options (kept here as documentation of intent):
+# group_imports = "StdExternalCrate"           # nightly
+# imports_granularity = "Crate"               # nightly
+# wrap_comments = true                          # nightly
+# format_code_in_doc_comments = true            # nightly
+# comment_width = 100                           # nightly
+# normalize_doc_attributes = true               # nightly

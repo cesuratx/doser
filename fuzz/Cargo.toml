@@ -1,0 +1,27 @@
+[package]
+name = "doser-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = { version = "0.4", features = ["arbitrary-derive"] }
+eyre = "0.6"
+toml = { workspace = true }
+doser_config = { path = "../doser_config" }
+
+[workspace]
+members = ["."]
+resolver = "2"
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "fuzz_config_loader"
+path = "fuzz_targets/fuzz_config_loader.rs"
+test = false
+doc = false

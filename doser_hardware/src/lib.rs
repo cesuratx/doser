@@ -1,3 +1,9 @@
+#![cfg_attr(all(not(debug_assertions), not(test)), deny(warnings))]
+#![cfg_attr(
+    all(not(debug_assertions), not(test)),
+    deny(clippy::all, clippy::pedantic, clippy::nursery)
+)]
+#![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
 //! doser_hardware: hardware and simulation backends behind `doser_traits`.
 //!
 //! Features:
