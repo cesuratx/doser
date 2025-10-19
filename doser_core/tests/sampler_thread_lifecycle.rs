@@ -138,8 +138,6 @@ fn sampler_shutdown_is_prompt() {
 
     // For most cases, it should be much faster
     if shutdown_time > Duration::from_millis(100) {
-        eprintln!(
-            "Warning: shutdown took {shutdown_time:?}, consider this acceptable but monitor"
-        );
+        eprintln!("Warning: shutdown took {shutdown_time:?}, consider this acceptable but monitor");
     }
 }
