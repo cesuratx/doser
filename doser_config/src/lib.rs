@@ -4,6 +4,11 @@
     deny(clippy::all, clippy::pedantic, clippy::nursery)
 )]
 #![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
+//! Config schemas and calibration parsing for the dosing system.
+//!
+//! - `Config` and sub-structs are deserialized from TOML and validated.
+//! - Calibration CSV loader enforces headers and performs a robust refit
+//!   to reduce outlier influence before slope/intercept estimation.
 use serde::Deserialize;
 use serde::de::Deserializer;
 
@@ -160,6 +165,30 @@ impl Default for RunnerCfg {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct PredictorCfg {
+    /// Enable early-stop predictor to reduce overshoot under latency
+    pub enabled: bool,
+    /// Rolling window size (samples) for slope estimate
+    pub window: usize,
+    /// Extra latency margin to account for filtering/IO (ms)
+    pub extra_latency_ms: u64,
+    /// Minimum fraction of target progress before predictor activates (0.0..=1.0)
+    pub min_progress_ratio: f32,
+}
+
+impl Default for PredictorCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            window: 6,
+            extra_latency_ms: 20,
+            min_progress_ratio: 0.10,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Config {
     pub pins: Pins,
     pub filter: FilterCfg,
@@ -172,6 +201,9 @@ pub struct Config {
     pub logging: Logging,
     #[serde(default)]
     pub hardware: Hardware,
+    /// Early-stop predictor configuration
+    #[serde(default)]
+    pub predictor: PredictorCfg,
     /// Emergency stop configuration
     #[serde(default)]
     pub estop: EstopCfg,
@@ -300,8 +332,11 @@ impl Calibration {
                 eyre::bail!("calibration cannot determine slope (degenerate X variance)");
             }
             let a = sxy / sxx;
-            if !a.is_finite() || a == 0.0 {
-                eyre::bail!("calibration produced invalid nonzero slope: {}", a);
+            if !a.is_finite() {
+                eyre::bail!("calibration produced non-finite slope");
+            }
+            if a == 0.0 {
+                eyre::bail!("calibration produced zero slope (invalid scale factor)");
             }
             let b = mean_y - a * mean_x;
             Ok((a, b))
@@ -327,7 +362,11 @@ impl Calibration {
         let (a, b) = robust_refit(&pts, a0, b0, rms, 2.0).unwrap_or((a0, b0));
 
         // Convert to core representation: grams = a * (raw - offset) + 0
-        let zero_counts = -b / a; // where grams==0
+        let zero_counts = if a == 0.0 {
+            eyre::bail!("calibration slope is zero, cannot compute tare baseline");
+        } else {
+            -b / a // where grams==0
+        };
         if !zero_counts.is_finite() {
             eyre::bail!("calibration produced invalid tare baseline");
         }
@@ -497,6 +536,14 @@ impl Config {
             && !(alpha > 0.0 && alpha <= 1.0)
         {
             eyre::bail!("filter.ema_alpha must be in (0.0, 1.0]");
+        }
+
+        // Predictor
+        if self.predictor.window == 0 {
+            eyre::bail!("predictor.window must be >= 1");
+        }
+        if self.predictor.min_progress_ratio < 0.0 || self.predictor.min_progress_ratio > 1.0 {
+            eyre::bail!("predictor.min_progress_ratio must be in [0.0, 1.0]");
         }
 
         // Timeouts

@@ -4,6 +4,7 @@
     deny(clippy::all, clippy::pedantic, clippy::nursery)
 )]
 #![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 //! doser_hardware: hardware and simulation backends behind `doser_traits`.
 //!
 //! Features:
@@ -12,6 +13,10 @@
 //!
 //! Note: The `rppal` dependency is optional and only enabled when the `hardware`
 //!       feature is active. This lets CI on x86 build without pulling GPIO libs.
+//!
+//! Safety & RT notes
+//! - Where `unsafe` is required (GPIO, libc), calls are isolated with explicit
+//!   invariants and error paths. RT elevation is feature-gated and optional.
 
 pub mod error;
 pub mod util;
@@ -285,17 +290,20 @@ pub mod pacing {
                 }
             }
             pub fn elapsed(&self) -> Duration {
-                *self.offset.lock().unwrap()
+                // Test helper: if mutex is poisoned, default to zero elapsed
+                self.offset.lock().map(|g| *g).unwrap_or(Duration::ZERO)
             }
         }
         impl Sleeper for FakeSleeper {
             fn now(&self) -> Instant {
-                self.origin + *self.offset.lock().unwrap()
+                let off = self.offset.lock().map(|g| *g).unwrap_or(Duration::ZERO);
+                self.origin + off
             }
             fn sleep_until(&self, deadline: Instant) {
-                let mut off = self.offset.lock().unwrap();
-                let dur = deadline.saturating_duration_since(self.origin);
-                *off = dur;
+                if let Ok(mut off) = self.offset.lock() {
+                    let dur = deadline.saturating_duration_since(self.origin);
+                    *off = dur;
+                }
             }
         }
 

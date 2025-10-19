@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, "release-*"]
   pull_request:
   workflow_dispatch:
 
@@ -54,7 +54,7 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy
-  run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     name: test
@@ -122,3 +122,12 @@ jobs:
         with:
           name: coverage-cobertura
           path: target/tarpaulin/cobertura.xml
+
+  security:
+    name: security-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

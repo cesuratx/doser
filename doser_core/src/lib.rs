@@ -4,26 +4,38 @@
     deny(clippy::all, clippy::pedantic, clippy::nursery)
 )]
 #![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 //! Core dosing logic (hardware-agnostic).
-//! - Keeps all hardware behind doser_traits::Scale/Motor
-//! - Exposes a small builder to wire config + traits
-//! - One-step control loop (call step() from the CLI or a strategy)
 //!
-//! Fixed-point arithmetic strategy
-//! - Internals operate primarily in integer centigrams (cg, 1 cg = 0.01 g) to avoid
-//!   per-sample floating-point math in the control loop and to keep thresholds in a
-//!   single unit. See `Calibration::to_cg` for the conversion path and quantization.
-//! - The helper `div_round_nearest_i32` provides round-to-nearest integer division with
-//!   ties away from zero, which is used to compute unbiased medians and moving averages
-//!   in cg space.
-//! - Saturating arithmetic is used where appropriate (e.g., `saturating_sub/mul/add`) to
-//!   prevent overflow with extreme parameters while preserving monotonicity.
+//! This crate provides the hardware-independent dosing engine. All hardware
+//! interactions go through `doser_traits::Scale` and `doser_traits::Motor` traits.
+//!
+//! ## Architecture
+//!
+//! - **Calibration**: Linear model for raw→grams conversion (`calibration` module)
+//! - **Configuration**: All config structs (`config` module)
+//! - **Filtering**: Median, moving average, EMA smoothing
+//! - **Control**: Multi-speed control with hysteresis (`DoserCore`)
+//! - **Safety**: Watchdogs for runtime, overshoot, no-progress
+//! - **Status**: Dosing state machine (`status` module)
+//!
+//! ## Fixed-Point Arithmetic
+//!
+//! Internals operate in **centigrams** (cg, 1 cg = 0.01 g) using `i32` for deterministic
+//! behavior. See `Calibration::to_cg` for conversion and `quantize_to_cg_i32` for rounding.
 
+// Module declarations
 pub mod error;
 pub mod mocks;
 pub mod runner;
 pub mod sampler;
 pub mod util;
+
+// TODO: Future refactoring - extract these types into dedicated modules:
+// - calibration.rs: Calibration struct
+// - config.rs: FilterCfg, ControlCfg, SafetyCfg, PredictorCfg, Timeouts
+// - status.rs: DosingStatus enum
+// This will reduce lib.rs from 1600+ lines to ~800 lines
 
 use crate::error::BuildError;
 use crate::error::{AbortReason, DoserError, Result};
@@ -915,7 +927,9 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             return false;
         }
         // Use simple slope estimate: (last - first) / dt
-        let (t0, w0) = self.pred_hist.front().copied().unwrap();
+        let Some((t0, w0)) = self.pred_hist.front().copied() else {
+            return false;
+        };
         let dt_ms = now_ms.saturating_sub(t0);
         if dt_ms == 0 {
             return false;
@@ -1511,6 +1525,7 @@ pub fn build_doser<S, M>(
     calibration: Option<Calibration>,
     target_g: f32,
     estop_check: Option<Box<dyn Fn() -> bool>>,
+    predictor: Option<PredictorCfg>,
     clock: Option<Box<dyn Clock + Send + Sync>>,
     estop_debounce_n: Option<u8>,
 ) -> Result<DoserG<S, M>>
@@ -1594,8 +1609,8 @@ where
     let cal_gain_cg_per_count = quantize_to_cg_i32(calibration.gain_g_per_count);
     let cal_offset_cg = quantize_to_cg_i32(calibration.offset_g);
 
-    // Predictor disabled by default for generic builder to preserve behavior.
-    let predictor = PredictorCfg::default();
+    // Predictor: default disabled unless provided by caller.
+    let predictor = predictor.unwrap_or_default();
     let pred_latency_ms = period_ms.saturating_add(predictor.extra_latency_ms);
 
     Ok(DoserG {

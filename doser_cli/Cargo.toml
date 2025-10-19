@@ -7,11 +7,15 @@ edition.workspace = true
 # CLI
 clap = { version = "4.5", features = ["derive"] }
 
+# Signal handling
+ctrlc = "3.4"
+
 # For real-time system calls
 libc = "0.2"
 
 # Error & logging (CLI only)
 eyre = "0.6"
+color-eyre = { version = "0.6", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = [
     "fmt",

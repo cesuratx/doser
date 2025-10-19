@@ -1,3 +1,8 @@
+//! High-level orchestration for running a single dosing session.
+//!
+//! Chooses sampling mode (Direct/Event/Paced), computes stall thresholds,
+//! wires `Sampler` when needed, and enforces safety constraints (timeouts,
+//! max runtime). Returns success grams or domain abort errors.
 use crate::error::{AbortReason, DoserError, Result as CoreResult};
 use crate::sampler::Sampler;
 use crate::{Calibration, ControlCfg, DosingStatus, FilterCfg, SafetyCfg, Timeouts};
@@ -92,6 +97,7 @@ pub fn run<S, M>(
     estop_debounce_n: u8,
     prefer_timeout_first: bool,
     mode: SamplingMode,
+    predictor: Option<crate::PredictorCfg>,
 ) -> CoreResult<f32>
 where
     S: doser_traits::Scale + Send + 'static,
@@ -109,6 +115,7 @@ where
             target_g,
             estop_check,
             estop_debounce_n,
+            predictor.clone(),
         ),
         SamplingMode::Event | SamplingMode::Paced(_) => run_with_sampler(
             scale,
@@ -123,6 +130,7 @@ where
             estop_debounce_n,
             prefer_timeout_first,
             mode,
+            predictor,
         ),
     }
 }
@@ -139,6 +147,7 @@ fn run_direct<S, M>(
     target_g: f32,
     estop_check: Option<Box<dyn Fn() -> bool + Send + Sync>>,
     estop_debounce_n: u8,
+    predictor: Option<crate::PredictorCfg>,
 ) -> CoreResult<f32>
 where
     S: doser_traits::Scale + 'static,
@@ -156,6 +165,7 @@ where
         calibration,
         target_g,
         estop_check_core,
+        predictor,
         None,
         Some(estop_debounce_n),
     )?;
@@ -193,6 +203,7 @@ fn run_with_sampler<S, M>(
     estop_debounce_n: u8,
     prefer_timeout_first: bool,
     mode: SamplingMode,
+    predictor: Option<crate::PredictorCfg>,
 ) -> CoreResult<f32>
 where
     S: doser_traits::Scale + Send + 'static,
@@ -231,6 +242,7 @@ where
         calibration,
         target_g,
         estop_check_core,
+        predictor,
         None,
         Some(estop_debounce_n),
     )?;

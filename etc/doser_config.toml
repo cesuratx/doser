@@ -27,3 +27,9 @@ no_progress_ms = 1300
 [timeouts]
 sensor_ms = 50
 settle_ms = 800
+
+[predictor]
+enabled = true
+window = 6
+extra_latency_ms = 40
+min_progress_ratio = 0.15

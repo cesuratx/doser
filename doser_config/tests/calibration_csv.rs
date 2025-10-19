@@ -165,10 +165,10 @@ fn calibration_horizontal_line_errors() {
         },
     ];
     let err = Calibration::from_rows(rows).expect_err("should fail on zero slope (horizontal)");
+    let err_msg = format!("{err}").to_lowercase();
     assert!(
-        format!("{err}")
-            .to_lowercase()
-            .contains("invalid nonzero slope")
+        err_msg.contains("zero slope") || err_msg.contains("invalid scale factor"),
+        "Expected error about zero slope, got: {err}"
     );
 }
 

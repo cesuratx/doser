@@ -4,6 +4,15 @@
     deny(clippy::all, clippy::pedantic, clippy::nursery)
 )]
 #![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+//! Traits that define the hardware and time abstractions used by the system.
+//!
+//! - `Scale` provides a blocking `read(timeout)` API that returns mass in centigrams (i32).
+//! - `Motor` configures/starts/stops motor stepping at steps-per-second.
+//! - `clock` offers a `MonotonicClock` for deterministic timing and testability.
+//!
+//! Other crates depend only on these traits, enabling simulation and multiple hardware
+//! backends while keeping `doser_core` hardware-agnostic.
 pub mod clock;
 
 pub use clock::{Clock, MonotonicClock};

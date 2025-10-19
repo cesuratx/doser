@@ -1,3 +1,5 @@
+//! Domain and build errors for the dosing engine, plus a stable `AbortReason` enum
+//! used by the CLI to map to exit codes and JSON fields.
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

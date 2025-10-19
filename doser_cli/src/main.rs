@@ -3,7 +3,16 @@
     all(not(debug_assertions), not(test)),
     deny(clippy::all, clippy::pedantic, clippy::nursery)
 )]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
+//! CLI entrypoint for the dosing system.
+//!
+//! Responsibilities:
+//! - Parse config/flags and assemble hardware and core components
+//! - Initialize tracing and manage log sinks
+//! - Offer `--json` mode emitting stable JSONL lines to stdout (logs to stderr)
+//! - Provide optional RT helpers via libc on supported OSes, with safety docs
+//! - Map domain abort reasons to stable exit codes
 use std::{fs, path::PathBuf};
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
@@ -352,10 +361,26 @@ enum Commands {
     },
     /// Quick health check (hardware presence / sim ok)
     SelfCheck,
+    /// Health check for operational monitoring
+    Health,
 }
 
 fn main() -> eyre::Result<()> {
-    if let Err(e) = real_main() {
+    // Initialize pretty error reports early
+    let _ = color_eyre::install();
+
+    // Set up graceful shutdown handler
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown_clone = std::sync::Arc::clone(&shutdown);
+
+    if let Err(e) = ctrlc::set_handler(move || {
+        eprintln!("\nReceived shutdown signal, stopping gracefully...");
+        shutdown_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+    }) {
+        eprintln!("Warning: Failed to set signal handler: {}", e);
+    }
+
+    if let Err(e) = real_main(shutdown) {
         let json = *JSON_MODE.get().unwrap_or(&false);
         let code = exit_code_for_error(&e);
         if json {
@@ -369,7 +394,7 @@ fn main() -> eyre::Result<()> {
     Ok(())
 }
 
-fn real_main() -> eyre::Result<()> {
+fn real_main(shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>) -> eyre::Result<()> {
     let cli = Cli::parse();
     let _ = JSON_MODE.set(cli.json);
 
@@ -513,6 +538,50 @@ fn real_main() -> eyre::Result<()> {
             println!("Detected HX711 rate: {sps} SPS");
             Ok(())
         }
+        Commands::Health => {
+            tracing::info!("health check starting");
+            use doser_traits::{Motor, Scale};
+            use std::time::Duration;
+
+            let (mut scale, mut motor) = hw;
+
+            // Check scale responsiveness
+            let scale_ok = match scale.read(Duration::from_millis(500)) {
+                Ok(raw) => {
+                    println!("✓ Scale: responsive (raw: {})", raw);
+                    true
+                }
+                Err(e) => {
+                    eprintln!("✗ Scale: {}", e);
+                    false
+                }
+            };
+
+            // Check motor (brief movement test)
+            let motor_ok = match motor
+                .set_speed(100)
+                .and_then(|_| motor.start())
+                .and_then(|_| {
+                    std::thread::sleep(Duration::from_millis(50));
+                    motor.stop()
+                }) {
+                Ok(_) => {
+                    println!("✓ Motor: responsive");
+                    true
+                }
+                Err(e) => {
+                    eprintln!("✗ Motor: {}", e);
+                    false
+                }
+            };
+
+            if scale_ok && motor_ok {
+                println!("\nHealth check: OK");
+                Ok(())
+            } else {
+                Err(eyre::eyre!("Health check failed"))
+            }
+        }
         Commands::Dose {
             grams,
             max_run_ms,
@@ -548,6 +617,7 @@ fn real_main() -> eyre::Result<()> {
                 rt_lock,
                 rt_cpu,
                 stats,
+                shutdown,
             );
             match res {
                 Ok((final_g, tel)) => {
@@ -601,7 +671,7 @@ fn real_main() -> eyre::Result<()> {
                         let abort = if let Some(doser_core::error::DoserError::Abort(reason)) =
                             e.downcast_ref::<doser_core::error::DoserError>()
                         {
-                            abort_reason_name(&reason)
+                            abort_reason_name(reason)
                         } else {
                             "Error"
                         };
@@ -636,6 +706,7 @@ fn run_dose(
     rt_lock: Option<RtLock>,
     rt_cpu: Option<usize>,
     stats: bool,
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> CoreResult<(f32, JsonTelemetry)> {
     // Real-time mode setup (Linux/macOS) — run once per process
     #[cfg(target_os = "linux")]
@@ -751,6 +822,14 @@ fn run_dose(
     };
     let prefer_timeout_first = max_run_ms_override.is_none();
 
+    // Map predictor config
+    let predictor_core = doser_core::PredictorCfg {
+        enabled: _cfg.predictor.enabled,
+        window: _cfg.predictor.window,
+        extra_latency_ms: _cfg.predictor.extra_latency_ms,
+        min_progress_ratio: _cfg.predictor.min_progress_ratio,
+    };
+
     #[inline]
     fn record_sample(
         latencies: &mut Vec<u64>,
@@ -780,6 +859,7 @@ fn run_dose(
             calibration_core.clone(),
             grams,
             estop_check_core,
+            Some(predictor_core.clone()),
             None,
             Some(_cfg.estop.debounce_n),
         )?;
@@ -788,6 +868,15 @@ fn run_dose(
         // Compute expected period only when collecting stats
         let period_us = doser_core::util::period_us(_cfg.filter.sample_rate_hz);
         loop {
+            // Check for shutdown signal
+            if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = doser.motor_stop();
+                return Err(doser_core::error::DoserError::Abort(
+                    doser_core::error::AbortReason::Estop,
+                )
+                .into());
+            }
+
             let t_start = std::time::Instant::now();
             let status = doser.step()?;
             record_sample(&mut latencies, &mut missed_deadlines, period_us, t_start);
@@ -800,8 +889,8 @@ fn run_dose(
                     if stats && !latencies.is_empty() {
                         let expected_period_us =
                             doser_core::util::period_us(_cfg.filter.sample_rate_hz);
-                        let min = *latencies.iter().min().unwrap();
-                        let max = *latencies.iter().max().unwrap();
+                        let min = *latencies.iter().min().unwrap_or(&0);
+                        let max = *latencies.iter().max().unwrap_or(&0);
                         let avg = latencies.iter().sum::<u64>() as f64 / latencies.len() as f64;
                         let stdev = if latencies.len() > 1 {
                             let mean = avg;
@@ -869,12 +958,22 @@ fn run_dose(
             calibration_core.clone(),
             grams,
             estop_check_core,
+            Some(predictor_core.clone()),
             None,
             Some(_cfg.estop.debounce_n),
         )?;
         doser.begin();
         tracing::info!(target_g = grams, mode = "sampler", "dose start");
         loop {
+            // Check for shutdown signal
+            if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = doser.motor_stop();
+                return Err(doser_core::error::DoserError::Abort(
+                    doser_core::error::AbortReason::Estop,
+                )
+                .into());
+            }
+
             let t_start = std::time::Instant::now();
             let status = if let Some(raw) = sampler.latest() {
                 sample_count += 1;
@@ -892,8 +991,8 @@ fn run_dose(
                     if stats && !latencies.is_empty() {
                         let expected_period_us =
                             doser_core::util::period_us(_cfg.filter.sample_rate_hz);
-                        let min = *latencies.iter().min().unwrap();
-                        let max = *latencies.iter().max().unwrap();
+                        let min = *latencies.iter().min().unwrap_or(&0);
+                        let max = *latencies.iter().max().unwrap_or(&0);
                         let avg = latencies.iter().sum::<u64>() as f64 / latencies.len() as f64;
                         let stdev = if latencies.len() > 1 {
                             let mean = avg;
@@ -944,6 +1043,7 @@ fn run_dose(
             _cfg.estop.debounce_n,
             prefer_timeout_first,
             sampling_mode,
+            Some(predictor_core),
         )?;
         // Telemetry not available through runner; return nulls
         let tel = JsonTelemetry::default();
@@ -987,7 +1087,7 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
     // Apply process memory locking according to the selected mode.
     // Security/privileges: may require CAP_IPC_LOCK or a sufficient memlock ulimit.
     #[inline]
-    fn try_apply_mem_lock(lock: RtLock) -> std::io::Result<()> {
+    fn try_apply_mem_lock(lock: RtLock) -> eyre::Result<()> {
         #[inline]
         fn is_retryable_memlock_error(err: &std::io::Error) -> bool {
             matches!(err.raw_os_error(), Some(code) if code == libc::EPERM || code == libc::ENOMEM)
@@ -998,6 +1098,7 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         #[inline]
         fn memlock_limit_hint() -> Option<String> {
             // Best-effort portability: use libc getrlimit when available
+            // SAFETY: getrlimit writes into a stack-allocated rlimit; resource constant is valid.
             unsafe {
                 let mut rlim = std::mem::MaybeUninit::<libc::rlimit>::uninit();
                 let rc = libc::getrlimit(libc::RLIMIT_MEMLOCK, rlim.as_mut_ptr());
@@ -1037,7 +1138,7 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         }
 
         let attempted_all = matches!(lock, RtLock::All);
-        let result = match lock {
+        let result: std::io::Result<()> = match lock {
             RtLock::None => Ok(()),
             RtLock::Current => lock_current(),
             RtLock::All => lock_all(),
@@ -1045,7 +1146,9 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         if result.is_ok() {
             return Ok(());
         }
-        let err = result.err().unwrap();
+        let err = result
+            .err()
+            .unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "mlockall failed"));
 
         // Fallback: if All failed due to permission or memory, try Current
         let mut fallback_err: Option<std::io::Error> = None;
@@ -1075,13 +1178,46 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
                 msg.push_str(&format!("; fallback mlockall(current) also failed: {e2}"));
             }
         }
-        Err(std::io::Error::new(err.kind(), msg))
+        Err(eyre::eyre!(msg))
     }
 
     // Apply SCHED_FIFO priority, clamped to the system range.
     // Security/privileges: typically requires CAP_SYS_NICE or root.
     #[inline]
-    fn try_apply_fifo_priority(prio: Option<i32>) -> std::io::Result<()> {
+    fn try_apply_fifo_priority(prio: Option<i32>) -> eyre::Result<()> {
+        // Check for CAP_SYS_NICE capability (best effort)
+        #[cfg(target_os = "linux")]
+        {
+            use std::fs;
+            // Read /proc/self/status to check for CAP_SYS_NICE
+            if let Ok(status) = fs::read_to_string("/proc/self/status") {
+                let has_cap = status.lines().any(|line| {
+                    if line.starts_with("CapEff:") || line.starts_with("CapPrm:") {
+                        // CAP_SYS_NICE is bit 23 (0x800000)
+                        if let Some(hex) = line.split_whitespace().nth(1) {
+                            if let Ok(caps) = u64::from_str_radix(hex, 16) {
+                                return caps & 0x800000 != 0;
+                            }
+                        }
+                    }
+                    false
+                });
+
+                if !has_cap {
+                    // Check if we're root as fallback
+                    let is_root = unsafe { libc::geteuid() == 0 };
+                    if !is_root {
+                        return Err(eyre::eyre!(
+                            "Insufficient privileges for SCHED_FIFO: needs CAP_SYS_NICE or root. \
+                            Current effective UID: {}. \
+                            Hint: Run with 'sudo' or grant CAP_SYS_NICE: 'sudo setcap cap_sys_nice=ep /path/to/doser'",
+                            unsafe { libc::geteuid() }
+                        ));
+                    }
+                }
+            }
+        }
+
         // SAFETY: calls query priority range without pointers.
         let (min, max) = unsafe {
             let min = sched_get_priority_min(SCHED_FIFO);
@@ -1098,9 +1234,10 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
             sched_priority: prio_val,
         };
         // SAFETY: sched_setscheduler takes a pointer to our stack `param`; lifetime is valid for the call.
+        // SAFETY: sched_setscheduler takes a pointer to our stack param; PID 0 = current process.
         let rc = unsafe { sched_setscheduler(0, SCHED_FIFO, &param) };
         if rc != 0 {
-            Err(std::io::Error::last_os_error())
+            Err(eyre::eyre!(std::io::Error::last_os_error()))
         } else {
             Ok(())
         }
@@ -1113,21 +1250,26 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         rt_cpu: Option<usize>,
         online_cpus: &OnceLock<libc::c_long>,
         mask: &OnceLock<libc::cpu_set_t>,
-    ) -> std::io::Result<()> {
+    ) -> eyre::Result<()> {
         // Capacity reference: see module-level MAX_CPUSET_BITS.
         // Cache online CPUs
-        let _ = online_cpus.get_or_init(|| unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) });
+        let _ = online_cpus.get_or_init(|| {
+            // SAFETY: sysconf(_SC_NPROCESSORS_ONLN) returns a scalar; no side-effects.
+            unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) }
+        });
         // Get current allowed mask; on failure, fallback to [0..online_cpus)
         let _ = mask.get_or_init(|| {
+            // SAFETY: zeroed cpu_set_t is a valid initial mask structure
             let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-            // SAFETY: set points to a valid cpu_set_t we just zero-initialized
+            // SAFETY: CPU_ZERO initializes the mask memory we provide
             unsafe { CPU_ZERO(&mut set) };
-            // SAFETY: sched_getaffinity writes into &mut set up to size_of::<cpu_set_t>() bytes
+            // SAFETY: sched_getaffinity writes up to size_of::<cpu_set_t>() into &mut set
             let rc = unsafe {
                 libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set)
             };
             if rc != 0 {
                 // Reset to empty, then mark CPUs [0..n) as allowed (clamped to cpuset capacity)
+                // SAFETY: pointer valid, structure on stack
                 unsafe { CPU_ZERO(&mut set) };
                 let n = online_cpus
                     .get()
@@ -1136,7 +1278,7 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
                 let n = if n < 0 { 0 } else { n as usize };
                 let n = n.min(MAX_CPUSET_BITS);
                 for i in 0..n {
-                    // SAFETY: i < max_cpuset_bits ensures CPU_SET stays within the bitset
+                    // SAFETY: i < capacity ensures CPU_SET stays within the bitset
                     unsafe { CPU_SET(i, &mut set) };
                 }
             }
@@ -1144,42 +1286,35 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         });
         let nprocs_onln = *online_cpus.get().unwrap_or(&0);
         if nprocs_onln < 1 {
-            return Err(std::io::Error::other("_SC_NPROCESSORS_ONLN < 1"));
+            eyre::bail!("_SC_NPROCESSORS_ONLN < 1");
         }
         let target = rt_cpu.unwrap_or(0);
         if target as libc::c_long >= nprocs_onln {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("requested CPU {target} >= online {nprocs_onln}"),
-            ));
+            eyre::bail!("requested CPU {target} >= online {nprocs_onln}");
         }
         if target >= MAX_CPUSET_BITS {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("requested CPU {target} exceeds cpu_set_t capacity {MAX_CPUSET_BITS}"),
-            ));
+            eyre::bail!("requested CPU {target} exceeds cpu_set_t capacity {MAX_CPUSET_BITS}");
         }
-        let allowed = mask.get().expect("cpuset init");
-        // SAFETY: target < max_cpuset_bits and `allowed` points to a valid cpu_set_t
-        // Normalize CPU_ISSET return type across libc variants (bool vs c_int)
+        let Some(allowed) = mask.get() else {
+            eyre::bail!("cpuset init failed");
+        };
+        // SAFETY: target < max_cpuset_bits and `allowed` points to a valid cpu_set_t.
+        // Normalize CPU_ISSET return type across libc variants (bool vs c_int).
         let allowed_target = unsafe { (CPU_ISSET(target, allowed) as libc::c_int) != 0 };
         if !allowed_target {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!("CPU {target} not permitted by current affinity mask"),
-            ));
+            eyre::bail!("CPU {target} not permitted by current affinity mask");
         }
+        // SAFETY: zeroed cpu_set_t becomes a valid mask; CPU_SET index is checked above.
         let mut desired: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-        // SAFETY: desired is a valid cpu_set_t; target < max_cpuset_bits ensures CPU_SET bounds
         unsafe {
             CPU_ZERO(&mut desired);
             CPU_SET(target, &mut desired);
         }
-        // SAFETY: sched_setaffinity reads exactly size_of::<cpu_set_t>() bytes from &desired
+        // SAFETY: sched_setaffinity reads size_of::<cpu_set_t>() bytes from &desired
         let rc =
             unsafe { libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &desired) };
         if rc != 0 {
-            Err(std::io::Error::last_os_error())
+            Err(eyre::eyre!(std::io::Error::last_os_error()))
         } else {
             Ok(())
         }

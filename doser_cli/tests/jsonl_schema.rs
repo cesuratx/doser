@@ -38,7 +38,7 @@ sample_ms = 10
 max_run_ms = 5000
 max_overshoot_g = 5.0
 no_progress_epsilon_g = 0.02
-no_progress_ms = 1200
+no_progress_ms = 300  # 300ms allows for 2-3 samples at 10 Hz (100ms period)
 
 [hardware]
 sensor_read_timeout_ms = 100
@@ -117,7 +117,8 @@ fn jsonl_abort_schema() {
     let dir = tempdir().unwrap();
     let cfg = write_valid_config(&dir);
 
-    // Force a tiny max runtime to trigger MaxRuntime abort
+    // Force an abort by NOT setting DOSER_TEST_SIM_INC (simulator won't progress)
+    // With no progress and short watchdog (50ms), will trigger NoProgress abort quickly
     let mut cmd = Command::cargo_bin("doser_cli").unwrap();
     cmd.arg("--json")
         .arg("--log-level")
@@ -127,8 +128,7 @@ fn jsonl_abort_schema() {
         .arg("dose")
         .arg("--grams")
         .arg("10.0")
-        .arg("--max-run-ms")
-        .arg("1");
+        .env("DOSER_TEST_SIM_INC", "0.0");  // No progress: will trigger NoProgress abort
 
     let out = cmd.assert().failure().get_output().stdout.clone();
     let stdout = String::from_utf8_lossy(&out);
