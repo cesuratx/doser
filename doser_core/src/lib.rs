@@ -676,7 +676,7 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
                 debug_assert!(n <= med_win, "median buffer exceeded window size");
             }
             let mid = n / 2;
-            if n % 2 == 0 {
+            if n.is_multiple_of(2) {
                 // n >= 2 here, so mid >= 1 and mid-1 is safe
                 let a = self.tmp_med_buf[mid - 1];
                 let b = self.tmp_med_buf[mid];

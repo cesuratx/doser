@@ -377,7 +377,7 @@ fn main() -> eyre::Result<()> {
         eprintln!("\nReceived shutdown signal, stopping gracefully...");
         shutdown_clone.store(true, std::sync::atomic::Ordering::SeqCst);
     }) {
-        eprintln!("Warning: Failed to set signal handler: {}", e);
+        eprintln!("Warning: Failed to set signal handler: {e}");
     }
 
     if let Err(e) = real_main(shutdown) {
@@ -548,11 +548,11 @@ fn real_main(shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>) -> eyre::R
             // Check scale responsiveness
             let scale_ok = match scale.read(Duration::from_millis(500)) {
                 Ok(raw) => {
-                    println!("✓ Scale: responsive (raw: {})", raw);
+                    println!("✓ Scale: responsive (raw: {raw})");
                     true
                 }
                 Err(e) => {
-                    eprintln!("✗ Scale: {}", e);
+                    eprintln!("✗ Scale: {e}");
                     false
                 }
             };
@@ -570,7 +570,7 @@ fn real_main(shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>) -> eyre::R
                     true
                 }
                 Err(e) => {
-                    eprintln!("✗ Motor: {}", e);
+                    eprintln!("✗ Motor: {e}");
                     false
                 }
             };

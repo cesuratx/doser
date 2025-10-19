@@ -74,7 +74,7 @@ proptest! {
     #[test]
     fn never_exceeds_max_overshoot_and_no_progress_triggers(deltas in deltas_strategy(), target in 1u32..50u32) {
         let scale = BoundedScale::new(deltas);
-        let motor = NoopMotor::default();
+        let motor = NoopMotor;
 
         let filter = FilterCfg { ma_window: 1, median_window: 1, sample_rate_hz: 500, ema_alpha: 0.0 };
         let control = ControlCfg { stable_ms: 0, ..ControlCfg::default() };
