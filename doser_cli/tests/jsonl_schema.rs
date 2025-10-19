@@ -128,7 +128,7 @@ fn jsonl_abort_schema() {
         .arg("dose")
         .arg("--grams")
         .arg("10.0")
-        .env("DOSER_TEST_SIM_INC", "0.0");  // No progress: will trigger NoProgress abort
+        .env("DOSER_TEST_SIM_INC", "0.0"); // No progress: will trigger NoProgress abort
 
     let out = cmd.assert().failure().get_output().stdout.clone();
     let stdout = String::from_utf8_lossy(&out);
