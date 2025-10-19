@@ -614,11 +614,6 @@ pub mod hardware {
         std::hint::spin_loop();
     }
 
-    /// Sleep for microseconds using std; coarse but sufficient for <= 5 kHz.
-    fn spin_sleep_us(us: u64) {
-        MonotonicClock::new().sleep(Duration::from_micros(us));
-    }
-
     /// Busy-wait for at least ~1 microsecond to cleanly separate edges.
     #[inline(always)]
     fn busy_wait_min_1us() {
@@ -660,14 +655,6 @@ pub mod hardware {
         while i < n {
             std::hint::spin_loop();
             i = i.wrapping_add(1);
-        }
-    }
-
-    /// Sleep until an absolute deadline by sleeping the remaining delta.
-    fn sleep_until(deadline: std::time::Instant) {
-        let now = std::time::Instant::now();
-        if deadline > now {
-            MonotonicClock::new().sleep(deadline - now);
         }
     }
 
