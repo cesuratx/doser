@@ -58,10 +58,10 @@ pub fn bench_ema_slope(c: &mut Criterion) {
     } else {
         g.sample_size(50);
     }
-    if let Ok(ms) = std::env::var("BENCH_MEAS_MS") {
-        if let Ok(ms_u64) = ms.parse::<u64>() {
-            g.measurement_time(std::time::Duration::from_millis(ms_u64));
-        }
+    if let Ok(ms) = std::env::var("BENCH_MEAS_MS")
+        && let Ok(ms_u64) = ms.parse::<u64>()
+    {
+        g.measurement_time(std::time::Duration::from_millis(ms_u64));
     }
 
     let n = 50_000usize;

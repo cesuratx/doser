@@ -1104,8 +1104,8 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
                 let rc = libc::getrlimit(libc::RLIMIT_MEMLOCK, rlim.as_mut_ptr());
                 if rc == 0 {
                     let r = rlim.assume_init();
-                    let cur = r.rlim_cur as u64;
-                    if cur == libc::RLIM_INFINITY as u64 {
+                    let cur = r.rlim_cur;
+                    if cur == libc::RLIM_INFINITY {
                         Some("memlock limit: unlimited".to_string())
                     } else {
                         Some(format!("memlock limit: {} KiB", cur / 1024))
@@ -1148,7 +1148,7 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         }
         let err = result
             .err()
-            .unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "mlockall failed"));
+            .unwrap_or_else(|| std::io::Error::other("mlockall failed"));
 
         // Fallback: if All failed due to permission or memory, try Current
         let mut fallback_err: Option<std::io::Error> = None;
@@ -1194,10 +1194,10 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
                 let has_cap = status.lines().any(|line| {
                     if line.starts_with("CapEff:") || line.starts_with("CapPrm:") {
                         // CAP_SYS_NICE is bit 23 (0x800000)
-                        if let Some(hex) = line.split_whitespace().nth(1) {
-                            if let Ok(caps) = u64::from_str_radix(hex, 16) {
-                                return caps & 0x800000 != 0;
-                            }
+                        if let Some(hex) = line.split_whitespace().nth(1)
+                            && let Ok(caps) = u64::from_str_radix(hex, 16)
+                        {
+                            return caps & 0x800000 != 0;
                         }
                     }
                     false
