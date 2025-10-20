@@ -9,6 +9,7 @@ We recommend running the service as a dedicated system user `doser` with no shel
 - Creates the `doser` user and home at `/var/lib/doser`.
 - Creates `/var/log/doser` and configures log rotation under `/etc/logrotate.d/doser`.
 - Installs a systemd unit at `/etc/systemd/system/doser.service` that runs as `User=doser` and writes logs to `/var/log/doser`.
+- Configures the service to use both `/etc/doser_config.toml` (main configuration) and `/etc/doser_config.csv` (calibration data).
 
 To (re)load and manage the service:
 

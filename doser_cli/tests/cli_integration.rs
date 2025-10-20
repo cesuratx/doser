@@ -22,7 +22,7 @@ estop_in = 21
 [filter]
 ma_window = 1
 median_window = 1
-sample_rate_hz = 10
+sample_rate_hz = 80
 
 [control]
 coarse_speed = 1000
@@ -34,11 +34,11 @@ stable_ms = 0
 epsilon_g = 0.02
 
 [timeouts]
-sample_ms = 10
+sample_ms = 50
 
 [safety]
-# Allow enough time for the throttled control loop (10 Hz) to reach 5 g in sim
-max_run_ms = 5000
+# Allow enough time for the control loop (80 Hz) to reach target in sim
+max_run_ms = 2000
 max_overshoot_g = 5.0
 no_progress_epsilon_g = 0.02
 no_progress_ms = 1200
@@ -55,7 +55,7 @@ sensor_read_timeout_ms = 100
 #[case(&["--help"], 0, "Usage:", "stdout")]
 #[case(&["dose", "--grams", "5"], 0, "complete", "stdout")]
 #[case(&["dose"], 2, "required", "stderr")]
-#[case(&["dose", "--grams", "5", "--max-run-ms", "1"], -1, "max run time", "stderr")]
+#[case(&["dose", "--grams", "5", "--max-run-ms", "200"], -1, "max run time", "stderr")]
 fn cli_table_cases(
     #[case] args: &[&str],
     #[case] exit_code: i32,

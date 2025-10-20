@@ -115,8 +115,12 @@ impl Sampler {
                         // On timeout or transient error, just continue; controller will watchdog
                     }
                 }
-                // No sleep here: next iteration will block in read() until DRDY
-                // But check shutdown immediately after read completes
+
+                // Check shutdown after read to exit promptly if signaled during blocking read
+                if shutdown_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+                // No sleep here: next iteration will block in read() until DRDY.
             }
             tracing::trace!("Sampler event thread exiting cleanly");
         });

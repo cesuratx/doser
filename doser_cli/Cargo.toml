@@ -28,6 +28,9 @@ tracing-appender = "0.2"
 # Parse the Config TOML text right here (use workspace-pinned version)
 toml = { workspace = true }
 
+# JSON serialization for structured output
+serde_json = "1"
+
 # Workspace crates
 doser_core = { path = "../doser_core" }
 doser_config = { path = "../doser_config" }

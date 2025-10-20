@@ -19,6 +19,7 @@ use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use doser_config::{Calibration, Config, load_calibration_csv};
 use doser_core::error::Result as CoreResult;
 use eyre::WrapErr;
+use serde_json::json;
 
 use std::sync::OnceLock;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -633,26 +634,18 @@ fn real_main(shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>) -> eyre::R
                             .unwrap_or(0);
                         let profile =
                             std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
-                        let slope = tel
-                            .slope_ema_gps
-                            .map(|v| format!("{v:.6}"))
-                            .unwrap_or_else(|| "null".to_string());
-                        let stop_at = tel
-                            .stop_at_g
-                            .map(|v| format!("{v:.3}"))
-                            .unwrap_or_else(|| "null".to_string());
-                        let coast = tel
-                            .coast_comp_g
-                            .map(|v| format!("{v:.3}"))
-                            .unwrap_or_else(|| "null".to_string());
-                        println!(
-                            "{{\"timestamp\":{ts_ms},\"target_g\":{grams:.3},\"final_g\":{final_g:.3},\"duration_ms\":{},\"profile\":\"{}\",\"slope_ema\":{},\"stop_at_g\":{},\"coast_comp_g\":{},\"abort_reason\":null}}",
-                            t0.elapsed().as_millis(),
-                            profile,
-                            slope,
-                            stop_at,
-                            coast
-                        );
+                        let obj = json!({
+                            "timestamp": ts_ms,
+                            "target_g": format!("{grams:.3}").parse::<f64>().unwrap_or(0.0),
+                            "final_g": format!("{final_g:.3}").parse::<f64>().unwrap_or(0.0),
+                            "duration_ms": t0.elapsed().as_millis() as u64,
+                            "profile": profile,
+                            "slope_ema": tel.slope_ema_gps,
+                            "stop_at_g": tel.stop_at_g,
+                            "coast_comp_g": tel.coast_comp_g,
+                            "abort_reason": serde_json::Value::Null
+                        });
+                        println!("{obj}");
                     } else {
                         println!("final: {final_g:.2} g");
                     }
@@ -675,11 +668,18 @@ fn real_main(shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>) -> eyre::R
                         } else {
                             "Error"
                         };
-                        println!(
-                            "{{\"timestamp\":{ts_ms},\"target_g\":{grams:.3},\"final_g\":null,\"duration_ms\":{},\"profile\":\"{}\",\"slope_ema\":null,\"stop_at_g\":null,\"coast_comp_g\":null,\"abort_reason\":\"{abort}\"}}",
-                            t0.elapsed().as_millis(),
-                            profile
-                        );
+                        let obj = json!({
+                            "timestamp": ts_ms,
+                            "target_g": format!("{grams:.3}").parse::<f64>().unwrap_or(0.0),
+                            "final_g": serde_json::Value::Null,
+                            "duration_ms": t0.elapsed().as_millis() as u64,
+                            "profile": profile,
+                            "slope_ema": serde_json::Value::Null,
+                            "stop_at_g": serde_json::Value::Null,
+                            "coast_comp_g": serde_json::Value::Null,
+                            "abort_reason": abort
+                        });
+                        println!("{obj}");
                     }
                     Err(e)
                 }

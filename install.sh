@@ -45,7 +45,7 @@ User=doser
 Group=doser
 WorkingDirectory=/var/lib/doser
 Environment=RUST_LOG=info
-ExecStart=/usr/local/bin/doser_cli --config /etc/doser_config.toml
+ExecStart=/usr/local/bin/doser_cli --config /etc/doser_config.toml --calibration /etc/doser_config.csv
 Restart=always
 RestartSec=1s
 # Write logs to dedicated files under /var/log/doser
