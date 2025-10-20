@@ -1,9 +1,25 @@
+#![cfg_attr(all(not(debug_assertions), not(test)), deny(warnings))]
+#![cfg_attr(
+    all(not(debug_assertions), not(test)),
+    deny(clippy::all, clippy::pedantic, clippy::nursery)
+)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+#![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
+//! CLI entrypoint for the dosing system.
+//!
+//! Responsibilities:
+//! - Parse config/flags and assemble hardware and core components
+//! - Initialize tracing and manage log sinks
+//! - Offer `--json` mode emitting stable JSONL lines to stdout (logs to stderr)
+//! - Provide optional RT helpers via libc on supported OSes, with safety docs
+//! - Map domain abort reasons to stable exit codes
 use std::{fs, path::PathBuf};
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use doser_config::{Calibration, Config, load_calibration_csv};
 use doser_core::error::Result as CoreResult;
 use eyre::WrapErr;
+use serde_json::json;
 
 use std::sync::OnceLock;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
@@ -24,6 +40,13 @@ struct CliSafety {
     no_progress_epsilon_g: f32,
 }
 static LAST_SAFETY: OnceLock<CliSafety> = OnceLock::new();
+
+#[derive(Clone, Copy, Default)]
+struct JsonTelemetry {
+    slope_ema_gps: Option<f32>,
+    stop_at_g: Option<f32>,
+    coast_comp_g: Option<f32>,
+}
 
 fn humanize(err: &eyre::Report) -> String {
     use doser_core::error::{BuildError, DoserError};
@@ -249,36 +272,47 @@ struct Cli {
     #[arg(long, action = ArgAction::SetTrue)]
     json: bool,
 
-    /// Log level: trace,debug,info,warn,error
-    #[arg(long, value_name = "LEVEL", default_value = "info")]
+    /// Console log level (error|warn|info|debug|trace)
+    #[arg(long = "log-level", value_name = "LEVEL", default_value = "info")]
     log_level: String,
 
+    /// Command to execute
     #[command(subcommand)]
     cmd: Commands,
 }
 
+/// Memory locking mode for real-time operation
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum RtLock {
+    /// Do not lock memory
     None,
+    /// Lock currently resident pages
     Current,
+    /// Lock current and future pages
     All,
 }
 
 impl RtLock {
+    #[inline]
     fn os_default() -> Self {
-        if cfg!(target_os = "linux") {
-            RtLock::Current
-        } else {
-            // macOS and others default to no lock to minimize impact
-            RtLock::None
+        #[cfg(target_os = "linux")]
+        {
+            return RtLock::Current;
         }
+        #[cfg(target_os = "macos")]
+        {
+            return RtLock::None;
+        }
+        #[allow(unreachable_code)]
+        RtLock::None
     }
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Run a dose to a target in grams
+    /// Dispense a target amount of material
     Dose {
+        /// Target grams to dispense
         #[arg(long)]
         grams: f32,
         /// Override safety: max run time in ms (takes precedence over config)
@@ -328,10 +362,26 @@ enum Commands {
     },
     /// Quick health check (hardware presence / sim ok)
     SelfCheck,
+    /// Health check for operational monitoring
+    Health,
 }
 
 fn main() -> eyre::Result<()> {
-    if let Err(e) = real_main() {
+    // Initialize pretty error reports early
+    let _ = color_eyre::install();
+
+    // Set up graceful shutdown handler
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown_clone = std::sync::Arc::clone(&shutdown);
+
+    if let Err(e) = ctrlc::set_handler(move || {
+        eprintln!("\nReceived shutdown signal, stopping gracefully...");
+        shutdown_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+    }) {
+        eprintln!("Warning: Failed to set signal handler: {e}");
+    }
+
+    if let Err(e) = real_main(shutdown) {
         let json = *JSON_MODE.get().unwrap_or(&false);
         let code = exit_code_for_error(&e);
         if json {
@@ -345,7 +395,7 @@ fn main() -> eyre::Result<()> {
     Ok(())
 }
 
-fn real_main() -> eyre::Result<()> {
+fn real_main(shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>) -> eyre::Result<()> {
     let cli = Cli::parse();
     let _ = JSON_MODE.set(cli.json);
 
@@ -489,6 +539,50 @@ fn real_main() -> eyre::Result<()> {
             println!("Detected HX711 rate: {sps} SPS");
             Ok(())
         }
+        Commands::Health => {
+            tracing::info!("health check starting");
+            use doser_traits::{Motor, Scale};
+            use std::time::Duration;
+
+            let (mut scale, mut motor) = hw;
+
+            // Check scale responsiveness
+            let scale_ok = match scale.read(Duration::from_millis(500)) {
+                Ok(raw) => {
+                    println!("✓ Scale: responsive (raw: {raw})");
+                    true
+                }
+                Err(e) => {
+                    eprintln!("✗ Scale: {e}");
+                    false
+                }
+            };
+
+            // Check motor (brief movement test)
+            let motor_ok = match motor
+                .set_speed(100)
+                .and_then(|_| motor.start())
+                .and_then(|_| {
+                    std::thread::sleep(Duration::from_millis(50));
+                    motor.stop()
+                }) {
+                Ok(_) => {
+                    println!("✓ Motor: responsive");
+                    true
+                }
+                Err(e) => {
+                    eprintln!("✗ Motor: {e}");
+                    false
+                }
+            };
+
+            if scale_ok && motor_ok {
+                println!("\nHealth check: OK");
+                Ok(())
+            } else {
+                Err(eyre::eyre!("Health check failed"))
+            }
+        }
         Commands::Dose {
             grams,
             max_run_ms,
@@ -524,13 +618,72 @@ fn real_main() -> eyre::Result<()> {
                 rt_lock,
                 rt_cpu,
                 stats,
+                shutdown,
             );
-            res?;
-            if print_runtime {
-                let ms = t0.elapsed().as_millis();
-                eprintln!("runtime: {ms} ms");
+            match res {
+                Ok((final_g, tel)) => {
+                    if print_runtime {
+                        let ms = t0.elapsed().as_millis();
+                        eprintln!("runtime: {ms} ms");
+                    }
+                    if cli.json {
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        let ts_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0);
+                        let profile =
+                            std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+                        let obj = json!({
+                            "timestamp": ts_ms,
+                            "target_g": format!("{grams:.3}").parse::<f64>().unwrap_or(0.0),
+                            "final_g": format!("{final_g:.3}").parse::<f64>().unwrap_or(0.0),
+                            "duration_ms": t0.elapsed().as_millis() as u64,
+                            "profile": profile,
+                            "slope_ema": tel.slope_ema_gps,
+                            "stop_at_g": tel.stop_at_g,
+                            "coast_comp_g": tel.coast_comp_g,
+                            "abort_reason": serde_json::Value::Null
+                        });
+                        println!("{obj}");
+                    } else {
+                        println!("final: {final_g:.2} g");
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    if cli.json {
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        let ts_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0);
+                        let profile =
+                            std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+                        // Try to extract abort reason name
+                        let abort = if let Some(doser_core::error::DoserError::Abort(reason)) =
+                            e.downcast_ref::<doser_core::error::DoserError>()
+                        {
+                            abort_reason_name(reason)
+                        } else {
+                            "Error"
+                        };
+                        let obj = json!({
+                            "timestamp": ts_ms,
+                            "target_g": format!("{grams:.3}").parse::<f64>().unwrap_or(0.0),
+                            "final_g": serde_json::Value::Null,
+                            "duration_ms": t0.elapsed().as_millis() as u64,
+                            "profile": profile,
+                            "slope_ema": serde_json::Value::Null,
+                            "stop_at_g": serde_json::Value::Null,
+                            "coast_comp_g": serde_json::Value::Null,
+                            "abort_reason": abort
+                        });
+                        println!("{obj}");
+                    }
+                    Err(e)
+                }
             }
-            Ok(())
         }
     }
 }
@@ -553,7 +706,8 @@ fn run_dose(
     rt_lock: Option<RtLock>,
     rt_cpu: Option<usize>,
     stats: bool,
-) -> CoreResult<()> {
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> CoreResult<(f32, JsonTelemetry)> {
     // Real-time mode setup (Linux/macOS) — run once per process
     #[cfg(target_os = "linux")]
     {
@@ -668,6 +822,14 @@ fn run_dose(
     };
     let prefer_timeout_first = max_run_ms_override.is_none();
 
+    // Map predictor config
+    let predictor_core = doser_core::PredictorCfg {
+        enabled: _cfg.predictor.enabled,
+        window: _cfg.predictor.window,
+        extra_latency_ms: _cfg.predictor.extra_latency_ms,
+        min_progress_ratio: _cfg.predictor.min_progress_ratio,
+    };
+
     #[inline]
     fn record_sample(
         latencies: &mut Vec<u64>,
@@ -697,6 +859,7 @@ fn run_dose(
             calibration_core.clone(),
             grams,
             estop_check_core,
+            Some(predictor_core.clone()),
             None,
             Some(_cfg.estop.debounce_n),
         )?;
@@ -705,6 +868,15 @@ fn run_dose(
         // Compute expected period only when collecting stats
         let period_us = doser_core::util::period_us(_cfg.filter.sample_rate_hz);
         loop {
+            // Check for shutdown signal
+            if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = doser.motor_stop();
+                return Err(doser_core::error::DoserError::Abort(
+                    doser_core::error::AbortReason::Estop,
+                )
+                .into());
+            }
+
             let t_start = std::time::Instant::now();
             let status = doser.step()?;
             record_sample(&mut latencies, &mut missed_deadlines, period_us, t_start);
@@ -714,8 +886,38 @@ fn run_dose(
                 doser_core::DosingStatus::Complete => {
                     let final_g = doser.last_weight();
                     tracing::info!(final_g, "dose complete");
-                    println!("final: {final_g:.2} g");
-                    break;
+                    if stats && !latencies.is_empty() {
+                        let expected_period_us =
+                            doser_core::util::period_us(_cfg.filter.sample_rate_hz);
+                        let min = *latencies.iter().min().unwrap_or(&0);
+                        let max = *latencies.iter().max().unwrap_or(&0);
+                        let avg = latencies.iter().sum::<u64>() as f64 / latencies.len() as f64;
+                        let stdev = if latencies.len() > 1 {
+                            let mean = avg;
+                            let var = latencies
+                                .iter()
+                                .map(|&x| (x as f64 - mean).powi(2))
+                                .sum::<f64>()
+                                / (latencies.len() as f64 - 1.0);
+                            var.sqrt()
+                        } else {
+                            0.0
+                        };
+                        eprintln!("\n--- Doser Stats ---");
+                        eprintln!("Samples: {sample_count}");
+                        eprintln!("Period (us): {expected_period_us}");
+                        eprintln!(
+                            "Latency min/avg/max/stdev (us): {min:.0} / {avg:.1} / {max:.0} / {stdev:.1}"
+                        );
+                        eprintln!("Missed deadlines (> period): {missed_deadlines}");
+                        eprintln!("-------------------\n");
+                    }
+                    let tel = JsonTelemetry {
+                        slope_ema_gps: doser.last_slope_ema_gps(),
+                        stop_at_g: doser.early_stop_at_g(),
+                        coast_comp_g: doser.last_inflight_g(),
+                    };
+                    return Ok((final_g, tel));
                 }
                 doser_core::DosingStatus::Aborted(e) => {
                     let _ = doser.motor_stop();
@@ -756,12 +958,22 @@ fn run_dose(
             calibration_core.clone(),
             grams,
             estop_check_core,
+            Some(predictor_core.clone()),
             None,
             Some(_cfg.estop.debounce_n),
         )?;
         doser.begin();
         tracing::info!(target_g = grams, mode = "sampler", "dose start");
         loop {
+            // Check for shutdown signal
+            if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = doser.motor_stop();
+                return Err(doser_core::error::DoserError::Abort(
+                    doser_core::error::AbortReason::Estop,
+                )
+                .into());
+            }
+
             let t_start = std::time::Instant::now();
             let status = if let Some(raw) = sampler.latest() {
                 sample_count += 1;
@@ -776,8 +988,38 @@ fn run_dose(
                 doser_core::DosingStatus::Complete => {
                     let final_g = doser.last_weight();
                     tracing::info!(final_g, "dose complete");
-                    println!("final: {final_g:.2} g");
-                    break;
+                    if stats && !latencies.is_empty() {
+                        let expected_period_us =
+                            doser_core::util::period_us(_cfg.filter.sample_rate_hz);
+                        let min = *latencies.iter().min().unwrap_or(&0);
+                        let max = *latencies.iter().max().unwrap_or(&0);
+                        let avg = latencies.iter().sum::<u64>() as f64 / latencies.len() as f64;
+                        let stdev = if latencies.len() > 1 {
+                            let mean = avg;
+                            let var = latencies
+                                .iter()
+                                .map(|&x| (x as f64 - mean).powi(2))
+                                .sum::<f64>()
+                                / (latencies.len() as f64 - 1.0);
+                            var.sqrt()
+                        } else {
+                            0.0
+                        };
+                        eprintln!("\n--- Doser Stats ---");
+                        eprintln!("Samples: {sample_count}");
+                        eprintln!("Period (us): {expected_period_us}");
+                        eprintln!(
+                            "Latency min/avg/max/stdev (us): {min:.0} / {avg:.1} / {max:.0} / {stdev:.1}"
+                        );
+                        eprintln!("Missed deadlines (> period): {missed_deadlines}");
+                        eprintln!("-------------------\n");
+                    }
+                    let tel = JsonTelemetry {
+                        slope_ema_gps: doser.last_slope_ema_gps(),
+                        stop_at_g: doser.early_stop_at_g(),
+                        coast_comp_g: doser.last_inflight_g(),
+                    };
+                    return Ok((final_g, tel));
                 }
                 doser_core::DosingStatus::Aborted(e) => {
                     let _ = doser.motor_stop();
@@ -801,34 +1043,15 @@ fn run_dose(
             _cfg.estop.debounce_n,
             prefer_timeout_first,
             sampling_mode,
+            Some(predictor_core),
         )?;
-        println!("final: {final_g:.2} g");
+        // Telemetry not available through runner; return nulls
+        let tel = JsonTelemetry::default();
+        return Ok((final_g, tel));
     }
-
-    if stats && !latencies.is_empty() {
-        let expected_period_us = doser_core::util::period_us(_cfg.filter.sample_rate_hz);
-        let min = *latencies.iter().min().unwrap();
-        let max = *latencies.iter().max().unwrap();
-        let avg = latencies.iter().sum::<u64>() as f64 / latencies.len() as f64;
-        let stdev = if latencies.len() > 1 {
-            let mean = avg;
-            let var = latencies
-                .iter()
-                .map(|&x| (x as f64 - mean).powi(2))
-                .sum::<f64>()
-                / (latencies.len() as f64 - 1.0);
-            var.sqrt()
-        } else {
-            0.0
-        };
-        eprintln!("\n--- Doser Stats ---");
-        eprintln!("Samples: {sample_count}");
-        eprintln!("Period (us): {expected_period_us}");
-        eprintln!("Latency min/avg/max/stdev (us): {min:.0} / {avg:.1} / {max:.0} / {stdev:.1}");
-        eprintln!("Missed deadlines (> period): {missed_deadlines}");
-        eprintln!("-------------------\n");
-    }
-    Ok(())
+    // Unreachable
+    #[allow(unreachable_code)]
+    Ok((0.0, JsonTelemetry::default()))
 }
 
 #[cfg(target_os = "linux")]
@@ -844,11 +1067,8 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         CPU_ISSET,
         CPU_SET,
         CPU_ZERO,
-        MCL_CURRENT,
-        MCL_FUTURE,
         SCHED_FIFO,
-        // Memory locking
-        mlockall,
+        // Memory locking (used by affinity helpers; mlockall imported inside helper if needed)
         // Scheduling (FIFO priority)
         sched_get_priority_max,
         sched_get_priority_min,
@@ -867,49 +1087,75 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
     // Apply process memory locking according to the selected mode.
     // Security/privileges: may require CAP_IPC_LOCK or a sufficient memlock ulimit.
     #[inline]
-    fn try_apply_mem_lock(lock: RtLock) -> std::io::Result<()> {
+    fn try_apply_mem_lock(lock: RtLock) -> eyre::Result<()> {
         #[inline]
         fn is_retryable_memlock_error(err: &std::io::Error) -> bool {
             matches!(err.raw_os_error(), Some(code) if code == libc::EPERM || code == libc::ENOMEM)
         }
+        use libc::{MCL_CURRENT, MCL_FUTURE, mlockall};
+
         // Helper: read current memlock rlimit for diagnostics
         #[inline]
         fn memlock_limit_hint() -> Option<String> {
-            let mut lim: libc::rlimit = unsafe { std::mem::zeroed() };
-            let rc = unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut lim) };
-            if rc == 0 {
-                let cur = lim.rlim_cur;
-                if cur == libc::RLIM_INFINITY {
-                    Some("memlock limit: unlimited".to_string())
+            // Best-effort portability: use libc getrlimit when available
+            // SAFETY: getrlimit writes into a stack-allocated rlimit; resource constant is valid.
+            unsafe {
+                let mut rlim = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+                let rc = libc::getrlimit(libc::RLIMIT_MEMLOCK, rlim.as_mut_ptr());
+                if rc == 0 {
+                    let r = rlim.assume_init();
+                    let cur = r.rlim_cur;
+                    if cur == libc::RLIM_INFINITY {
+                        Some("memlock limit: unlimited".to_string())
+                    } else {
+                        Some(format!("memlock limit: {} KiB", cur / 1024))
+                    }
                 } else {
-                    Some(format!("memlock limit: {} KiB", cur / 1024))
+                    None
                 }
-            } else {
-                None
             }
         }
 
-        // SAFETY: mlockall is an FFI call with constant flags; no pointers are used.
-        let (rc, attempted_all) = unsafe {
-            match lock {
-                RtLock::None => return Ok(()),
-                RtLock::Current => (mlockall(MCL_CURRENT), false),
-                RtLock::All => (mlockall(MCL_CURRENT | MCL_FUTURE), true),
+        #[inline]
+        fn lock_current() -> std::io::Result<()> {
+            // SAFETY: mlockall is a pure syscall; no pointers passed.
+            let rc = unsafe { mlockall(MCL_CURRENT) };
+            if rc != 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
             }
+        }
+        #[inline]
+        fn lock_all() -> std::io::Result<()> {
+            // SAFETY: mlockall is a pure syscall; no pointers passed.
+            let rc = unsafe { mlockall(MCL_CURRENT | MCL_FUTURE) };
+            if rc != 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
+
+        let attempted_all = matches!(lock, RtLock::All);
+        let result: std::io::Result<()> = match lock {
+            RtLock::None => Ok(()),
+            RtLock::Current => lock_current(),
+            RtLock::All => lock_all(),
         };
-        if rc == 0 {
+        if result.is_ok() {
             return Ok(());
         }
-        let err = std::io::Error::last_os_error();
+        let err = result
+            .err()
+            .unwrap_or_else(|| std::io::Error::other("mlockall failed"));
 
         // Fallback: if All failed due to permission or memory, try Current
         let mut fallback_err: Option<std::io::Error> = None;
         if attempted_all && is_retryable_memlock_error(&err) {
-            let rc2 = unsafe { mlockall(MCL_CURRENT) };
-            if rc2 == 0 {
-                return Ok(());
-            } else {
-                fallback_err = Some(std::io::Error::last_os_error());
+            match lock_current() {
+                Ok(()) => return Ok(()),
+                Err(e2) => fallback_err = Some(e2),
             }
         }
 
@@ -932,13 +1178,46 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
                 msg.push_str(&format!("; fallback mlockall(current) also failed: {e2}"));
             }
         }
-        Err(std::io::Error::new(err.kind(), msg))
+        Err(eyre::eyre!(msg))
     }
 
     // Apply SCHED_FIFO priority, clamped to the system range.
     // Security/privileges: typically requires CAP_SYS_NICE or root.
     #[inline]
-    fn try_apply_fifo_priority(prio: Option<i32>) -> std::io::Result<()> {
+    fn try_apply_fifo_priority(prio: Option<i32>) -> eyre::Result<()> {
+        // Check for CAP_SYS_NICE capability (best effort)
+        #[cfg(target_os = "linux")]
+        {
+            use std::fs;
+            // Read /proc/self/status to check for CAP_SYS_NICE
+            if let Ok(status) = fs::read_to_string("/proc/self/status") {
+                let has_cap = status.lines().any(|line| {
+                    if line.starts_with("CapEff:") || line.starts_with("CapPrm:") {
+                        // CAP_SYS_NICE is bit 23 (0x800000)
+                        if let Some(hex) = line.split_whitespace().nth(1)
+                            && let Ok(caps) = u64::from_str_radix(hex, 16)
+                        {
+                            return caps & 0x800000 != 0;
+                        }
+                    }
+                    false
+                });
+
+                if !has_cap {
+                    // Check if we're root as fallback
+                    let is_root = unsafe { libc::geteuid() == 0 };
+                    if !is_root {
+                        return Err(eyre::eyre!(
+                            "Insufficient privileges for SCHED_FIFO: needs CAP_SYS_NICE or root. \
+                            Current effective UID: {}. \
+                            Hint: Run with 'sudo' or grant CAP_SYS_NICE: 'sudo setcap cap_sys_nice=ep /path/to/doser'",
+                            unsafe { libc::geteuid() }
+                        ));
+                    }
+                }
+            }
+        }
+
         // SAFETY: calls query priority range without pointers.
         let (min, max) = unsafe {
             let min = sched_get_priority_min(SCHED_FIFO);
@@ -955,9 +1234,10 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
             sched_priority: prio_val,
         };
         // SAFETY: sched_setscheduler takes a pointer to our stack `param`; lifetime is valid for the call.
+        // SAFETY: sched_setscheduler takes a pointer to our stack param; PID 0 = current process.
         let rc = unsafe { sched_setscheduler(0, SCHED_FIFO, &param) };
         if rc != 0 {
-            Err(std::io::Error::last_os_error())
+            Err(eyre::eyre!(std::io::Error::last_os_error()))
         } else {
             Ok(())
         }
@@ -970,21 +1250,26 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         rt_cpu: Option<usize>,
         online_cpus: &OnceLock<libc::c_long>,
         mask: &OnceLock<libc::cpu_set_t>,
-    ) -> std::io::Result<()> {
+    ) -> eyre::Result<()> {
         // Capacity reference: see module-level MAX_CPUSET_BITS.
         // Cache online CPUs
-        let _ = online_cpus.get_or_init(|| unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) });
+        let _ = online_cpus.get_or_init(|| {
+            // SAFETY: sysconf(_SC_NPROCESSORS_ONLN) returns a scalar; no side-effects.
+            unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) }
+        });
         // Get current allowed mask; on failure, fallback to [0..online_cpus)
         let _ = mask.get_or_init(|| {
+            // SAFETY: zeroed cpu_set_t is a valid initial mask structure
             let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-            // SAFETY: set points to a valid cpu_set_t we just zero-initialized
+            // SAFETY: CPU_ZERO initializes the mask memory we provide
             unsafe { CPU_ZERO(&mut set) };
-            // SAFETY: sched_getaffinity writes into &mut set up to size_of::<cpu_set_t>() bytes
+            // SAFETY: sched_getaffinity writes up to size_of::<cpu_set_t>() into &mut set
             let rc = unsafe {
                 libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set)
             };
             if rc != 0 {
                 // Reset to empty, then mark CPUs [0..n) as allowed (clamped to cpuset capacity)
+                // SAFETY: pointer valid, structure on stack
                 unsafe { CPU_ZERO(&mut set) };
                 let n = online_cpus
                     .get()
@@ -993,7 +1278,7 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
                 let n = if n < 0 { 0 } else { n as usize };
                 let n = n.min(MAX_CPUSET_BITS);
                 for i in 0..n {
-                    // SAFETY: i < max_cpuset_bits ensures CPU_SET stays within the bitset
+                    // SAFETY: i < capacity ensures CPU_SET stays within the bitset
                     unsafe { CPU_SET(i, &mut set) };
                 }
             }
@@ -1001,42 +1286,35 @@ fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<usize
         });
         let nprocs_onln = *online_cpus.get().unwrap_or(&0);
         if nprocs_onln < 1 {
-            return Err(std::io::Error::other("_SC_NPROCESSORS_ONLN < 1"));
+            eyre::bail!("_SC_NPROCESSORS_ONLN < 1");
         }
         let target = rt_cpu.unwrap_or(0);
         if target as libc::c_long >= nprocs_onln {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("requested CPU {target} >= online {nprocs_onln}"),
-            ));
+            eyre::bail!("requested CPU {target} >= online {nprocs_onln}");
         }
         if target >= MAX_CPUSET_BITS {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("requested CPU {target} exceeds cpu_set_t capacity {MAX_CPUSET_BITS}"),
-            ));
+            eyre::bail!("requested CPU {target} exceeds cpu_set_t capacity {MAX_CPUSET_BITS}");
         }
-        let allowed = mask.get().expect("cpuset init");
-        // SAFETY: target < max_cpuset_bits and `allowed` points to a valid cpu_set_t
-        // Normalize CPU_ISSET return type across libc variants (bool vs c_int)
+        let Some(allowed) = mask.get() else {
+            eyre::bail!("cpuset init failed");
+        };
+        // SAFETY: target < max_cpuset_bits and `allowed` points to a valid cpu_set_t.
+        // Normalize CPU_ISSET return type across libc variants (bool vs c_int).
         let allowed_target = unsafe { (CPU_ISSET(target, allowed) as libc::c_int) != 0 };
         if !allowed_target {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!("CPU {target} not permitted by current affinity mask"),
-            ));
+            eyre::bail!("CPU {target} not permitted by current affinity mask");
         }
+        // SAFETY: zeroed cpu_set_t becomes a valid mask; CPU_SET index is checked above.
         let mut desired: libc::cpu_set_t = unsafe { std::mem::zeroed() };
-        // SAFETY: desired is a valid cpu_set_t; target < max_cpuset_bits ensures CPU_SET bounds
         unsafe {
             CPU_ZERO(&mut desired);
             CPU_SET(target, &mut desired);
         }
-        // SAFETY: sched_setaffinity reads exactly size_of::<cpu_set_t>() bytes from &desired
+        // SAFETY: sched_setaffinity reads size_of::<cpu_set_t>() bytes from &desired
         let rc =
             unsafe { libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &desired) };
         if rc != 0 {
-            Err(std::io::Error::last_os_error())
+            Err(eyre::eyre!(std::io::Error::last_os_error()))
         } else {
             Ok(())
         }

@@ -1,3 +1,10 @@
+#![cfg_attr(all(not(debug_assertions), not(test)), deny(warnings))]
+#![cfg_attr(
+    all(not(debug_assertions), not(test)),
+    deny(clippy::all, clippy::pedantic, clippy::nursery)
+)]
+#![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 //! doser_hardware: hardware and simulation backends behind `doser_traits`.
 //!
 //! Features:
@@ -6,6 +13,10 @@
 //!
 //! Note: The `rppal` dependency is optional and only enabled when the `hardware`
 //!       feature is active. This lets CI on x86 build without pulling GPIO libs.
+//!
+//! Safety & RT notes
+//! - Where `unsafe` is required (GPIO, libc), calls are isolated with explicit
+//!   invariants and error paths. RT elevation is feature-gated and optional.
 
 pub mod error;
 pub mod util;
@@ -279,17 +290,20 @@ pub mod pacing {
                 }
             }
             pub fn elapsed(&self) -> Duration {
-                *self.offset.lock().unwrap()
+                // Test helper: if mutex is poisoned, default to zero elapsed
+                self.offset.lock().map(|g| *g).unwrap_or(Duration::ZERO)
             }
         }
         impl Sleeper for FakeSleeper {
             fn now(&self) -> Instant {
-                self.origin + *self.offset.lock().unwrap()
+                let off = self.offset.lock().map(|g| *g).unwrap_or(Duration::ZERO);
+                self.origin + off
             }
             fn sleep_until(&self, deadline: Instant) {
-                let mut off = self.offset.lock().unwrap();
-                let dur = deadline.saturating_duration_since(self.origin);
-                *off = dur;
+                if let Ok(mut off) = self.offset.lock() {
+                    let dur = deadline.saturating_duration_since(self.origin);
+                    *off = dur;
+                }
             }
         }
 
@@ -600,11 +614,6 @@ pub mod hardware {
         std::hint::spin_loop();
     }
 
-    /// Sleep for microseconds using std; coarse but sufficient for <= 5 kHz.
-    fn spin_sleep_us(us: u64) {
-        MonotonicClock::new().sleep(Duration::from_micros(us));
-    }
-
     /// Busy-wait for at least ~1 microsecond to cleanly separate edges.
     #[inline(always)]
     fn busy_wait_min_1us() {
@@ -646,14 +655,6 @@ pub mod hardware {
         while i < n {
             std::hint::spin_loop();
             i = i.wrapping_add(1);
-        }
-    }
-
-    /// Sleep until an absolute deadline by sleeping the remaining delta.
-    fn sleep_until(deadline: std::time::Instant) {
-        let now = std::time::Instant::now();
-        if deadline > now {
-            MonotonicClock::new().sleep(deadline - now);
         }
     }
 

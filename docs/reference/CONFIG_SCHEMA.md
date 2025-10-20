@@ -14,6 +14,7 @@ Example minimal file: see `etc/doser_config.toml`.
 - [logging](#logging)
 - [hardware](#hardware)
 - [calibration CSV](#calibration-csv)
+- [predictor](#predictor)
 
 ## [pins]
 
@@ -74,6 +75,17 @@ Notes:
 ## [hardware]
 
 - sensor_read_timeout_ms: u64 (>= 1). Default: 150
+
+## [predictor]
+
+- enabled: bool. Default: false
+- window: usize (>= 1). Default: 6
+- extra_latency_ms: u64 (>= 0). Default: 20
+- min_progress_ratio: f32 ([0.0, 1.0]). Default: 0.10
+
+Semantics:
+
+- When enabled, the core maintains a rolling slope estimate and predicts in-flight grams using the configured extra latency. If the predicted final mass (current + in-flight + epsilon) would cross target, the motor is stopped early to reduce overshoot. Activation is gated until at least `min_progress_ratio` of target is reached to avoid early noise.
 
 ## Calibration CSV
 

@@ -1,7 +1,43 @@
 # Doser Project
 
 ![CI](https://github.com/cesuratx/doser/actions/workflows/ci.yml/badge.svg)
-![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+![Security](https://github.com/cesuratx/doser/actions/workflows/security.yml/badge.svg)
+![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)
+
+## ⚠️ Important Notices
+
+### API Stability
+
+**This project is pre-1.0 and under active development.** The API may change significantly between minor versions (0.x releases). For production use, pin to exact versions:
+
+```toml
+doser_core = "=0.1.0"  # Exact version pinning recommended
+```
+
+**API Stability Policy:**
+
+- **Pre-1.0 (current)**: Minor versions (0.x) may contain breaking changes. Patch versions (0.x.y) are backwards-compatible bug fixes only.
+- **Post-1.0**: Follows strict semantic versioning. Breaking changes only in major versions (x.0.0). Deprecations announced one minor version in advance.
+
+### Safety Notice
+
+**This software is provided for educational and experimental use only.**  
+It has **NOT been certified** for safety-critical applications.
+
+For production dosing systems in commercial or safety-critical environments, you **MUST**:
+
+- ✅ Perform independent safety analysis (FMEA, FTA)
+- ✅ Implement redundant safety mechanisms (e.g., independent overfill detection)
+- ✅ Comply with applicable regulations (FDA, CE, IEC 61508, ISO 13849, etc.)
+- ✅ Obtain professional engineering review and certification
+- ✅ Conduct thorough testing with your specific hardware and materials
+- ✅ Implement proper fail-safe mechanisms and emergency stops
+
+**⚠️ USE AT YOUR OWN RISK. NO WARRANTY PROVIDED.**
+
+See LICENSE files for full legal terms.
+
+---
 
 ## Quick Start
 
@@ -89,6 +125,24 @@ Crates:
 - doser_config: typed config/CSV loaders
 - doser_hardware: hardware and simulation backends
 - doser_traits: Scale/Motor traits and Clock
+
+## Documentation
+
+📖 **[Complete Documentation Index](./docs/INDEX.md)** - Start here for comprehensive navigation
+
+**Quick Links**:
+
+- **Getting Started**: [Developer Handbook](./docs/guides/DeveloperHandbook.md) | [Rust Primer](./docs/guides/RUST_PRIMER.md)
+- **Configuration**: [Config Schema](./docs/reference/CONFIG_SCHEMA.md) | [Operations Guide](./docs/reference/OPERATIONS.md)
+- **Architecture**: [System Overview](./docs/architecture/ARCHITECTURE.md) | [Concepts](./docs/concepts/)
+- **Operations**: [Runbook](./docs/ops/Runbook.md) | [Pi Smoke Test](./docs/reference/PI_SMOKE.md)
+- **Reviews**: [Security](./docs/reviews/security-performance-review.md) | [Business](./docs/reviews/business-best-practices-review.md)
+
+**By Role**:
+
+- 👤 **User**: [Config](./docs/reference/CONFIG_SCHEMA.md) | [Operations](./docs/reference/OPERATIONS.md)
+- 👨‍💻 **Developer**: [Handbook](./docs/guides/DeveloperHandbook.md) | [Architecture](./docs/architecture/) | [ADRs](./docs/adr/)
+- 🔧 **Operator**: [Runbook](./docs/ops/Runbook.md) | [Troubleshooting](./docs/reference/OPERATIONS.md)
 
 ## Configuration (TOML)
 

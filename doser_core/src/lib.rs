@@ -1,23 +1,41 @@
+#![cfg_attr(all(not(debug_assertions), not(test)), deny(warnings))]
+#![cfg_attr(
+    all(not(debug_assertions), not(test)),
+    deny(clippy::all, clippy::pedantic, clippy::nursery)
+)]
+#![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 //! Core dosing logic (hardware-agnostic).
-//! - Keeps all hardware behind doser_traits::Scale/Motor
-//! - Exposes a small builder to wire config + traits
-//! - One-step control loop (call step() from the CLI or a strategy)
 //!
-//! Fixed-point arithmetic strategy
-//! - Internals operate primarily in integer centigrams (cg, 1 cg = 0.01 g) to avoid
-//!   per-sample floating-point math in the control loop and to keep thresholds in a
-//!   single unit. See `Calibration::to_cg` for the conversion path and quantization.
-//! - The helper `div_round_nearest_i32` provides round-to-nearest integer division with
-//!   ties away from zero, which is used to compute unbiased medians and moving averages
-//!   in cg space.
-//! - Saturating arithmetic is used where appropriate (e.g., `saturating_sub/mul/add`) to
-//!   prevent overflow with extreme parameters while preserving monotonicity.
+//! This crate provides the hardware-independent dosing engine. All hardware
+//! interactions go through `doser_traits::Scale` and `doser_traits::Motor` traits.
+//!
+//! ## Architecture
+//!
+//! - **Calibration**: Linear model for raw→grams conversion (`calibration` module)
+//! - **Configuration**: All config structs (`config` module)
+//! - **Filtering**: Median, moving average, EMA smoothing
+//! - **Control**: Multi-speed control with hysteresis (`DoserCore`)
+//! - **Safety**: Watchdogs for runtime, overshoot, no-progress
+//! - **Status**: Dosing state machine (`status` module)
+//!
+//! ## Fixed-Point Arithmetic
+//!
+//! Internals operate in **centigrams** (cg, 1 cg = 0.01 g) using `i32` for deterministic
+//! behavior. See `Calibration::to_cg` for conversion and `quantize_to_cg_i32` for rounding.
 
+// Module declarations
 pub mod error;
 pub mod mocks;
 pub mod runner;
 pub mod sampler;
 pub mod util;
+
+// TODO: Future refactoring - extract these types into dedicated modules:
+// - calibration.rs: Calibration struct
+// - config.rs: FilterCfg, ControlCfg, SafetyCfg, PredictorCfg, Timeouts
+// - status.rs: DosingStatus enum
+// This will reduce lib.rs from 1600+ lines to ~800 lines
 
 use crate::error::BuildError;
 use crate::error::{AbortReason, DoserError, Result};
@@ -384,6 +402,11 @@ pub struct DoserCore<S: doser_traits::Scale, M: doser_traits::Motor> {
     pred_hist: VecDeque<(u64, i32)>, // (ms_since_epoch, weight_cg)
     pred_latency_ms: u64,            // effective latency budget (ms)
 
+    // Telemetry for CLI JSON and debugging
+    last_slope_ema_cg_per_ms: Option<f32>,
+    last_inflight_cg: Option<i32>,
+    early_stop_at_cg: Option<i32>,
+
     // Cached speed bands (thresholds in centigrams), sorted descending by threshold
     speed_bands_cg: Vec<(i32, u32)>,
 }
@@ -575,6 +598,10 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
         self.estop_count = 0;
         // Reset predictor history
         self.pred_hist.clear();
+        // Reset telemetry
+        self.last_slope_ema_cg_per_ms = None;
+        self.last_inflight_cg = None;
+        self.early_stop_at_cg = None;
     }
 
     /// Stop the motor (best-effort).
@@ -583,6 +610,19 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             .stop()
             .map_err(|e| eyre::Report::new(map_hw_error_dyn(&*e)))
             .wrap_err("motor_stop")
+    }
+
+    /// Telemetry: last slope EMA in grams per second (approx), if available.
+    pub fn last_slope_ema_gps(&self) -> Option<f32> {
+        self.last_slope_ema_cg_per_ms.map(|v| v * 0.01 * 1000.0)
+    }
+    /// Telemetry: inflight mass estimate in grams at last check, if available.
+    pub fn last_inflight_g(&self) -> Option<f32> {
+        self.last_inflight_cg.map(|cg| (cg as f32) * 0.01)
+    }
+    /// Telemetry: weight at which predictor triggered early stop, in grams, if any.
+    pub fn early_stop_at_g(&self) -> Option<f32> {
+        self.early_stop_at_cg.map(|cg| (cg as f32) * 0.01)
     }
 
     /// Poll the E-stop input with debounce; returns true if latched.
@@ -636,7 +676,7 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
                 debug_assert!(n <= med_win, "median buffer exceeded window size");
             }
             let mid = n / 2;
-            if n % 2 == 0 {
+            if n.is_multiple_of(2) {
                 // n >= 2 here, so mid >= 1 and mid-1 is safe
                 let a = self.tmp_med_buf[mid - 1];
                 let b = self.tmp_med_buf[mid];
@@ -887,7 +927,9 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             return false;
         }
         // Use simple slope estimate: (last - first) / dt
-        let (t0, w0) = self.pred_hist.front().copied().unwrap();
+        let Some((t0, w0)) = self.pred_hist.front().copied() else {
+            return false;
+        };
         let dt_ms = now_ms.saturating_sub(t0);
         if dt_ms == 0 {
             return false;
@@ -909,6 +951,19 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
         };
         let inflight_cg = inflight_i64.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
 
+        // Update telemetry: slope EMA (cg/ms) and inflight mass (cg)
+        let slope_cg_per_ms = (dw_cg as f32) / (den as f32); // den=dt_ms
+        let alpha = if self.filter.ema_alpha.is_finite() && self.filter.ema_alpha > 0.0 {
+            self.filter.ema_alpha
+        } else {
+            0.3
+        };
+        self.last_slope_ema_cg_per_ms = Some(match self.last_slope_ema_cg_per_ms {
+            None => slope_cg_per_ms,
+            Some(prev) => alpha * slope_cg_per_ms + (1.0 - alpha) * prev,
+        });
+        self.last_inflight_cg = Some(inflight_cg);
+
         let predicted = w_cg
             .saturating_add(inflight_cg)
             .saturating_add(self.epsilon_cg);
@@ -916,6 +971,8 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             if let Err(e) = self.motor_stop() {
                 tracing::warn!(error = %e, "motor_stop failed on predictor early-stop");
             }
+            // Record early stop point (cg)
+            self.early_stop_at_cg = Some(w_cg);
             tracing::debug!(
                 w_cg,
                 inflight_cg,
@@ -986,6 +1043,21 @@ impl Doser {
     /// Stop the motor (best-effort).
     pub fn motor_stop(&mut self) -> Result<()> {
         self.inner.motor_stop()
+    }
+
+    /// Telemetry: last slope EMA in grams per second (approx), if available.
+    pub fn last_slope_ema_gps(&self) -> Option<f32> {
+        self.inner
+            .last_slope_ema_cg_per_ms
+            .map(|v| v * 0.01 * 1000.0)
+    }
+    /// Telemetry: inflight mass estimate in grams at last check, if available.
+    pub fn last_inflight_g(&self) -> Option<f32> {
+        self.inner.last_inflight_cg.map(|cg| (cg as f32) * 0.01)
+    }
+    /// Telemetry: weight at which predictor triggered early stop, in grams, if any.
+    pub fn early_stop_at_g(&self) -> Option<f32> {
+        self.inner.early_stop_at_cg.map(|cg| (cg as f32) * 0.01)
     }
 }
 
@@ -1234,6 +1306,9 @@ impl<S, M, T> DoserBuilder<S, M, T> {
                 pred_hist: VecDeque::with_capacity(8),
                 pred_latency_ms,
                 speed_bands_cg,
+                last_slope_ema_cg_per_ms: None,
+                last_inflight_cg: None,
+                early_stop_at_cg: None,
             },
         })
     }
@@ -1450,6 +1525,7 @@ pub fn build_doser<S, M>(
     calibration: Option<Calibration>,
     target_g: f32,
     estop_check: Option<Box<dyn Fn() -> bool>>,
+    predictor: Option<PredictorCfg>,
     clock: Option<Box<dyn Clock + Send + Sync>>,
     estop_debounce_n: Option<u8>,
 ) -> Result<DoserG<S, M>>
@@ -1533,8 +1609,8 @@ where
     let cal_gain_cg_per_count = quantize_to_cg_i32(calibration.gain_g_per_count);
     let cal_offset_cg = quantize_to_cg_i32(calibration.offset_g);
 
-    // Predictor disabled by default for generic builder to preserve behavior.
-    let predictor = PredictorCfg::default();
+    // Predictor: default disabled unless provided by caller.
+    let predictor = predictor.unwrap_or_default();
     let pred_latency_ms = period_ms.saturating_add(predictor.extra_latency_ms);
 
     Ok(DoserG {
@@ -1573,5 +1649,8 @@ where
         pred_hist: VecDeque::with_capacity(8),
         pred_latency_ms,
         speed_bands_cg,
+        last_slope_ema_cg_per_ms: None,
+        last_inflight_cg: None,
+        early_stop_at_cg: None,
     })
 }

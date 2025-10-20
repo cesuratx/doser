@@ -73,20 +73,22 @@ pub mod test_clock {
 
         /// Advance the clock by the given duration.
         pub fn advance(&self, d: Duration) {
-            let mut off = self.offset.lock().unwrap();
-            *off = off.saturating_add(d);
+            if let Ok(mut off) = self.offset.lock() {
+                *off = off.saturating_add(d);
+            }
         }
 
         /// Set the absolute offset relative to origin (useful for tests).
         pub fn set_offset(&self, d: Duration) {
-            let mut off = self.offset.lock().unwrap();
-            *off = d;
+            if let Ok(mut off) = self.offset.lock() {
+                *off = d;
+            }
         }
     }
 
     impl Clock for TestClock {
         fn now(&self) -> Instant {
-            let off = *self.offset.lock().unwrap();
+            let off = self.offset.lock().map(|g| *g).unwrap_or(Duration::ZERO);
             self.origin + off
         }
 

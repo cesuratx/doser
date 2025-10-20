@@ -1,4 +1,4 @@
-//! Common time/period helpers for doser_core.
+//! Common helpers for time periods and integer rounding used in `doser_core`.
 
 /// Number of microseconds in one second.
 pub const MICROS_PER_SEC: u64 = 1_000_000;
