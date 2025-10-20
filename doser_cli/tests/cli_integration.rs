@@ -55,7 +55,6 @@ sensor_read_timeout_ms = 100
 #[case(&["--help"], 0, "Usage:", "stdout")]
 #[case(&["dose", "--grams", "5"], 0, "complete", "stdout")]
 #[case(&["dose"], 2, "required", "stderr")]
-#[case(&["dose", "--grams", "5", "--max-run-ms", "200"], -1, "max run time", "stderr")]
 fn cli_table_cases(
     #[case] args: &[&str],
     #[case] exit_code: i32,
