@@ -634,10 +634,38 @@ fn real_main(shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>) -> eyre::R
                             .unwrap_or(0);
                         let profile =
                             std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+                        // Recompute effective (rounded) target for JSON context
+                        let requested = grams;
+                        let effective = if cfg.precision.bean_weight_g > 0.0
+                            && cfg.precision.bean_weight_g.is_finite()
+                        {
+                            let bw = cfg.precision.bean_weight_g.max(0.001);
+                            let n = (requested / bw).round();
+                            (n * bw).max(0.1)
+                        } else {
+                            requested
+                        };
+                        // Bean counts (rounded) when bean_weight_g > 0
+                        let (requested_beans, target_beans, final_beans) =
+                            if cfg.precision.bean_weight_g > 0.0
+                                && cfg.precision.bean_weight_g.is_finite()
+                            {
+                                let bw = cfg.precision.bean_weight_g.max(0.001) as f64;
+                                let rb = ((requested as f64) / bw).round();
+                                let tb = ((effective as f64) / bw).round();
+                                let fb = ((final_g as f64) / bw).round();
+                                (Some(rb as u64), Some(tb as u64), Some(fb as u64))
+                            } else {
+                                (None, None, None)
+                            };
                         let obj = json!({
                             "timestamp": ts_ms,
-                            "target_g": format!("{grams:.3}").parse::<f64>().unwrap_or(0.0),
+                            "requested_g": format!("{requested:.3}").parse::<f64>().unwrap_or(0.0),
+                            "target_g": format!("{effective:.3}").parse::<f64>().unwrap_or(0.0),
                             "final_g": format!("{final_g:.3}").parse::<f64>().unwrap_or(0.0),
+                            "requested_beans": requested_beans,
+                            "target_beans": target_beans,
+                            "final_beans": final_beans,
                             "duration_ms": t0.elapsed().as_millis() as u64,
                             "profile": profile,
                             "slope_ema": tel.slope_ema_gps,
@@ -668,10 +696,36 @@ fn real_main(shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>) -> eyre::R
                         } else {
                             "Error"
                         };
+                        // Recompute effective (rounded) target for JSON context
+                        let requested = grams;
+                        let effective = if cfg.precision.bean_weight_g > 0.0
+                            && cfg.precision.bean_weight_g.is_finite()
+                        {
+                            let bw = cfg.precision.bean_weight_g.max(0.001);
+                            let n = (requested / bw).round();
+                            (n * bw).max(0.1)
+                        } else {
+                            requested
+                        };
+                        // Bean counts (rounded) when bean_weight_g > 0
+                        let (requested_beans, target_beans) = if cfg.precision.bean_weight_g > 0.0
+                            && cfg.precision.bean_weight_g.is_finite()
+                        {
+                            let bw = cfg.precision.bean_weight_g.max(0.001) as f64;
+                            let rb = ((requested as f64) / bw).round();
+                            let tb = ((effective as f64) / bw).round();
+                            (Some(rb as u64), Some(tb as u64))
+                        } else {
+                            (None, None)
+                        };
                         let obj = json!({
                             "timestamp": ts_ms,
-                            "target_g": format!("{grams:.3}").parse::<f64>().unwrap_or(0.0),
+                            "requested_g": format!("{requested:.3}").parse::<f64>().unwrap_or(0.0),
+                            "target_g": format!("{effective:.3}").parse::<f64>().unwrap_or(0.0),
                             "final_g": serde_json::Value::Null,
+                            "requested_beans": requested_beans,
+                            "target_beans": target_beans,
+                            "final_beans": serde_json::Value::Null,
                             "duration_ms": t0.elapsed().as_millis() as u64,
                             "profile": profile,
                             "slope_ema": serde_json::Value::Null,
@@ -769,12 +823,73 @@ fn run_dose(
         no_progress_ms: safety.no_progress_ms,
         no_progress_epsilon_g: safety.no_progress_epsilon_g,
     });
-    let calibration_core = calib.map(|c| doser_core::Calibration {
-        gain_g_per_count: c.scale_factor,
-        zero_counts: c.offset,
-        ..Default::default()
-    });
-    let (scale, motor) = hw;
+    // Destructure hardware as mutable for optional pre-dose routine
+    let (mut scale, mut motor) = hw;
+
+    // Precision: optional rounding of requested grams to nearest whole-bean multiple
+    let requested_g = grams;
+    let effective_g =
+        if _cfg.precision.bean_weight_g > 0.0 && _cfg.precision.bean_weight_g.is_finite() {
+            let bw = _cfg.precision.bean_weight_g.max(0.001);
+            let n = (requested_g / bw).round();
+            (n * bw).max(0.1) // keep within builder's target range lower bound
+        } else {
+            requested_g
+        };
+
+    // Optional pre-dosing routine: prefill spin and tare after prefill
+    if _cfg.predose.prefill_ms > 0 {
+        tracing::info!(
+            ms = _cfg.predose.prefill_ms,
+            sps = _cfg.predose.prefill_sps,
+            tare = _cfg.predose.tare_after_prefill,
+            "predose: starting prefill"
+        );
+        // Best-effort prefill; ignore errors but log
+        if let Err(e) = doser_traits::Motor::set_speed(&mut motor, _cfg.predose.prefill_sps) {
+            tracing::warn!(error = %e, "predose: set_speed failed");
+        } else if let Err(e) = doser_traits::Motor::start(&mut motor) {
+            tracing::warn!(error = %e, "predose: motor start failed");
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(_cfg.predose.prefill_ms));
+            if let Err(e) = doser_traits::Motor::stop(&mut motor) {
+                tracing::warn!(error = %e, "predose: motor stop failed");
+            }
+        }
+    }
+
+    // Decide calibration to use; may be overridden by tare-after-prefill
+    let mut calibration_core: Option<doser_core::Calibration> =
+        calib.map(|c| doser_core::Calibration {
+            gain_g_per_count: c.scale_factor,
+            zero_counts: c.offset,
+            ..Default::default()
+        });
+
+    if _cfg.predose.prefill_ms > 0 && _cfg.predose.tare_after_prefill {
+        let settle = std::time::Duration::from_millis(_cfg.predose.settle_ms.max(1));
+        std::thread::sleep(settle);
+        let timeout = std::time::Duration::from_millis(_cfg.timeouts.sample_ms.max(1));
+        match doser_traits::Scale::read(&mut scale, timeout) {
+            Ok(raw0) => {
+                let gain = calibration_core
+                    .as_ref()
+                    .map(|c| c.gain_g_per_count)
+                    .unwrap_or(0.01);
+                calibration_core = Some(doser_core::Calibration {
+                    gain_g_per_count: gain,
+                    zero_counts: raw0,
+                    offset_g: 0.0,
+                });
+                tracing::info!(raw0, "predose: tare baseline captured");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "predose: tare read failed; keeping existing calibration");
+            }
+        }
+    }
+
+    // Continue with normal flow
     let estop_check: Option<Box<dyn Fn() -> bool + Send + Sync>> = {
         #[cfg(all(feature = "hardware", target_os = "linux"))]
         {
@@ -857,7 +972,7 @@ fn run_dose(
             safety.clone(),
             timeouts.clone(),
             calibration_core.clone(),
-            grams,
+            effective_g,
             estop_check_core,
             Some(predictor_core.clone()),
             None,
@@ -956,7 +1071,7 @@ fn run_dose(
             safety.clone(),
             timeouts.clone(),
             calibration_core.clone(),
-            grams,
+            effective_g,
             estop_check_core,
             Some(predictor_core.clone()),
             None,
@@ -1038,7 +1153,7 @@ fn run_dose(
             safety,
             timeouts,
             calibration_core,
-            grams,
+            effective_g,
             estop_check,
             _cfg.estop.debounce_n,
             prefer_timeout_first,

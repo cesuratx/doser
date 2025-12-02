@@ -112,6 +112,30 @@ pub struct Hardware {
     pub sensor_read_timeout_ms: u64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct PreDoseCfg {
+    /// Optional prefill spin time before dosing begins (ms). 0 disables prefill.
+    pub prefill_ms: u64,
+    /// Motor speed during prefill in steps-per-second.
+    pub prefill_sps: u32,
+    /// If true, take a tare sample after prefill and set calibration zero to that raw value.
+    pub tare_after_prefill: bool,
+    /// Wait time after stopping prefill before taking the tare sample (ms).
+    pub settle_ms: u64,
+}
+
+impl Default for PreDoseCfg {
+    fn default() -> Self {
+        Self {
+            prefill_ms: 0,
+            prefill_sps: 800,
+            tare_after_prefill: false,
+            settle_ms: 200,
+        }
+    }
+}
+
 impl Default for Hardware {
     fn default() -> Self {
         Self {
@@ -138,6 +162,20 @@ impl Default for EstopCfg {
             debounce_n: 2,
             poll_ms: 5,
         }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct PrecisionCfg {
+    /// Average bean weight in grams; when > 0, target grams will be rounded
+    /// to the nearest multiple of this value.
+    pub bean_weight_g: f32,
+}
+
+impl Default for PrecisionCfg {
+    fn default() -> Self {
+        Self { bean_weight_g: 0.0 }
     }
 }
 
@@ -201,6 +239,9 @@ pub struct Config {
     pub logging: Logging,
     #[serde(default)]
     pub hardware: Hardware,
+    /// Precision helpers (e.g., bean rounding)
+    #[serde(default)]
+    pub precision: PrecisionCfg,
     /// Early-stop predictor configuration
     #[serde(default)]
     pub predictor: PredictorCfg,
@@ -210,6 +251,9 @@ pub struct Config {
     /// Runner/orchestration defaults
     #[serde(default)]
     pub runner: RunnerCfg,
+    /// Optional pre-dosing sequence to improve consistency/retention
+    #[serde(default)]
+    pub predose: PreDoseCfg,
     /// Optional persisted calibration; preferred at runtime over CSV when present.
     #[serde(default)]
     pub calibration: Option<PersistedCalibration>,
@@ -564,7 +608,28 @@ impl Config {
             eyre::bail!("estop.poll_ms must be >= 1");
         }
 
+        // Pre-dose
+        if self.predose.prefill_ms > 0 {
+            if self.predose.prefill_sps == 0 {
+                eyre::bail!("predose.prefill_sps must be > 0 when prefill_ms > 0");
+            }
+            if self.predose.settle_ms == 0 {
+                eyre::bail!("predose.settle_ms must be >= 1 when prefill is enabled");
+            }
+            if self.predose.prefill_ms > 60_000 {
+                eyre::bail!("predose.prefill_ms is unreasonably large (>60s)");
+            }
+            if self.predose.settle_ms > 10_000 {
+                eyre::bail!("predose.settle_ms is unreasonably large (>10s)");
+            }
+        }
+
         // Runner: no extra validation; serde restricts to known modes
+
+        // Precision
+        if !(self.precision.bean_weight_g >= 0.0 && self.precision.bean_weight_g <= 1.0) {
+            eyre::bail!("precision.bean_weight_g must be in [0.0, 1.0]");
+        }
 
         Ok(())
     }
