@@ -2,21 +2,22 @@
 # https://embarkstudios.github.io/cargo-deny/
 
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
-unsound = "warn"
+unmaintained = "all"
 yanked = "warn"
-notice = "warn"
+
 # Don't fail the build on index query failures (transient network issues)
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
+
 ignore = [
-    # Add advisory IDs to ignore here
+    # Add advisory IDs (or crate@version) to ignore here, optionally with a reason
+    # { id = "RUSTSEC-0000-0000", reason = "not reachable in our build" },
+    # "RUSTSEC-0000-0000",
+    # "some-crate@0.1.2",
 ]
 
 [licenses]
-unlicensed = "deny"
-# Allow common permissive licenses
+# All licenses are denied unless explicitly allowed
 allow = [
     "MIT",
     "Apache-2.0",
@@ -26,11 +27,9 @@ allow = [
     "Unicode-DFS-2016",
     "Unicode-3.0",      # Used by unicode-ident crate
 ]
-# Deny copyleft licenses that could cause issues for commercial users
-deny = ["GPL-2.0", "GPL-3.0", "AGPL-3.0"]
-copyleft = "warn"
-allow-osi-fsf-free = "neither"
-default = "deny"
+
+# Optional: ignore unpublished workspace crates' license fields
+private = { ignore = true }
 
 [bans]
 multiple-versions = "warn"
