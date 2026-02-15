@@ -10,28 +10,33 @@ motor_dir = 24
 # estop_in = 12       # optional; omit if not wired
 
 [filter]
-ma_window = 4
-median_window = 3
-sample_rate_hz = 50
+ma_window = 5       # 5-sample moving average smooths jitter
+median_window = 5   # median prefilter removes sensor spikes
+sample_rate_hz = 80 # 80 SPS (HX711 high-speed mode)
+# ema_alpha = 0.15      # uncomment for EMA trend smoothing (optional)
 
 [control]
-slow_at_g = 1.5     # switch to fine earlier
-coarse_speed = 900
-fine_speed = 120
-epsilon_g = 0.02    # stop just before target
-hysteresis_g = 0.05
-stable_ms = 400
-# <-- set non-zero; default in code is 0.0
+slow_at_g = 2.0 # switch to fine speed band earlier
+coarse_speed = 1100 # moderate coarse speed
+fine_speed = 80 # very slow approach near target
+epsilon_g = 0.02 # completion threshold: within 0.02 g of target
+hysteresis_g = 0.04 # tight settle band ±0.04 g
+stable_ms = 500 # 500 ms stable in band before declaring done
+speed_bands = [
+    { threshold_g = 2.0, sps = 1100 }, # >2.0 g away: full speed
+    { threshold_g = 1.0, sps = 600 },  # 1.0–2.0 g: medium
+    { threshold_g = 0.4, sps = 250 },  # 0.4–1.0 g: slow
+    { threshold_g = 0.15, sps = 80 },  # <0.4 g: creep to target
+]
 
 [timeouts]
-sample_ms = 120 # <-- required field name
+sample_ms = 100 # per-read sensor timeout
 
 [safety]
-max_run_ms = 60000
-max_overshoot_g = 5.0
+max_run_ms = 60000           # 60 s hard cap
+max_overshoot_g = 0.5        # tight overshoot guard for precision
 no_progress_epsilon_g = 0.02
-no_progress_ms = 1200
-
+no_progress_ms = 1500        # 1.5 s stall detection
 
 [logging]
 file = "doser.log"
@@ -42,6 +47,12 @@ level = "info"
 # sensor_read_timeout_ms = 150
 
 # Optional E‑stop configuration (used when pins.estop_in is set)
+[predictor]
+enabled = true            # predictive early-stop to reduce overshoot
+window = 6                # 6-sample rolling window for slope estimate
+extra_latency_ms = 30     # filter+sensor lag compensation
+min_progress_ratio = 0.10 # activate after 10% of target dispensed
+
 [estop]
 active_low = true # treat low level as pressed
 debounce_n = 2    # consecutive polls required to latch

@@ -3,9 +3,11 @@
 //! Chooses sampling mode (Direct/Event/Paced), computes stall thresholds,
 //! wires `Sampler` when needed, and enforces safety constraints (timeouts,
 //! max runtime). Returns success grams or domain abort errors.
+use crate::calibration::Calibration;
+use crate::config::{ControlCfg, FilterCfg, SafetyCfg, Timeouts};
 use crate::error::{AbortReason, DoserError, Result as CoreResult};
 use crate::sampler::Sampler;
-use crate::{Calibration, ControlCfg, DosingStatus, FilterCfg, SafetyCfg, Timeouts};
+use crate::status::DosingStatus;
 use doser_traits::clock::MonotonicClock;
 use std::time::Duration;
 
@@ -18,6 +20,21 @@ pub enum SamplingMode {
     Event,
     /// Rate-paced sampling at given Hz
     Paced(u32),
+}
+
+/// Grouped parameters for a dosing run (everything except hardware handles).
+#[derive(Debug, Clone)]
+pub struct RunParams {
+    pub filter: FilterCfg,
+    pub control: ControlCfg,
+    pub safety: SafetyCfg,
+    pub timeouts: Timeouts,
+    pub calibration: Option<Calibration>,
+    pub target_g: f32,
+    pub estop_debounce_n: u8,
+    pub prefer_timeout_first: bool,
+    pub mode: SamplingMode,
+    pub predictor: Option<crate::PredictorCfg>,
 }
 
 /// Compute the stall watchdog threshold in milliseconds.
@@ -83,54 +100,44 @@ fn stalled_now(elapsed_ms: u64, stalled_ms: u64, threshold_ms: u64) -> bool {
 
 /// Run the controller until completion or abort, returning final grams on success.
 /// The caller should pre-merge any safety overrides (e.g., max_run_ms) into `safety`.
-#[allow(clippy::too_many_arguments)]
 pub fn run<S, M>(
     scale: S,
     motor: M,
-    filter: FilterCfg,
-    control: ControlCfg,
-    safety: SafetyCfg,
-    timeouts: Timeouts,
-    calibration: Option<Calibration>,
-    target_g: f32,
     estop_check: Option<Box<dyn Fn() -> bool + Send + Sync>>,
-    estop_debounce_n: u8,
-    prefer_timeout_first: bool,
-    mode: SamplingMode,
-    predictor: Option<crate::PredictorCfg>,
+    params: RunParams,
 ) -> CoreResult<f32>
 where
     S: doser_traits::Scale + Send + 'static,
     M: doser_traits::Motor + 'static,
 {
-    match mode {
+    match params.mode {
         SamplingMode::Direct => run_direct(
             scale,
             motor,
-            filter,
-            control,
-            safety,
-            timeouts,
-            calibration,
-            target_g,
+            params.filter,
+            params.control,
+            params.safety,
+            params.timeouts,
+            params.calibration,
+            params.target_g,
             estop_check,
-            estop_debounce_n,
-            predictor.clone(),
+            params.estop_debounce_n,
+            params.predictor,
         ),
         SamplingMode::Event | SamplingMode::Paced(_) => run_with_sampler(
             scale,
             motor,
-            filter,
-            control,
-            safety,
-            timeouts,
-            calibration,
-            target_g,
+            params.filter,
+            params.control,
+            params.safety,
+            params.timeouts,
+            params.calibration,
+            params.target_g,
             estop_check,
-            estop_debounce_n,
-            prefer_timeout_first,
-            mode,
-            predictor,
+            params.estop_debounce_n,
+            params.prefer_timeout_first,
+            params.mode,
+            params.predictor,
         ),
     }
 }
