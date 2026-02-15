@@ -148,6 +148,7 @@ impl Default for DoserBuilder<Missing, Missing, Missing> {
 ///
 /// This is the single source of truth for validation and construction,
 /// used by both `DoserBuilder::try_build()` and `build_doser()`.
+#[allow(clippy::too_many_arguments)]
 fn validate_and_build<S: doser_traits::Scale, M: doser_traits::Motor>(
     scale: S,
     motor: M,

@@ -268,11 +268,11 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
                     break;
                 }
             }
-            if selected_band.is_none() {
-                if let Some((_thr_cg, sps)) = self.speed_bands_cg.last().copied() {
-                    selected_band = Some((_thr_cg, sps));
-                    target_speed = sps;
-                }
+            if selected_band.is_none()
+                && let Some((_thr_cg, sps)) = self.speed_bands_cg.last().copied()
+            {
+                selected_band = Some((_thr_cg, sps));
+                target_speed = sps;
             }
             let thr_g = selected_band
                 .map(|(cg, _)| (cg as f32) / 100.0)
