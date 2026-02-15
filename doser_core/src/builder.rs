@@ -196,7 +196,7 @@ fn validate_and_build<S: doser_traits::Scale, M: doser_traits::Motor>(
     }
     if safety.no_progress_epsilon_g.is_sign_negative() {
         return Err(eyre::Report::new(BuildError::InvalidConfig(
-            "no_progress_epsilon_g must be > 0",
+            "no_progress_epsilon_g must be >= 0",
         )));
     }
     if filter.sample_rate_hz == 0 {

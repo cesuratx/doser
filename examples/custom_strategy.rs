@@ -15,7 +15,7 @@ fn main() -> eyre::Result<()> {
 
     doser.begin();
     let max_attempts = 10_000_u32;
-    for attempt in 0..max_attempts {
+    for attempt in 1..=max_attempts {
         match doser.step()? {
             DosingStatus::Complete => {
                 println!(

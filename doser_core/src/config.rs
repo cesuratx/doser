@@ -106,9 +106,21 @@ pub struct SafetyCfg {
     pub max_overshoot_g: f32,
     /// Abort if weight doesn't change by at least this many grams
     /// for at least `no_progress_ms` while motor is commanded to run.
-    /// Set to 0.0 to disable.
+    ///
+    /// In the runtime configuration (`SafetyCfg`), a value of `0.0` is treated
+    /// as "disabled" (i.e. the no-progress watchdog is not enforced).
+    ///
+    /// Note: when loading from TOML via the `doser_config` crate,
+    /// `Config::validate()` rejects `no_progress_epsilon_g <= 0.0`,
+    /// so disabling this watchdog via TOML is not possible with that
+    /// validation in place.
     pub no_progress_epsilon_g: f32,
-    /// See `no_progress_epsilon_g`. 0 disables the watchdog.
+    /// See `no_progress_epsilon_g`. In `SafetyCfg`, `0` means "disabled".
+    ///
+    /// Note: when using TOML configuration via `doser_config`, the
+    /// `Config::validate()` implementation rejects `no_progress_ms == 0`,
+    /// so a disabled watchdog cannot be expressed through TOML with the
+    /// existing validation.
     pub no_progress_ms: u64,
 }
 

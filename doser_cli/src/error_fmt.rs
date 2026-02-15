@@ -113,7 +113,7 @@ pub fn format_error_json(err: &eyre::Report) -> String {
                 details.map(|s| json!({ "max_run_ms": s.max_run_ms }))
             }
             doser_core::error::AbortReason::NoProgress => details.map(|s| {
-                json!({ "no_progress_ms": s.no_progress_ms, "epsilon_g": s.no_progress_epsilon_g })
+                json!({ "no_progress_ms": s.no_progress_ms, "no_progress_epsilon_g": s.no_progress_epsilon_g })
             }),
             _ => None,
         };
