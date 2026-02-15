@@ -36,4 +36,3 @@ jobs:
           command: check
           arguments: --all-features
           log-level: warn
-          cargo-deny-version: "0.15.1"

@@ -120,12 +120,11 @@ pub fn setup_rt_once(rt: bool, prio: Option<i32>, lock: RtLock, rt_cpu: Option<u
             use std::fs;
             if let Ok(status) = fs::read_to_string("/proc/self/status") {
                 let has_cap = status.lines().any(|line| {
-                    if line.starts_with("CapEff:") || line.starts_with("CapPrm:") {
-                        if let Some(hex) = line.split_whitespace().nth(1)
-                            && let Ok(caps) = u64::from_str_radix(hex, 16)
-                        {
-                            return caps & 0x800000 != 0;
-                        }
+                    if (line.starts_with("CapEff:") || line.starts_with("CapPrm:"))
+                        && let Some(hex) = line.split_whitespace().nth(1)
+                        && let Ok(caps) = u64::from_str_radix(hex, 16)
+                    {
+                        return caps & 0x800000 != 0;
                     }
                     false
                 });
