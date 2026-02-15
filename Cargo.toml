@@ -3,7 +3,6 @@ members = [
     "doser_cli",
     "doser_core",
     "doser_hardware",
-    "doser_ui",
     "doser_config",
     "doser_traits",
 ]

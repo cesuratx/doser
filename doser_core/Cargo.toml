@@ -4,13 +4,19 @@ version = "0.1.0"
 edition.workspace = true
 license = "MIT OR Apache-2.0"
 
+[features]
+default = ["hardware-errors"]
+# Enable precise downcasting of doser_hardware::HwError in error mapping.
+# Disable for fully hardware-agnostic builds.
+hardware-errors = ["dep:doser_hardware"]
+
 [dependencies]
 crossbeam-channel = "0.5"
 doser_traits = { path = "../doser_traits" }
-chrono = "0.4"
+doser_config = { path = "../doser_config" }
 thiserror = { workspace = true }
 toml = { workspace = true }
-doser_hardware = { path = "../doser_hardware" }
+doser_hardware = { path = "../doser_hardware", optional = true }
 eyre = "0.6.12"
 tracing = "0.1"
 
