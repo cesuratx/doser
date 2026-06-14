@@ -1,1 +1,4 @@
 /target
+
+# Runtime log output (logging.file in doser_config.toml)
+*.log

@@ -209,10 +209,10 @@ Pin 32 (GPIO 12) ──── One terminal
 Pin 6  (GND)    ──── Other terminal
 ```
 
-- The software uses an **internal pull-up** — no external resistor needed.
-- When pressed, GPIO 12 goes LOW, triggering the safety latch.
-- Configured as `active_low = true` in `doser_config.toml`.
-- The E-stop latches until the next `begin()` (next dose cycle).
+- The software enables the GPIO's **internal pull-up** — no external resistor needed.
+- With `active_low = true` (default) and a **normally-open** button to GND: open = HIGH (idle), pressed = LOW (stop).
+- For a **fail-safe** setup, use a **normally-closed** button and set `active_low = false`: a pressed button _or a cut wire_ both trigger the stop. Recommended for unattended/commercial use.
+- The E-stop is debounced (`estop.debounce_n`) and latches until the next `begin()` (next dose cycle).
 
 ---
 
@@ -307,10 +307,10 @@ raw,grams
 To get the `raw` values, run a quick test read:
 
 ```bash
-./target/release/doser_cli --config doser_config.toml self-check
+./target/release/doser_cli --config doser_config.toml health
 ```
 
-The self-check prints the raw count from the HX711. Note the value with no weight (tare), then place each calibration weight and record the raw count.
+The `health` command prints the raw count from the HX711 (`✓ Scale: responsive (raw: …)`). Note the value with no weight (tare), then place each calibration weight and record the raw count. (`self-check` only reports the detected sample rate, not the raw count.)
 
 ### 7.3 Alternatively: Persisted Calibration in TOML
 
