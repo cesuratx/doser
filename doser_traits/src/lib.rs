@@ -7,7 +7,10 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 //! Traits that define the hardware and time abstractions used by the system.
 //!
-//! - `Scale` provides a blocking `read(timeout)` API that returns mass in centigrams (i32).
+//! - `Scale` provides a blocking `read(timeout)` API that returns a raw ADC
+//!   reading in counts (i32). Calibration in `doser_core` converts counts to
+//!   grams/centigrams. (The simulation backend happens to use a 1 count = 0.01 g
+//!   scale, so its raw counts equal centigrams, but that is not part of the contract.)
 //! - `Motor` configures/starts/stops motor stepping at steps-per-second.
 //! - `clock` offers a `MonotonicClock` for deterministic timing and testability.
 //!
@@ -18,6 +21,7 @@ pub mod clock;
 pub use clock::{Clock, MonotonicClock};
 
 pub trait Scale {
+    /// Read one raw ADC sample in counts, blocking up to `timeout`.
     fn read(
         &mut self,
         timeout: std::time::Duration,

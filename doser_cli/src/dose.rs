@@ -257,6 +257,13 @@ pub fn run_dose(
                 .into());
             }
 
+            // Out-of-band E-stop poll (decoupled from sample arrival).
+            if doser.poll_estop_stop() {
+                return Err(doser_core::error::DoserError::Abort(
+                    doser_core::error::AbortReason::Estop,
+                )
+                .into());
+            }
             let t_start = std::time::Instant::now();
             let status = if let Some(raw) = sampler.latest() {
                 sample_count += 1;
@@ -310,6 +317,7 @@ pub fn run_dose(
                 prefer_timeout_first,
                 mode: sampling_mode,
                 predictor: Some(predictor_core),
+                shutdown: Some(shutdown),
             },
         )?;
         // Telemetry not available through runner; return nulls

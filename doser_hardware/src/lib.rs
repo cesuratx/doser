@@ -31,15 +31,31 @@ mod hx711;
 pub mod sim {
     use doser_traits::{Motor, Scale};
     use std::error::Error;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::Duration;
 
-    static SIM_RUNNING: AtomicBool = AtomicBool::new(false);
-    static SIM_SPS: AtomicU32 = AtomicU32::new(0);
+    /// State shared by a linked simulated scale and motor, so the scale's reading
+    /// responds to the motor running. Each linked pair owns its own state, which
+    /// keeps independent simulations (e.g. parallel tests) isolated — unlike the
+    /// previous process-global statics.
+    #[derive(Debug, Default)]
+    struct SimState {
+        running: AtomicBool,
+        sps: AtomicU32,
+    }
 
-    /// Minimal simulated scale that increments by an optional env-configured delta while running.
+    impl SimState {
+        fn shared() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+    }
+
+    /// Minimal simulated scale that increments by an optional env-configured delta
+    /// (`DOSER_TEST_SIM_INC`) on each read while the linked motor is running.
     pub struct SimulatedScale {
         grams: f32,
+        state: Arc<SimState>,
     }
 
     impl Default for SimulatedScale {
@@ -49,8 +65,17 @@ pub mod sim {
     }
 
     impl SimulatedScale {
+        /// Create an unlinked scale (no motor coupling). Use [`sim_pair`] to link a
+        /// scale and motor so the reading responds to the motor running.
         pub fn new() -> Self {
-            Self { grams: 0.0 }
+            Self {
+                grams: 0.0,
+                state: SimState::shared(),
+            }
+        }
+
+        fn with_state(state: Arc<SimState>) -> Self {
+            Self { grams: 0.0, state }
         }
     }
 
@@ -75,8 +100,8 @@ pub mod sim {
                 .ok()
                 .and_then(|s| s.parse::<f32>().ok())
                 .unwrap_or(0.0);
-            if SIM_RUNNING.load(Ordering::Relaxed) && delta != 0.0 {
-                let _sps = SIM_SPS.load(Ordering::Relaxed);
+            if self.state.running.load(Ordering::Acquire) && delta != 0.0 {
+                let _sps = self.state.sps.load(Ordering::Acquire);
                 // Keep it simple for now: one delta per read while running
                 self.grams = (self.grams + delta).max(0.0);
             }
@@ -85,35 +110,50 @@ pub mod sim {
         }
     }
 
-    /// Minimal simulated motor; tracks speed and running state.
+    /// Minimal simulated motor; drives the shared [`SimState`] consumed by the scale.
     #[derive(Default)]
     pub struct SimulatedMotor {
-        speed_sps: u32,
-        running: bool,
+        state: Arc<SimState>,
+    }
+
+    impl SimulatedMotor {
+        /// Create an unlinked motor. Use [`sim_pair`] to link a scale and motor.
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        fn with_state(state: Arc<SimState>) -> Self {
+            Self { state }
+        }
     }
 
     impl Motor for SimulatedMotor {
         fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-            self.running = true;
-            SIM_RUNNING.store(true, Ordering::Relaxed);
+            self.state.running.store(true, Ordering::Release);
             Ok(())
         }
 
         fn set_speed(&mut self, sps: u32) -> Result<(), Box<dyn Error + Send + Sync>> {
-            // You can enforce "must start first" semantics if you want:
-            // if !self.running { return Err("motor not started".into()); }
-            self.speed_sps = sps;
-            SIM_SPS.store(sps, Ordering::Relaxed);
+            self.state.sps.store(sps, Ordering::Release);
             Ok(())
         }
 
         fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-            self.speed_sps = 0;
-            self.running = false;
-            SIM_SPS.store(0, Ordering::Relaxed);
-            SIM_RUNNING.store(false, Ordering::Relaxed);
+            self.state.sps.store(0, Ordering::Release);
+            self.state.running.store(false, Ordering::Release);
             Ok(())
         }
+    }
+
+    /// Create a linked simulated `(scale, motor)` pair that share state, so the
+    /// scale's reading responds to the motor running. Each pair is independent,
+    /// keeping parallel simulations (e.g. tests) isolated.
+    pub fn sim_pair() -> (SimulatedScale, SimulatedMotor) {
+        let state = SimState::shared();
+        (
+            SimulatedScale::with_state(state.clone()),
+            SimulatedMotor::with_state(state),
+        )
     }
 }
 
@@ -498,8 +538,10 @@ pub mod hardware {
                         break;
                     }
 
-                    let is_running = running_bg.load(Ordering::Relaxed);
-                    let sps_val = sps_bg.load(Ordering::Relaxed).clamp(0, 5_000);
+                    // Acquire pairs with the Release stores in start/stop/set_speed so the
+                    // stepping thread promptly observes commanded state changes.
+                    let is_running = running_bg.load(Ordering::Acquire);
+                    let sps_val = sps_bg.load(Ordering::Acquire).clamp(0, 5_000);
                     if !(is_running && sps_val > 0) {
                         clock.sleep(Duration::from_millis(2));
                         pacer.reset();
@@ -510,12 +552,12 @@ pub mod hardware {
                     // Rising edge
                     let _ = step.set_high();
                     spin_delay_min();
-                    busy_wait_min_1us();
+                    crate::util::busy_wait_min_1us();
                     // High hold until mid, then fall and hold until end
                     if let Some(avg) = pacer.step_with(&sleeper, period_us, || {
                         let _ = step.set_low();
                         spin_delay_min();
-                        busy_wait_min_1us();
+                        crate::util::busy_wait_min_1us();
                     }) {
                         avg_jitter_us_bg.store(avg, Ordering::Relaxed);
                     }
@@ -559,14 +601,14 @@ pub mod hardware {
 
         /// Set speed in steps-per-second; worker thread reads this atomically.
         pub fn set_speed_sps(&mut self, sps: u32) {
-            self.sps.store(sps, Ordering::Relaxed);
+            self.sps.store(sps, Ordering::Release);
         }
     }
 
     impl Drop for HardwareMotor {
         fn drop(&mut self) {
             let _ = self.shutdown_tx.send(());
-            self.running.store(false, Ordering::Relaxed);
+            self.running.store(false, Ordering::Release);
             if let Some(h) = self.handle.take() {
                 let _ = h.join();
             }
@@ -579,7 +621,7 @@ pub mod hardware {
         fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
             self.set_enabled(true)
                 .map_err(|e| Box::<dyn Error + Send + Sync>::from(e))?;
-            self.running.store(true, Ordering::Relaxed);
+            self.running.store(true, Ordering::Release);
             info!("motor started");
             Ok(())
         }
@@ -594,7 +636,7 @@ pub mod hardware {
         }
 
         fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-            self.running.store(false, Ordering::Relaxed);
+            self.running.store(false, Ordering::Release);
             self.set_speed_sps(0);
             info!("motor stopped");
             Ok(())
@@ -612,50 +654,6 @@ pub mod hardware {
     #[inline(always)]
     fn spin_delay_min() {
         std::hint::spin_loop();
-    }
-
-    /// Busy-wait for at least ~1 microsecond to cleanly separate edges.
-    #[inline(always)]
-    fn busy_wait_min_1us() {
-        // Calibrate a rough spin count for ~1µs once per process, then spin that many times.
-        // This avoids relying on a fixed number of spin_loop() calls which varies by CPU.
-        #[inline]
-        fn spins_per_us() -> u32 {
-            use std::sync::OnceLock;
-            static SPINS: OnceLock<u32> = OnceLock::new();
-            *SPINS.get_or_init(|| {
-                use std::time::{Duration, Instant};
-                // Try increasing iteration counts until we measure ≥ 100µs to reduce timer noise.
-                let mut iters: u32 = 1_000;
-                let mut per_us: u32 = 2; // conservative fallback
-                for _ in 0..10 {
-                    let start = Instant::now();
-                    // Volatile loop to prevent unrolling/elimination
-                    let mut i = 0u32;
-                    while i < iters {
-                        std::hint::spin_loop();
-                        i = i.wrapping_add(1);
-                    }
-                    let dt = start.elapsed();
-                    if dt >= Duration::from_micros(100) {
-                        // per_us ≈ iters / elapsed_us
-                        let us = dt.as_micros().max(1) as u64;
-                        per_us = ((iters as u64 + us - 1) / us).clamp(1, 1_000_000) as u32;
-                        break;
-                    }
-                    // Increase work and try again
-                    iters = iters.saturating_mul(4).min(4_000_000);
-                }
-                per_us.max(1)
-            })
-        }
-
-        let n = spins_per_us();
-        let mut i = 0u32;
-        while i < n {
-            std::hint::spin_loop();
-            i = i.wrapping_add(1);
-        }
     }
 
     #[cfg(all(feature = "rt", target_os = "linux"))]
@@ -690,6 +688,7 @@ pub mod hardware {
         active_low: bool,
         poll_ms: u64,
     ) -> HwResult<Box<dyn Fn() -> bool + Send + Sync>> {
+        use std::sync::Weak;
         use std::sync::atomic::AtomicBool;
         let gpio = Gpio::new().map_err(|e| HwError::Gpio(format!("open GPIO: {e}")))?;
         let pin = gpio
@@ -697,23 +696,31 @@ pub mod hardware {
             .map_err(|e| HwError::Gpio(format!("get E-STOP pin: {e}")))?
             .into_input();
         let flag = Arc::new(AtomicBool::new(false));
-        let flag_bg = flag.clone();
+        // The polling thread holds only a Weak ref, so it terminates (releasing the
+        // GPIO claim, no thread leak) as soon as the returned checker closure — the
+        // sole strong owner — is dropped at the end of a dose.
+        let flag_weak: Weak<AtomicBool> = Arc::downgrade(&flag);
         thread::spawn(move || {
             let clock = MonotonicClock::new();
             loop {
+                let Some(flag) = flag_weak.upgrade() else {
+                    break;
+                };
                 let level_low = pin.read() == rppal::gpio::Level::Low;
                 let active = if active_low { level_low } else { !level_low };
-                flag_bg.store(active, Ordering::Relaxed);
+                flag.store(active, Ordering::Release);
+                drop(flag); // release the strong ref before sleeping
                 clock.sleep(Duration::from_millis(poll_ms.max(1)));
             }
+            tracing::trace!("E-stop checker thread exiting (checker dropped)");
         });
-        Ok(Box::new(move || flag.load(Ordering::Relaxed)))
+        Ok(Box::new(move || flag.load(Ordering::Acquire)))
     }
 }
 
 // Re-exports for callers (CLI/tests) to pick the right backend easily.
 #[cfg(any(not(feature = "hardware"), not(target_os = "linux")))]
-pub use sim::{SimulatedMotor, SimulatedScale};
+pub use sim::{SimulatedMotor, SimulatedScale, sim_pair};
 
 #[cfg(all(feature = "hardware", target_os = "linux"))]
 pub use hardware::{HardwareMotor, HardwareScale, make_estop_checker};

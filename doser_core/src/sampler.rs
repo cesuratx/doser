@@ -54,7 +54,8 @@ impl Sampler {
                             break;
                         }
                         let now = clock.ms_since(epoch);
-                        last_ok_clone.store(now, Ordering::Relaxed);
+                        // Release so the watchdog reader (Acquire) observes a fresh timestamp.
+                        last_ok_clone.store(now, Ordering::Release);
                     }
                     Err(_) => {
                         // Optional: send special value or skip; controller has watchdog
@@ -109,7 +110,8 @@ impl Sampler {
                             break;
                         }
                         let now = clock.ms_since(epoch);
-                        last_ok_clone.store(now, Ordering::Relaxed);
+                        // Release so the watchdog reader (Acquire) observes a fresh timestamp.
+                        last_ok_clone.store(now, Ordering::Release);
                     }
                     Err(_) => {
                         // On timeout or transient error, just continue; controller will watchdog
@@ -138,7 +140,7 @@ impl Sampler {
         self.rx.try_iter().last()
     }
     pub fn stalled_for(&self, now_ms: u64) -> u64 {
-        now_ms.saturating_sub(self.last_ok.load(Ordering::Relaxed))
+        now_ms.saturating_sub(self.last_ok.load(Ordering::Acquire))
     }
     /// Convenience helper: compute stall using this sampler's epoch and a real monotonic clock.
     pub fn stalled_for_now(&self) -> u64 {
@@ -147,7 +149,7 @@ impl Sampler {
             let ms = dur.as_millis();
             (ms.min(u128::from(u64::MAX))) as u64
         };
-        now_ms.saturating_sub(self.last_ok.load(Ordering::Relaxed))
+        now_ms.saturating_sub(self.last_ok.load(Ordering::Acquire))
     }
 }
 

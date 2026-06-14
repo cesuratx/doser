@@ -74,6 +74,12 @@ jobs:
         run: |
           cargo build --workspace --no-default-features
           cargo test --workspace --no-default-features
+      - name: Build and test (default features)
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: |
+          cargo build --workspace
+          cargo test --workspace
 
   test-hardware-feature:
     name: test-hardware-feature

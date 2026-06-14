@@ -2,7 +2,7 @@ use std::time::Duration;
 use tracing::trace;
 
 use crate::error::Result;
-use crate::util::wait_until_low_with_timeout;
+use crate::util::{busy_wait_min_1us, wait_until_low_with_timeout};
 use doser_traits::clock::MonotonicClock;
 
 pub struct Hx711 {
@@ -45,23 +45,23 @@ impl Hx711 {
             &clock,
         )?;
 
-        // Clock out 24 bits
+        // Clock out 24 bits. The HX711 requires SCK high/low times ≥ ~0.2µs and
+        // samples DT while SCK is high, so each edge is followed by a ~1µs busy-wait.
         let mut value: i32 = 0;
         for _ in 0..24 {
             self.sck.set_high();
-            // short, consistent timing
-            spin_delay_100ns();
-            value = (value << 1) | if self.dt.is_high() { 1 } else { 0 };
+            busy_wait_min_1us();
+            value = (value << 1) | i32::from(self.dt.is_high());
             self.sck.set_low();
-            spin_delay_100ns();
+            busy_wait_min_1us();
         }
 
         // Pulse gain to set next measurement
         for _ in 0..self.gain_pulses {
             self.sck.set_high();
-            spin_delay_100ns();
+            busy_wait_min_1us();
             self.sck.set_low();
-            spin_delay_100ns();
+            busy_wait_min_1us();
         }
 
         // Sign extend 24-bit
@@ -71,10 +71,4 @@ impl Hx711 {
         trace!(raw = value, "hx711 raw read");
         Ok(value)
     }
-}
-
-#[inline(always)]
-fn spin_delay_100ns() {
-    // Do nothing; a few CPU cycles—tweak if needed.
-    std::hint::spin_loop();
 }

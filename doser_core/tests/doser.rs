@@ -683,9 +683,10 @@ fn overshoot_epsilon_regression() {
     };
 
     // epsilon 0.0
+    let (scale_zero, motor_zero) = doser_hardware::sim_pair();
     let mut doser_zero = Doser::builder()
-        .with_scale(doser_hardware::sim::SimulatedScale::new())
-        .with_motor(doser_hardware::sim::SimulatedMotor::default())
+        .with_scale(scale_zero)
+        .with_motor(motor_zero)
         .with_filter(base_filter.clone())
         .with_control(ControlCfg {
             epsilon_g: 0.0,
@@ -707,9 +708,10 @@ fn overshoot_epsilon_regression() {
     }
 
     // epsilon 0.08
+    let (scale_eps, motor_eps) = doser_hardware::sim_pair();
     let mut doser_eps = Doser::builder()
-        .with_scale(doser_hardware::sim::SimulatedScale::new())
-        .with_motor(doser_hardware::sim::SimulatedMotor::default())
+        .with_scale(scale_eps)
+        .with_motor(motor_eps)
         .with_filter(base_filter)
         .with_control(ControlCfg {
             epsilon_g: 0.08,

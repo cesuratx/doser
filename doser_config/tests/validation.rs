@@ -68,3 +68,77 @@ max_overshoot_g = 1.0
     let cfg = load_toml(toml).expect("parse TOML");
     cfg.validate().expect("valid config should pass");
 }
+
+#[test]
+fn rejects_non_finite_epsilon_g() {
+    let toml = r#"
+[pins]
+hx711_dt = 5
+hx711_sck = 6
+motor_step = 23
+motor_dir = 24
+
+[filter]
+ma_window = 3
+median_window = 3
+sample_rate_hz = 50
+
+[control]
+coarse_speed = 1200
+fine_speed = 250
+slow_at_g = 1.0
+hysteresis_g = 0.05
+stable_ms = 250
+epsilon_g = nan
+
+[timeouts]
+sample_ms = 150
+
+[safety]
+max_run_ms = 60000
+max_overshoot_g = 1.0
+no_progress_epsilon_g = 0.02
+no_progress_ms = 1200
+"#;
+
+    let cfg = load_toml(toml).expect("parse TOML");
+    let err = cfg.validate().expect_err("should reject NaN epsilon_g");
+    assert!(
+        format!("{err}").contains("epsilon_g"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn rejects_oversized_filter_window() {
+    let toml = r#"
+[pins]
+hx711_dt = 5
+hx711_sck = 6
+motor_step = 23
+motor_dir = 24
+
+[filter]
+ma_window = 1000000
+median_window = 3
+sample_rate_hz = 50
+
+[timeouts]
+sample_ms = 150
+
+[safety]
+no_progress_epsilon_g = 0.02
+no_progress_ms = 1200
+max_run_ms = 60000
+max_overshoot_g = 1.0
+"#;
+
+    let cfg = load_toml(toml).expect("parse TOML");
+    let err = cfg
+        .validate()
+        .expect_err("should reject an oversized ma_window");
+    assert!(
+        format!("{err}").contains("ma_window"),
+        "unexpected error: {err}"
+    );
+}

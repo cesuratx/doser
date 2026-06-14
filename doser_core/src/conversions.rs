@@ -77,7 +77,7 @@ impl From<&doser_config::Calibration> for Calibration {
         Self {
             gain_g_per_count: c.scale_factor,
             zero_counts: c.offset,
-            offset_g: 0.0,
+            offset_g: c.offset_g,
         }
     }
 }
