@@ -113,6 +113,37 @@ fn sampler_can_be_created_dropped_and_recreated() {
 }
 
 #[test]
+fn sampler_drop_is_prompt_with_full_channel() {
+    // The other tests use NoopScale (always errors), so the bounded channel never
+    // fills. Here the scale always succeeds and the consumer never reads, so the
+    // channel stays full: a blocking send would deadlock Drop's join. The drop runs
+    // on a worker thread so a hang fails the test (timeout) instead of hanging the
+    // whole suite.
+    struct AlwaysOk;
+    impl doser_traits::Scale for AlwaysOk {
+        fn read(&mut self, _t: Duration) -> Result<i32, Box<dyn std::error::Error + Send + Sync>> {
+            Ok(42)
+        }
+    }
+
+    let clock = MonotonicClock::new();
+    let sampler = Sampler::spawn(AlwaysOk, 1000, Duration::from_millis(10), clock);
+    // Let the producer fill the channel; deliberately never consume.
+    std::thread::sleep(Duration::from_millis(50));
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        drop(sampler);
+        let _ = tx.send(());
+    });
+    assert!(
+        rx.recv_timeout(Duration::from_secs(3)).is_ok(),
+        "Sampler drop deadlocked with a full channel"
+    );
+    let _ = handle.join();
+}
+
+#[test]
 fn sampler_shutdown_is_prompt() {
     // For a dosing system, shutdown must be fast to ensure safety
     let clock = MonotonicClock::new();
