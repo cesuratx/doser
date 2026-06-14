@@ -154,12 +154,12 @@ Default path used above: ./doser_config.toml
 hx711_dt = 5
 hx711_sck = 6
 # Stepper pins
-motor_step = 13
-motor_dir = 19
+motor_step = 23
+motor_dir = 24
 # Optional enable (active-low)
-motor_en = 21
+motor_en = 25
 # Optional E-Stop input (active-low by default; configurable below)
-estop_in = 26
+estop_in = 12
 
 [filter]
 ma_window = 4

@@ -691,10 +691,16 @@ pub mod hardware {
         use std::sync::Weak;
         use std::sync::atomic::AtomicBool;
         let gpio = Gpio::new().map_err(|e| HwError::Gpio(format!("open GPIO: {e}")))?;
+        // Enable the internal pull-up so the input has a defined inactive level when the
+        // button is open. Without it the pin floats and the E-stop can latch on noise or
+        // at startup. With the pull-up:
+        //   - active_low=true  + normally-open button to GND: open=HIGH(idle), pressed=LOW(stop)
+        //   - active_low=false + normally-closed button to GND: closed=LOW(idle),
+        //     pressed OR a cut wire = HIGH(stop)  ← fail-safe wiring
         let pin = gpio
             .get(pin)
             .map_err(|e| HwError::Gpio(format!("get E-STOP pin: {e}")))?
-            .into_input();
+            .into_input_pullup();
         let flag = Arc::new(AtomicBool::new(false));
         // The polling thread holds only a Weak ref, so it terminates (releasing the
         // GPIO claim, no thread leak) as soon as the returned checker closure — the
