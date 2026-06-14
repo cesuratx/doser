@@ -3,7 +3,7 @@
 //! The core representation uses centigrams (cg, 1 cg = 0.01 g) with `i32`
 //! fixed-point arithmetic for deterministic, allocation-free control loop math.
 
-use crate::fixed_point::quantize_to_cg_i32;
+use crate::fixed_point::{cg_from_delta_scaled, gain_to_scaled_cg_per_count, quantize_to_cg_i32};
 
 /// Simple linear calibration from raw scale counts to grams.
 ///
@@ -31,21 +31,22 @@ impl Calibration {
     ///   centigrams = round(100 * grams)
     ///
     /// Implementation (fixed-point):
-    /// - gain_cg_per_count = round(100 * gain_g_per_count)
+    /// - gain_scaled = round(100 * gain_g_per_count * GAIN_SCALE)  (cg/count × GAIN_SCALE)
     /// - offset_cg = round(100 * offset_g)
-    /// - result_cg = saturating_mul(gain_cg_per_count, raw - zero_counts) + offset_cg
+    /// - result_cg = round((raw - zero_counts) * gain_scaled / GAIN_SCALE) + offset_cg
     ///
     /// Rationale:
     /// - Avoids per-sample floating-point math in the control loop.
     /// - Keeps all controller thresholds and comparisons in one integer unit (cg).
-    /// - Uses saturating arithmetic operations (saturating_sub/mul/add) to avoid
-    ///   overflow on extreme inputs/parameters.
+    /// - The gain is stored as a *scaled* integer (see `fixed_point::GAIN_SCALE`)
+    ///   so that realistic sub-centigram-per-count gains are not rounded to zero.
+    ///   The multiply uses an `i128` intermediate and the result saturates to `i32`.
     ///
     /// Rounding and error bounds:
-    /// - `gain_g_per_count` and `offset_g` are rounded to the nearest centigram
-    ///   before use. The returned value is typically within ~0.5 cg of
-    ///   `round(100 * to_grams(raw))` given stable parameters.
-    /// - Non-finite parameters (NaN/±Inf) are treated as 0 during quantization.
+    /// - `gain_g_per_count` is preserved to ~6 extra decimal digits; `offset_g`
+    ///   is rounded to the nearest centigram. The returned value is within ~1 cg
+    ///   of `round(100 * to_grams(raw))` for stable parameters.
+    /// - Non-finite parameters (NaN/±Inf) are treated as 0.
     ///
     /// Units:
     /// - Input: `raw` is ADC counts.
@@ -55,12 +56,10 @@ impl Calibration {
     /// - If `gain_g_per_count = 0.01`, `zero_counts = 0`, `offset_g = 0.0`,
     ///   and `raw = 123`, then `to_cg(123) == 123` (i.e., 1.23 g).
     pub fn to_cg(&self, raw: i32) -> i32 {
-        let delta = raw.saturating_sub(self.zero_counts);
-        let gain_cg_per_count = quantize_to_cg_i32(self.gain_g_per_count);
+        let delta = (raw as i64) - (self.zero_counts as i64);
+        let gain_scaled = gain_to_scaled_cg_per_count(self.gain_g_per_count);
         let offset_cg = quantize_to_cg_i32(self.offset_g);
-        gain_cg_per_count
-            .saturating_mul(delta)
-            .saturating_add(offset_cg)
+        cg_from_delta_scaled(delta, gain_scaled, offset_cg)
     }
 }
 

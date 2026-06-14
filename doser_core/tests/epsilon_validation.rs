@@ -41,5 +41,8 @@ fn builder_rejects_negative_no_progress_epsilon() {
         .try_build()
         .expect_err("expected invalid config");
     let s = format!("{err}");
-    assert!(s.contains("no_progress_epsilon_g must be >= 0"));
+    assert!(
+        s.contains("no_progress_epsilon_g") && s.contains(">= 0"),
+        "unexpected error: {s}"
+    );
 }

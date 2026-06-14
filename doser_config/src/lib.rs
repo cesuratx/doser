@@ -231,6 +231,7 @@ impl From<PersistedCalibration> for Calibration {
         Calibration {
             offset: p.zero_counts,
             scale_factor: p.gain_g_per_count,
+            offset_g: p.offset_g,
         }
     }
 }
@@ -279,8 +280,14 @@ where
 
 #[derive(Debug)]
 pub struct Calibration {
+    /// Tare baseline in raw counts (`zero_counts`).
     pub offset: i32,
+    /// Gain in grams per count.
     pub scale_factor: f32,
+    /// Additive offset in grams applied after gain (rarely needed; default 0.0).
+    /// The CSV path folds the OLS intercept into `offset` (tare), so it sets this to 0.0;
+    /// persisted TOML calibration may carry a non-zero value.
+    pub offset_g: f32,
 }
 
 impl Calibration {
@@ -375,6 +382,8 @@ impl Calibration {
         Ok(Calibration {
             offset: offset_i32,
             scale_factor: a as f32,
+            // The OLS intercept is folded into `offset` (tare counts); no extra grams offset.
+            offset_g: 0.0,
         })
     }
 }
@@ -473,8 +482,13 @@ pub fn load_calibration_csv(path: &std::path::Path) -> eyre::Result<Calibration>
         );
     }
 
+    // Bound the number of rows so a malformed/huge CSV cannot exhaust memory.
+    const MAX_CALIBRATION_ROWS: usize = 100_000;
     let mut rows = Vec::new();
     for (idx, rec) in rdr.deserialize::<CalibrationRow>().enumerate() {
+        if rows.len() >= MAX_CALIBRATION_ROWS {
+            eyre::bail!("calibration CSV has too many rows (> {MAX_CALIBRATION_ROWS})");
+        }
         match rec {
             Ok(row) => rows.push(row),
             Err(e) => {
@@ -486,6 +500,11 @@ pub fn load_calibration_csv(path: &std::path::Path) -> eyre::Result<Calibration>
     Calibration::try_from(rows)
 }
 
+/// Upper bound for filter/predictor window sizes. These size `Vec`/`VecDeque`
+/// allocations in the core, so an untrusted config must not request an
+/// unbounded window (memory-exhaustion guard). Real configs use single digits.
+const MAX_WINDOW: usize = 10_000;
+
 impl Config {
     pub fn validate(&self) -> eyre::Result<()> {
         // Control
@@ -495,25 +514,39 @@ impl Config {
         if self.control.fine_speed == 0 {
             eyre::bail!("control.fine_speed must be > 0");
         }
-        if self.control.slow_at_g.is_sign_negative() {
-            eyre::bail!("control.slow_at_g must be >= 0");
+        if !self.control.slow_at_g.is_finite() || self.control.slow_at_g < 0.0 {
+            eyre::bail!("control.slow_at_g must be finite and >= 0");
         }
-        if self.control.hysteresis_g.is_sign_negative() {
-            eyre::bail!("control.hysteresis_g must be >= 0");
+        if !self.control.hysteresis_g.is_finite() || self.control.hysteresis_g < 0.0 {
+            eyre::bail!("control.hysteresis_g must be finite and >= 0");
         }
         if self.control.stable_ms > 5 * 60 * 1000 {
             eyre::bail!("control.stable_ms is unreasonably large (>5min)");
         }
-        if self.control.epsilon_g < 0.0 || self.control.epsilon_g > 1.0 {
-            eyre::bail!("control.epsilon_g must be in [0.0, 1.0]");
+        if !self.control.epsilon_g.is_finite()
+            || self.control.epsilon_g < 0.0
+            || self.control.epsilon_g > 1.0
+        {
+            eyre::bail!("control.epsilon_g must be finite and in [0.0, 1.0]");
+        }
+        for (thr_g, sps) in &self.control.speed_bands {
+            if !thr_g.is_finite() || *thr_g < 0.0 {
+                eyre::bail!("control.speed_bands threshold must be finite and >= 0");
+            }
+            if *sps == 0 {
+                eyre::bail!("control.speed_bands sps must be > 0");
+            }
         }
 
         // Safety
-        if self.safety.max_overshoot_g < 0.0 {
-            eyre::bail!("safety.max_overshoot_g must be >= 0.0");
+        if !self.safety.max_overshoot_g.is_finite() || self.safety.max_overshoot_g < 0.0 {
+            eyre::bail!("safety.max_overshoot_g must be finite and >= 0.0");
         }
-        if self.safety.no_progress_epsilon_g <= 0.0 || self.safety.no_progress_epsilon_g > 1.0 {
-            eyre::bail!("safety.no_progress_epsilon_g must be in (0.0, 1.0]");
+        if !self.safety.no_progress_epsilon_g.is_finite()
+            || self.safety.no_progress_epsilon_g <= 0.0
+            || self.safety.no_progress_epsilon_g > 1.0
+        {
+            eyre::bail!("safety.no_progress_epsilon_g must be finite and in (0.0, 1.0]");
         }
         if self.safety.no_progress_ms == 0 {
             eyre::bail!("safety.no_progress_ms must be >= 1");
@@ -526,8 +559,14 @@ impl Config {
         if self.filter.ma_window == 0 {
             eyre::bail!("filter.ma_window must be >= 1");
         }
+        if self.filter.ma_window > MAX_WINDOW {
+            eyre::bail!("filter.ma_window must be <= {MAX_WINDOW}");
+        }
         if self.filter.median_window == 0 {
             eyre::bail!("filter.median_window must be >= 1");
+        }
+        if self.filter.median_window > MAX_WINDOW {
+            eyre::bail!("filter.median_window must be <= {MAX_WINDOW}");
         }
         if self.filter.sample_rate_hz == 0 {
             eyre::bail!("filter.sample_rate_hz must be > 0");
@@ -542,8 +581,14 @@ impl Config {
         if self.predictor.window == 0 {
             eyre::bail!("predictor.window must be >= 1");
         }
-        if self.predictor.min_progress_ratio < 0.0 || self.predictor.min_progress_ratio > 1.0 {
-            eyre::bail!("predictor.min_progress_ratio must be in [0.0, 1.0]");
+        if self.predictor.window > MAX_WINDOW {
+            eyre::bail!("predictor.window must be <= {MAX_WINDOW}");
+        }
+        if !self.predictor.min_progress_ratio.is_finite()
+            || self.predictor.min_progress_ratio < 0.0
+            || self.predictor.min_progress_ratio > 1.0
+        {
+            eyre::bail!("predictor.min_progress_ratio must be finite and in [0.0, 1.0]");
         }
 
         // Timeouts

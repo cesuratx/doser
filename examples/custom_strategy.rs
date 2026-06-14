@@ -4,12 +4,14 @@
 //! enabling custom logic between iterations (logging, dynamic speed changes, etc.).
 
 use doser_core::{Doser, DosingStatus};
-use doser_hardware::{SimulatedMotor, SimulatedScale};
+use doser_hardware::sim_pair;
 
 fn main() -> eyre::Result<()> {
+    // Linked sim pair so the scale's reading responds to the motor running.
+    let (scale, motor) = sim_pair();
     let mut doser = Doser::builder()
-        .with_scale(SimulatedScale::new())
-        .with_motor(SimulatedMotor::default())
+        .with_scale(scale)
+        .with_motor(motor)
         .with_target_grams(5.0)
         .build()?;
 

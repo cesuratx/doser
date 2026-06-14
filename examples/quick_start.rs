@@ -3,7 +3,7 @@
 //! This example demonstrates how to set up and run a simulated dosing session using the Doser library.
 
 use doser_core::{ControlCfg, Doser, DosingStatus, FilterCfg, Timeouts};
-use doser_hardware::{SimulatedMotor as SimMotor, SimulatedScale as SimScale};
+use doser_hardware::sim_pair;
 use doser_traits::MonotonicClock;
 use std::time::Duration;
 
@@ -35,10 +35,11 @@ fn main() -> Result<(), eyre::Report> {
     // Local monotonic clock for timing in this example
     let clock = MonotonicClock::new();
 
-    // Build a Doser with simulated hardware and pass a clock into the builder
+    // Build a Doser with a linked simulated scale/motor pair and a clock
+    let (scale, motor) = sim_pair();
     let mut doser = Doser::builder()
-        .with_scale(SimScale::default())
-        .with_motor(SimMotor::default())
+        .with_scale(scale)
+        .with_motor(motor)
         .with_filter(FilterCfg::default())
         .with_control(ControlCfg::default())
         .with_timeouts(Timeouts { sensor_ms: 10 })

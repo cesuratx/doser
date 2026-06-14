@@ -9,7 +9,17 @@ use crate::error::{AbortReason, DoserError, Result as CoreResult};
 use crate::sampler::Sampler;
 use crate::status::DosingStatus;
 use doser_traits::clock::MonotonicClock;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+/// Shared cooperative-shutdown flag (e.g. set by a Ctrl-C handler).
+pub type ShutdownFlag = Arc<AtomicBool>;
+
+#[inline]
+fn shutdown_requested(flag: &Option<ShutdownFlag>) -> bool {
+    flag.as_ref().is_some_and(|f| f.load(Ordering::Relaxed))
+}
 
 /// How sampling should be orchestrated
 #[derive(Debug, Clone, Copy)]
@@ -35,6 +45,9 @@ pub struct RunParams {
     pub prefer_timeout_first: bool,
     pub mode: SamplingMode,
     pub predictor: Option<crate::PredictorCfg>,
+    /// Optional cooperative shutdown flag; when set true mid-run the motor is
+    /// stopped and the run aborts with `AbortReason::Estop`.
+    pub shutdown: Option<ShutdownFlag>,
 }
 
 /// Compute the stall watchdog threshold in milliseconds.
@@ -123,6 +136,7 @@ where
             estop_check,
             params.estop_debounce_n,
             params.predictor,
+            params.shutdown,
         ),
         SamplingMode::Event | SamplingMode::Paced(_) => run_with_sampler(
             scale,
@@ -138,6 +152,7 @@ where
             params.prefer_timeout_first,
             params.mode,
             params.predictor,
+            params.shutdown,
         ),
     }
 }
@@ -155,6 +170,7 @@ fn run_direct<S, M>(
     estop_check: Option<Box<dyn Fn() -> bool + Send + Sync>>,
     estop_debounce_n: u8,
     predictor: Option<crate::PredictorCfg>,
+    shutdown: Option<ShutdownFlag>,
 ) -> CoreResult<f32>
 where
     S: doser_traits::Scale + 'static,
@@ -180,6 +196,15 @@ where
     tracing::info!(target_g, mode = "direct", "dose start");
 
     loop {
+        if shutdown_requested(&shutdown) {
+            if let Err(e) = doser.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed on shutdown");
+            }
+            tracing::info!("shutdown requested; aborting dose");
+            return Err(crate::error::Report::new(DoserError::Abort(
+                AbortReason::Estop,
+            )));
+        }
         match doser.step()? {
             DosingStatus::Running => continue,
             DosingStatus::Complete => {
@@ -211,6 +236,7 @@ fn run_with_sampler<S, M>(
     prefer_timeout_first: bool,
     mode: SamplingMode,
     predictor: Option<crate::PredictorCfg>,
+    shutdown: Option<ShutdownFlag>,
 ) -> CoreResult<f32>
 where
     S: doser_traits::Scale + Send + 'static,
@@ -259,6 +285,22 @@ where
 
     let start = std::time::Instant::now();
     loop {
+        if shutdown_requested(&shutdown) {
+            if let Err(e) = doser.motor_stop() {
+                tracing::warn!(error = %e, "motor_stop failed on shutdown");
+            }
+            tracing::info!("shutdown requested; aborting dose");
+            return Err(crate::error::Report::new(DoserError::Abort(
+                AbortReason::Estop,
+            )));
+        }
+        // Out-of-band E-stop poll: decouples E-stop latency from sample arrival.
+        if doser.poll_estop_stop() {
+            tracing::error!("E-stop latched");
+            return Err(crate::error::Report::new(DoserError::Abort(
+                AbortReason::Estop,
+            )));
+        }
         let elapsed_ms: u64 = {
             let ms = start.elapsed().as_millis();
             (ms.min(u128::from(u64::MAX))) as u64

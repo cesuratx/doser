@@ -53,7 +53,8 @@ jobs:
 
       - name: Install cross (Linux only)
         if: matrix.os == 'ubuntu-latest'
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        # Pin to a released tag for reproducible release builds.
+        run: cargo install cross --git https://github.com/cross-rs/cross --tag v0.2.5 --locked
 
       - name: Build (cross)
         if: matrix.os == 'ubuntu-latest'
@@ -64,22 +65,30 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} -p doser_cli ${{ matrix.features }}
 
       - name: Strip binary
+        # The package is `doser_cli`, so the produced binary is named `doser_cli`.
         run: |
           if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
-            docker run --rm -v $(pwd):/work -w /work ubuntu:20.04 strip target/${{ matrix.target }}/release/doser || true
+            docker run --rm -v $(pwd):/work -w /work ubuntu:20.04 strip target/${{ matrix.target }}/release/doser_cli || true
           elif [ "${{ matrix.os }}" = "macos-latest" ]; then
-            strip target/${{ matrix.target }}/release/doser || true
+            strip target/${{ matrix.target }}/release/doser_cli || true
           fi
 
-      - name: Create tarball
+      - name: Create tarball and checksum
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf doser-${{ matrix.target }}.tar.gz doser
+          tar czf doser-${{ matrix.target }}.tar.gz doser_cli
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum doser-${{ matrix.target }}.tar.gz > doser-${{ matrix.target }}.tar.gz.sha256
+          else
+            shasum -a 256 doser-${{ matrix.target }}.tar.gz > doser-${{ matrix.target }}.tar.gz.sha256
+          fi
           cd ../../..
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v1
         with:
-          files: target/${{ matrix.target }}/release/doser-${{ matrix.target }}.tar.gz
+          files: |
+            target/${{ matrix.target }}/release/doser-${{ matrix.target }}.tar.gz
+            target/${{ matrix.target }}/release/doser-${{ matrix.target }}.tar.gz.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

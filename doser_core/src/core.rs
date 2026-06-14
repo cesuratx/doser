@@ -40,10 +40,11 @@ pub struct DoserCore<S: doser_traits::Scale, M: doser_traits::Motor> {
     pub(crate) ema_prev_cg: Option<f32>,
     pub(crate) tmp_med_buf: Vec<i32>,
     pub(crate) period_us: u64,
-    pub(crate) cal_gain_cg_per_count: i32,
+    pub(crate) cal_gain_scaled: i64,
     pub(crate) cal_offset_cg: i32,
     pub(crate) slow_at_cg: i32,
     pub(crate) epsilon_cg: i32,
+    pub(crate) hysteresis_cg: i32,
     pub(crate) max_overshoot_cg: i32,
     pub(crate) no_progress_epsilon_cg: i32,
     pub(crate) motor_started: bool,
@@ -104,9 +105,7 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
     /// Process a pre-sampled raw reading (for sampler integration).
     pub fn step_from_raw(&mut self, raw: i32) -> Result<DosingStatus> {
         if self.estop_latched || self.poll_estop() {
-            if let Err(e) = self.motor_stop() {
-                tracing::warn!(error = %e, "motor_stop failed on estop");
-            }
+            self.motor_stop_best_effort("estop");
             return Ok(DosingStatus::Aborted(DoserError::Abort(AbortReason::Estop)));
         }
         let w_cg_raw = self.to_cg_cached(raw);
@@ -117,9 +116,7 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
     /// One iteration of the dosing loop (reads the scale internally).
     pub fn step(&mut self) -> Result<DosingStatus> {
         if self.estop_latched || self.poll_estop() {
-            if let Err(e) = self.motor_stop() {
-                tracing::warn!(error = %e, "motor_stop failed on estop");
-            }
+            self.motor_stop_best_effort("estop");
             return Ok(DosingStatus::Aborted(DoserError::Abort(AbortReason::Estop)));
         }
 
@@ -156,12 +153,39 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
         self.early_stop_at_cg = None;
     }
 
-    /// Stop the motor (best-effort).
+    /// Stop the motor, returning any hardware error (used on the success path).
     pub fn motor_stop(&mut self) -> Result<()> {
         self.motor
             .stop()
             .map_err(|e| eyre::Report::new(map_hw_error(&*e)))
             .wrap_err("motor_stop")
+    }
+
+    /// Best-effort motor stop for safety/abort paths.
+    ///
+    /// Unlike [`Self::motor_stop`], this never returns an error: the caller is
+    /// already aborting, so the goal is maximum effort to de-energize. It retries
+    /// a bounded number of times and escalates to an error-level log if every
+    /// attempt fails, so a stuck motor is loud rather than silently ignored.
+    fn motor_stop_best_effort(&mut self, ctx: &'static str) {
+        const MAX_ATTEMPTS: u32 = 3;
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self.motor.stop() {
+                Ok(()) => return,
+                Err(e) => {
+                    if attempt == MAX_ATTEMPTS {
+                        tracing::error!(
+                            error = %e,
+                            ctx,
+                            attempts = attempt,
+                            "motor stop FAILED on abort path; motor may still be energized"
+                        );
+                    } else {
+                        tracing::warn!(error = %e, ctx, attempt, "motor stop failed; retrying");
+                    }
+                }
+            }
+        }
     }
 
     // ── Private: shared control loop logic ───────────────────────────────────
@@ -176,9 +200,7 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
 
         // Safety: hard runtime cap
         if now.saturating_sub(self.start_ms) >= self.safety.max_run_ms {
-            if let Err(e) = self.motor_stop() {
-                tracing::warn!(error = %e, "motor_stop failed on max-run cap");
-            }
+            self.motor_stop_best_effort("max-run cap");
             return Ok(DosingStatus::Aborted(DoserError::Abort(
                 AbortReason::MaxRuntime,
             )));
@@ -186,9 +208,7 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
 
         // Safety: excessive overshoot guard
         if w_cg > self.target_cg + self.max_overshoot_cg {
-            if let Err(e) = self.motor_stop() {
-                tracing::warn!(error = %e, "motor_stop failed on overshoot");
-            }
+            self.motor_stop_best_effort("overshoot");
             return Ok(DosingStatus::Aborted(DoserError::Abort(
                 AbortReason::Overshoot,
             )));
@@ -200,12 +220,21 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             return Ok(DosingStatus::Running);
         }
 
-        // Completion zone: target reached (within epsilon)
+        // Completion zone: target reached (within epsilon). The motor is stopped and
+        // the weight must remain within the hysteresis acceptance band for `stable_ms`
+        // before completion is declared, so a noisy reading that dips below the band
+        // restarts the settle timer (the documented hysteresis behavior).
         if w_cg + self.epsilon_cg >= self.target_cg {
-            if let Err(e) = self.motor_stop() {
-                tracing::warn!(error = %e, "motor_stop failed entering settle zone");
-            }
-            if self.settled_since_ms.is_none() {
+            self.motor_stop_best_effort("entering settle zone");
+            // Acceptance half-band. Use at least `epsilon` so the epsilon-based stop
+            // point (w ≈ target - epsilon) is in-band and the timer can never stall;
+            // `hysteresis_g` widens it to reject noisy readings near the target. The
+            // weight must stay within `|target - w| <= band` for `stable_ms` to settle,
+            // so a spike outside the band resets the settle timer (documented hysteresis).
+            let band_cg = self.hysteresis_cg.max(self.epsilon_cg).unsigned_abs();
+            if abs_err_cg > band_cg {
+                self.settled_since_ms = None;
+            } else if self.settled_since_ms.is_none() {
                 self.settled_since_ms = Some(now);
             }
             if let Some(since) = self.settled_since_ms
@@ -229,9 +258,7 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
                 self.last_progress_cg = w_cg;
                 self.last_progress_at_ms = now;
             } else if now.saturating_sub(self.last_progress_at_ms) >= self.safety.no_progress_ms {
-                if let Err(e) = self.motor_stop() {
-                    tracing::warn!(error = %e, "motor_stop failed on no-progress watchdog");
-                }
+                self.motor_stop_best_effort("no-progress watchdog");
                 return Ok(DosingStatus::Aborted(DoserError::Abort(
                     AbortReason::NoProgress,
                 )));
@@ -306,10 +333,24 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
 
     #[inline]
     fn to_cg_cached(&self, raw: i32) -> i32 {
-        let delta = raw.saturating_sub(self.calibration.zero_counts);
-        self.cal_gain_cg_per_count
-            .saturating_mul(delta)
-            .saturating_add(self.cal_offset_cg)
+        let delta = (raw as i64) - (self.calibration.zero_counts as i64);
+        crate::fixed_point::cg_from_delta_scaled(delta, self.cal_gain_scaled, self.cal_offset_cg)
+    }
+
+    /// Out-of-band E-stop poll for orchestrators (e.g. the sampler runner).
+    ///
+    /// In sampler mode the control loop only runs `step_from_raw` when a sample
+    /// arrives, so E-stop response would otherwise be coupled to sensor latency
+    /// (up to the read timeout). Calling this each orchestration iteration keeps
+    /// the response time bounded by the loop period instead. Returns true if
+    /// E-stop is (or becomes) latched, stopping the motor best-effort.
+    pub fn poll_estop_stop(&mut self) -> bool {
+        if self.estop_latched || self.poll_estop() {
+            self.motor_stop_best_effort("estop (out-of-band)");
+            true
+        } else {
+            false
+        }
     }
 
     /// Poll the E-stop input with debounce; returns true if latched.
@@ -344,7 +385,6 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             }
             self.tmp_med_buf.clear();
             self.tmp_med_buf.extend(self.med_buf.iter().copied());
-            self.tmp_med_buf.sort_unstable();
             let n = self.tmp_med_buf.len();
             #[cfg(debug_assertions)]
             {
@@ -354,12 +394,17 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
                 debug_assert!(n <= med_win, "median buffer exceeded window size");
             }
             let mid = n / 2;
+            // O(n) selection rather than a full O(n log n) sort: same result, less
+            // per-sample work and jitter on the control loop.
             if n.is_multiple_of(2) {
-                let a = self.tmp_med_buf[mid - 1];
-                let b = self.tmp_med_buf[mid];
-                avg2_round_nearest_i32(a, b)
+                let (lo, mid_val, _) = self.tmp_med_buf.select_nth_unstable(mid);
+                let mid_val = *mid_val;
+                // Even window: the lower-middle order statistic is the max of the
+                // lower partition (non-empty since mid >= 1 when n is even and > 0).
+                let lower = lo.iter().copied().max().unwrap_or(mid_val);
+                avg2_round_nearest_i32(lower, mid_val)
             } else {
-                self.tmp_med_buf[mid]
+                *self.tmp_med_buf.select_nth_unstable(mid).1
             }
         } else {
             w_cg
@@ -474,9 +519,7 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
             .saturating_add(inflight_cg)
             .saturating_add(self.epsilon_cg);
         if predicted >= self.target_cg {
-            if let Err(e) = self.motor_stop() {
-                tracing::warn!(error = %e, "motor_stop failed on predictor early-stop");
-            }
+            self.motor_stop_best_effort("predictor early-stop");
             self.early_stop_at_cg = Some(w_cg);
             tracing::debug!(
                 w_cg,

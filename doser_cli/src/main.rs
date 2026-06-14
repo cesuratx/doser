@@ -64,7 +64,18 @@ fn real_main(shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>) -> eyre::R
     let cli = Cli::parse();
     let _ = JSON_MODE.set(cli.json);
 
-    // 1) Load typed config from TOML
+    // 1) Load typed config from TOML (with a size cap so a huge file can't OOM)
+    const MAX_CONFIG_BYTES: u64 = 1 << 20; // 1 MiB; real configs are a few KB.
+    if let Ok(meta) = fs::metadata(&cli.config)
+        && meta.len() > MAX_CONFIG_BYTES
+    {
+        eyre::bail!(
+            "config file {:?} is too large ({} bytes > {} byte limit)",
+            cli.config,
+            meta.len(),
+            MAX_CONFIG_BYTES
+        );
+    }
     let cfg_text = fs::read_to_string(&cli.config)
         .wrap_err_with(|| format!("read config {:?}", cli.config))?;
     let cfg: Config =
@@ -82,10 +93,9 @@ fn real_main(shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>) -> eyre::R
 
     // 2) Load calibration: prefer persisted in TOML if present; else optional CSV
     let calib: Option<Calibration> = if let Some(pc) = cfg.calibration {
-        Some(Calibration {
-            offset: pc.zero_counts,
-            scale_factor: pc.gain_g_per_count,
-        })
+        // Use the From impl so the persisted additive `offset_g` is preserved
+        // (manual field construction previously dropped it).
+        Some(Calibration::from(pc))
     } else if let Some(p) = &cli.calibration {
         let c =
             load_calibration_csv(p).map_err(|e| eyre::eyre!("parse calibration {:?}: {}", p, e))?;
@@ -114,10 +124,8 @@ fn real_main(shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>) -> eyre::R
     };
 
     #[cfg(any(not(feature = "hardware"), not(target_os = "linux")))]
-    let hw = {
-        use doser_hardware::{SimulatedMotor, SimulatedScale};
-        (SimulatedScale::new(), SimulatedMotor::default())
-    };
+    // Linked sim pair so the simulated scale responds to the simulated motor.
+    let hw = doser_hardware::sim_pair();
 
     match cli.cmd {
         Commands::SelfCheck => {

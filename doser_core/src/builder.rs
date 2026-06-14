@@ -13,7 +13,7 @@ use crate::calibration::Calibration;
 use crate::config::*;
 use crate::core::DoserCore;
 use crate::error::{BuildError, Result};
-use crate::fixed_point::{grams_to_cg, quantize_to_cg_i32};
+use crate::fixed_point::{gain_to_scaled_cg_per_count, grams_to_cg, quantize_to_cg_i32};
 use crate::status::DosingStatus;
 
 // ── Public dynamic-dispatch wrapper ──────────────────────────────────────────
@@ -169,14 +169,19 @@ fn validate_and_build<S: doser_traits::Scale, M: doser_traits::Motor>(
             "target grams out of range",
         )));
     }
-    if control.hysteresis_g.is_sign_negative() {
+    if !control.hysteresis_g.is_finite() || control.hysteresis_g < 0.0 {
         return Err(eyre::Report::new(BuildError::InvalidConfig(
-            "hysteresis_g must be >= 0",
+            "hysteresis_g must be finite and >= 0",
         )));
     }
-    if control.slow_at_g.is_sign_negative() {
+    if !control.slow_at_g.is_finite() || control.slow_at_g < 0.0 {
         return Err(eyre::Report::new(BuildError::InvalidConfig(
-            "slow_at_g must be >= 0",
+            "slow_at_g must be finite and >= 0",
+        )));
+    }
+    if !control.epsilon_g.is_finite() {
+        return Err(eyre::Report::new(BuildError::InvalidConfig(
+            "epsilon_g must be finite",
         )));
     }
     if control.coarse_speed == 0 || control.fine_speed == 0 {
@@ -189,19 +194,31 @@ fn validate_and_build<S: doser_traits::Scale, M: doser_traits::Motor>(
             "sensor_ms must be >= 1",
         )));
     }
-    if safety.max_overshoot_g.is_sign_negative() {
+    if !safety.max_overshoot_g.is_finite() || safety.max_overshoot_g < 0.0 {
         return Err(eyre::Report::new(BuildError::InvalidConfig(
-            "max_overshoot_g must be >= 0",
+            "max_overshoot_g must be finite and >= 0",
         )));
     }
-    if safety.no_progress_epsilon_g.is_sign_negative() {
+    if !safety.no_progress_epsilon_g.is_finite() || safety.no_progress_epsilon_g < 0.0 {
         return Err(eyre::Report::new(BuildError::InvalidConfig(
-            "no_progress_epsilon_g must be >= 0",
+            "no_progress_epsilon_g must be finite and >= 0",
         )));
     }
     if filter.sample_rate_hz == 0 {
         return Err(eyre::Report::new(BuildError::InvalidConfig(
             "sample_rate_hz must be > 0",
+        )));
+    }
+    // Bound window sizes: they drive Vec/VecDeque allocations in the core.
+    const MAX_WINDOW: usize = 10_000;
+    if filter.ma_window > MAX_WINDOW || filter.median_window > MAX_WINDOW {
+        return Err(eyre::Report::new(BuildError::InvalidConfig(
+            "filter window sizes must be <= 10000",
+        )));
+    }
+    if predictor.window > MAX_WINDOW {
+        return Err(eyre::Report::new(BuildError::InvalidConfig(
+            "predictor window must be <= 10000",
         )));
     }
     // Validate speed band entries
@@ -246,6 +263,7 @@ fn validate_and_build<S: doser_traits::Scale, M: doser_traits::Motor>(
 
     let target_cg = grams_to_cg(target_g);
     let epsilon_cg = grams_to_cg(control.epsilon_g);
+    let hysteresis_cg = grams_to_cg(control.hysteresis_g);
     let max_overshoot_cg = grams_to_cg(safety.max_overshoot_g);
     let no_progress_epsilon_cg = grams_to_cg(safety.no_progress_epsilon_g);
     let slow_at_cg = grams_to_cg(control.slow_at_g);
@@ -255,7 +273,7 @@ fn validate_and_build<S: doser_traits::Scale, M: doser_traits::Motor>(
         .map(|(g, sps)| (grams_to_cg(*g), *sps))
         .collect();
 
-    let cal_gain_cg_per_count = quantize_to_cg_i32(calibration.gain_g_per_count);
+    let cal_gain_scaled = gain_to_scaled_cg_per_count(calibration.gain_g_per_count);
     let cal_offset_cg = quantize_to_cg_i32(calibration.offset_g);
 
     Ok(DoserCore {
@@ -277,10 +295,11 @@ fn validate_and_build<S: doser_traits::Scale, M: doser_traits::Motor>(
         tmp_med_buf: Vec::with_capacity(med_cap),
         ema_prev_cg: None,
         period_us,
-        cal_gain_cg_per_count,
+        cal_gain_scaled,
         cal_offset_cg,
         slow_at_cg,
         epsilon_cg,
+        hysteresis_cg,
         max_overshoot_cg,
         no_progress_epsilon_cg,
         motor_started: false,
