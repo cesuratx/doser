@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc e654da0f3cef2f79fd69531918ca30c5d564343d960dcc00e3f5d4602492cbff # shrinks to deltas = [0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01], target = 1
+cc dd92679e7e993bb0ac49cf0a1dfcf209a5c5380d5b41161861b1d49695068871 # hysteresis settle-band regression: out-of-band entry with stable_ms=0 must still complete

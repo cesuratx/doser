@@ -226,16 +226,18 @@ impl<S: doser_traits::Scale, M: doser_traits::Motor> DoserCore<S, M> {
         // restarts the settle timer (the documented hysteresis behavior).
         if w_cg + self.epsilon_cg >= self.target_cg {
             self.motor_stop_best_effort("entering settle zone");
-            // Acceptance half-band. Use at least `epsilon` so the epsilon-based stop
-            // point (w ≈ target - epsilon) is in-band and the timer can never stall;
-            // `hysteresis_g` widens it to reject noisy readings near the target. The
-            // weight must stay within `|target - w| <= band` for `stable_ms` to settle,
-            // so a spike outside the band resets the settle timer (documented hysteresis).
+            // Acceptance half-band. At least `epsilon` so the epsilon-based stop point
+            // (w ≈ target - epsilon) is in-band; `hysteresis_g` widens it to reject
+            // noisy readings near the target. The settle timer starts on entry and is
+            // *restarted* (not cleared) by an out-of-band reading, so completion
+            // requires the weight to stay within `|target - w| <= band` for `stable_ms`
+            // continuously. Restarting (rather than clearing) preserves the invariant
+            // that `stable_ms == 0` completes as soon as the completion zone is entered.
             let band_cg = self.hysteresis_cg.max(self.epsilon_cg).unsigned_abs();
-            if abs_err_cg > band_cg {
-                self.settled_since_ms = None;
-            } else if self.settled_since_ms.is_none() {
-                self.settled_since_ms = Some(now);
+            match self.settled_since_ms {
+                None => self.settled_since_ms = Some(now),
+                Some(_) if abs_err_cg > band_cg => self.settled_since_ms = Some(now),
+                Some(_) => {}
             }
             if let Some(since) = self.settled_since_ms
                 && now.saturating_sub(since) >= self.control.stable_ms
