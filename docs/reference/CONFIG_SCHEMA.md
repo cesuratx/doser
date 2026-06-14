@@ -44,7 +44,11 @@ Semantics:
 
 - Coarse/fine speed selection by error magnitude vs `slow_at_g`.
 - Completion uses asymmetric stop threshold `w + epsilon_g >= target`.
-- Stability (settle) requires `|err| <= hysteresis_g` for `stable_ms` after stopping.
+- Stability (settle) requires `|err| <= max(epsilon_g, hysteresis_g)` for `stable_ms`
+  after stopping; an out-of-band reading (e.g. a noisy spike) resets the settle
+  timer. The band is at least `epsilon_g` so the stop point is always in-band;
+  `hysteresis_g` widens it for noise rejection (so set `hysteresis_g >= epsilon_g`
+  for `hysteresis_g` to take effect).
 
 ## [timeouts]
 
