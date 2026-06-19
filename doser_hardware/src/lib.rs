@@ -422,8 +422,8 @@ pub mod hardware {
                 .get(sck_pin)
                 .map_err(|e| HwError::Gpio(format!("get HX711 SCK pin: {e}")))?
                 .into_output_low();
-            // Channel A, gain = 128 uses 25 pulses after the 24-bit read.
-            let hx = Hx711::new(dt, sck, 25, Duration::from_millis(150))?;
+            // Channel A / gain 128: 1 extra SCK pulse after the 24 data bits (25 total).
+            let hx = Hx711::new(dt, sck, 1, Duration::from_millis(150))?;
             Ok(Self { hx })
         }
 
@@ -448,7 +448,8 @@ pub mod hardware {
             } else {
                 data_ready_timeout_ms
             };
-            let hx = Hx711::new(dt, sck, 25, Duration::from_millis(drt))?;
+            // Channel A / gain 128: 1 extra SCK pulse after the 24 data bits (25 total).
+            let hx = Hx711::new(dt, sck, 1, Duration::from_millis(drt))?;
             Ok(Self { hx })
         }
 

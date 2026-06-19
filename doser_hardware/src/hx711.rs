@@ -8,7 +8,10 @@ use doser_traits::clock::MonotonicClock;
 pub struct Hx711 {
     dt: rppal::gpio::InputPin,
     sck: rppal::gpio::OutputPin,
-    gain_pulses: u8, // 25, 26, 27 based on gain/channel
+    // Extra SCK pulses sent after the 24 data bits; they select the next
+    // conversion's gain/channel: 1 = ch A/gain 128, 2 = ch B/gain 32,
+    // 3 = ch A/gain 64 (i.e. 25, 26, or 27 total pulses per read).
+    gain_pulses: u8,
     data_ready_timeout: Duration,
 }
 
@@ -56,7 +59,9 @@ impl Hx711 {
             busy_wait_min_1us();
         }
 
-        // Pulse gain to set next measurement
+        // Send the extra gain/channel pulses. Combined with the 24 data pulses
+        // above this gives 24 + gain_pulses = 25/26/27 total, selecting the
+        // gain/channel for the next conversion.
         for _ in 0..self.gain_pulses {
             self.sck.set_high();
             busy_wait_min_1us();
