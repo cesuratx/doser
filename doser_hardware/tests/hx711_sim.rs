@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use doser_hardware::hardware::HardwareScale;
-use rppal::gpio::{Gpio, Level};
+use doser_traits::Scale;
 use rstest::rstest;
 
 // NOTE: These tests are pseudo-simulated and will only work when running on hardware with loopback wiring
@@ -13,7 +13,6 @@ use rstest::rstest;
 fn hx711_wait_success_path() {
     // This is a placeholder structure; on real hardware, DT must be externally driven low.
     // We simply ensure that read_with_timeout returns either Ok or a timeout, not busy-spinning.
-    let gpio = Gpio::new().expect("open gpio");
     let dt_pin = 5u8; // adjust for your test rig
     let sck_pin = 6u8; // adjust for your test rig
 
