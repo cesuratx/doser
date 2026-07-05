@@ -116,14 +116,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let high_after_us = after.elapsed().as_micros();
 
         if stream {
+            let new_extreme = value < vmin || value > vmax;
             vmin = vmin.min(value);
             vmax = vmax.max(value);
-            println!(
-                "read {read_idx:>4}: raw={value:>9}   span_so_far={}   ({} .. {})",
-                vmax.saturating_sub(vmin),
-                vmin,
-                vmax
-            );
+            // Stay quiet while the value is flat; shout on any new extreme (wiring
+            // change / load), and emit a heartbeat every ~50 reads so we know it's alive.
+            if new_extreme {
+                println!(
+                    "read {read_idx:>4}: raw={value:>9}  *** MOVED ***  span={}  ({} .. {})",
+                    vmax.saturating_sub(vmin),
+                    vmin,
+                    vmax
+                );
+            } else if read_idx % 50 == 0 {
+                println!(
+                    "read {read_idx:>4}: raw={value:>9}  (flat, span={})",
+                    vmax.saturating_sub(vmin)
+                );
+            }
             continue;
         }
 
