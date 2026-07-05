@@ -35,6 +35,16 @@ pub trait Motor {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
     fn stop(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
     fn start(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    /// Set the rotation direction; `clockwise = true` drives the DIR line high.
+    ///
+    /// Defaults to a no-op so backends without a direction line (the simulator
+    /// and test mocks) need not implement it — only hardware overrides this.
+    fn set_direction(
+        &mut self,
+        _clockwise: bool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
+    }
 }
 
 // Allow boxed trait objects (Box<dyn Scale/Motor>) to be used where a generic S: Scale / M: Motor is expected.
@@ -59,5 +69,11 @@ impl<T: ?Sized + Motor> Motor for Box<T> {
     }
     fn start(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         (**self).start()
+    }
+    fn set_direction(
+        &mut self,
+        clockwise: bool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        (**self).set_direction(clockwise)
     }
 }
