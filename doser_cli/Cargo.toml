@@ -31,6 +31,9 @@ toml = { workspace = true }
 # JSON serialization for structured output
 serde_json = "1"
 
+# Lightweight blocking HTTP server for the live weight monitor UI (no async runtime)
+tiny_http = "0.12"
+
 # Workspace crates
 doser_core = { path = "../doser_core" }
 doser_config = { path = "../doser_config" }

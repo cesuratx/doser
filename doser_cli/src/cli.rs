@@ -132,4 +132,16 @@ pub enum Commands {
     SelfCheck,
     /// Health check for operational monitoring
     Health,
+    /// Serve a live web UI showing the current scale reading (for dev/testing)
+    Monitor {
+        /// TCP port to listen on
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+        /// Address to bind; 0.0.0.0 lets other machines on the LAN connect
+        #[arg(long, default_value = "0.0.0.0")]
+        bind: String,
+        /// Override sample rate in Hz (defaults to config `filter.sample_rate_hz`)
+        #[arg(long, value_name = "HZ")]
+        hz: Option<u32>,
+    },
 }

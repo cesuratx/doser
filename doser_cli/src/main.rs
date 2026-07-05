@@ -17,6 +17,7 @@
 mod cli;
 mod dose;
 mod error_fmt;
+mod monitor;
 mod rt;
 mod tracing_setup;
 
@@ -251,6 +252,14 @@ fn real_main(shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>) -> eyre::R
             } else {
                 Err(eyre::eyre!("Health check failed"))
             }
+        }
+        Commands::Monitor { port, bind, hz } => {
+            let (scale, _motor) = hw;
+            let sample_hz = hz.unwrap_or(cfg.filter.sample_rate_hz);
+            // Generous per-read timeout: at 10 SPS the data-ready gap is ~90 ms.
+            let read_timeout =
+                std::time::Duration::from_millis(cfg.hardware.sensor_read_timeout_ms.max(200));
+            monitor::run(scale, calib, sample_hz, read_timeout, &bind, port, shutdown)
         }
         Commands::Dose {
             grams,

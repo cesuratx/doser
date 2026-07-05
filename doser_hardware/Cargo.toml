@@ -18,5 +18,9 @@ rt = ["libc"]
 [dev-dependencies]
 rstest = "0.23"
 
+[[example]]
+name = "hx711_probe"
+required-features = ["hardware"]
+
 [target.'cfg(target_os = "linux")'.dependencies]
 rppal = { version = "0.17", optional = true }
