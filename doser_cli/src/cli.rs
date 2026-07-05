@@ -144,4 +144,36 @@ pub enum Commands {
         #[arg(long, value_name = "HZ")]
         hz: Option<u32>,
     },
+    /// Jog the motor at a fixed rate for bring-up/testing (no scale, no control loop)
+    Motor {
+        /// Step rate in steps-per-second
+        #[arg(long, value_name = "HZ", default_value_t = 200)]
+        sps: u32,
+        /// How long to run, in milliseconds
+        #[arg(long, value_name = "MS", default_value_t = 1000)]
+        ms: u64,
+        /// Run an exact number of steps instead of a duration (overrides --ms)
+        #[arg(long, value_name = "N")]
+        steps: Option<u32>,
+        /// Rotation direction
+        #[arg(long, value_enum, default_value_t = Direction::Cw)]
+        dir: Direction,
+    },
+}
+
+/// Motor rotation direction for the `motor` jog command.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+pub enum Direction {
+    /// Clockwise (DIR line high)
+    Cw,
+    /// Counterclockwise (DIR line low)
+    Ccw,
+}
+
+impl Direction {
+    /// True when clockwise; maps directly to the DIR line level.
+    #[inline]
+    pub fn is_clockwise(self) -> bool {
+        matches!(self, Direction::Cw)
+    }
 }

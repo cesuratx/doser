@@ -579,15 +579,6 @@ pub mod hardware {
             Ok(motor)
         }
 
-        /// Set direction: true = clockwise (DIR high), false = counterclockwise (DIR low)
-        pub fn set_direction(&mut self, clockwise: bool) {
-            if clockwise {
-                let _ = self.dir.set_high();
-            } else {
-                let _ = self.dir.set_low();
-            }
-        }
-
         /// Enable or disable the driver (active-low enable pin, if present)
         pub fn set_enabled(&mut self, enabled: bool) -> HwResult<()> {
             if let Some(en) = self.en.as_mut() {
@@ -640,6 +631,16 @@ pub mod hardware {
             self.running.store(false, Ordering::Release);
             self.set_speed_sps(0);
             info!("motor stopped");
+            Ok(())
+        }
+
+        /// Set direction: true = clockwise (DIR high), false = counterclockwise (DIR low).
+        fn set_direction(&mut self, clockwise: bool) -> Result<(), Box<dyn Error + Send + Sync>> {
+            if clockwise {
+                let _ = self.dir.set_high();
+            } else {
+                let _ = self.dir.set_low();
+            }
             Ok(())
         }
     }

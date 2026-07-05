@@ -17,6 +17,7 @@
 mod cli;
 mod dose;
 mod error_fmt;
+mod jog;
 mod monitor;
 mod rt;
 mod tracing_setup;
@@ -260,6 +261,23 @@ fn real_main(shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>) -> eyre::R
             let read_timeout =
                 std::time::Duration::from_millis(cfg.hardware.sensor_read_timeout_ms.max(200));
             monitor::run(scale, calib, sample_hz, read_timeout, &bind, port, shutdown)
+        }
+        Commands::Motor {
+            sps,
+            ms,
+            steps,
+            dir,
+        } => {
+            let (_scale, motor) = hw;
+            // `--steps N` is sugar for a duration at the commanded rate; fall back
+            // to `--ms` when steps is absent (or the rate is zero, to avoid div-by-0).
+            let duration = match steps {
+                Some(n) if sps > 0 => {
+                    std::time::Duration::from_millis(u64::from(n) * 1000 / u64::from(sps))
+                }
+                _ => std::time::Duration::from_millis(ms),
+            };
+            jog::run(motor, sps, dir.is_clockwise(), duration, shutdown)
         }
         Commands::Dose {
             grams,
