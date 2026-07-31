@@ -14,11 +14,11 @@ pub enum AbortReason {
 impl core::fmt::Display for AbortReason {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            AbortReason::Estop => write!(f, "estop"),
-            AbortReason::NoProgress => write!(f, "no progress"),
-            AbortReason::MaxRuntime => write!(f, "max run time exceeded"),
-            AbortReason::Overshoot => write!(f, "max overshoot exceeded"),
-            AbortReason::MaxAttempts => write!(f, "max attempts exceeded"),
+            Self::Estop => write!(f, "estop"),
+            Self::NoProgress => write!(f, "no progress"),
+            Self::MaxRuntime => write!(f, "max run time exceeded"),
+            Self::Overshoot => write!(f, "max overshoot exceeded"),
+            Self::MaxAttempts => write!(f, "max attempts exceeded"),
         }
     }
 }

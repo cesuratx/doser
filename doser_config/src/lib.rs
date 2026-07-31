@@ -58,15 +58,15 @@ pub struct ControlCfg {
     /// Additional control epsilon in grams used for stability/approach decisions
     pub epsilon_g: f32,
     /// Optional speed table. Accepts either:
-    /// - array of tables: [{ threshold_g = 1.0, sps = 1100 }, ...]
-    /// - array of tuples: [[1.0, 1100], [0.5, 450], ...]
+    /// - array of tables: `[{ threshold_g = 1.0, sps = 1100 }, ...]`
+    /// - array of tuples: `[[1.0, 1100], [0.5, 450], ...]`
     #[serde(default, deserialize_with = "de_speed_bands")]
     pub speed_bands: Vec<(f32, u32)>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 pub struct Timeouts {
-    /// Sampling timeout per read (ms). Also accepts alias "sensor_ms".
+    /// Sampling timeout per read (ms). Also accepts alias `sensor_ms`.
     #[serde(alias = "sensor_ms")]
     pub sample_ms: u64,
     /// Optional settle window override mistakenly placed under [timeouts] in some configs.
@@ -228,7 +228,7 @@ pub struct PersistedCalibration {
 
 impl From<PersistedCalibration> for Calibration {
     fn from(p: PersistedCalibration) -> Self {
-        Calibration {
+        Self {
             offset: p.zero_counts,
             scale_factor: p.gain_g_per_count,
             offset_g: p.offset_g,
@@ -294,6 +294,21 @@ impl Calibration {
     /// Build Calibration from calibration rows using ordinary least squares on all points.
     /// Fits grams = a*raw + b, then converts to core form grams = a*(raw - offset) + 0,
     /// where offset = round(-b/a) is the tare baseline in raw counts.
+    //
+    // Lint rationale (release profile denies pedantic/nursery):
+    // * `cast_precision_loss` / `cast_possible_truncation`: the i64 raw counts are 24-bit
+    //   HX711 samples and the row count is small, so the f64 conversions are exact; the
+    //   final `f64 -> i32` / `f64 -> f32` narrowing is inherent to `Calibration`'s storage
+    //   types and Rust's float->int `as` saturates rather than wrapping, which is the
+    //   behaviour we want for a degenerate fit.
+    // * `suboptimal_flops`: `mul_add` is a *fused* multiply-add, so it rounds differently
+    //   from `a * x + b`. This is the calibration fit that converts load-cell counts to
+    //   grams; keep the arithmetic bit-identical rather than churn it for a style lint.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::suboptimal_flops
+    )]
     pub fn from_rows(rows: Vec<CalibrationRow>) -> eyre::Result<Self> {
         if rows.len() < 2 {
             eyre::bail!("calibration requires at least two rows, got {}", rows.len());
@@ -324,14 +339,14 @@ impl Calibration {
         let fit = |pts: &[(i64, f32)]| -> eyre::Result<(f64, f64)> {
             let n = pts.len() as f64;
             let sum_x: f64 = pts.iter().map(|r| r.0 as f64).sum();
-            let sum_y: f64 = pts.iter().map(|r| r.1 as f64).sum();
+            let sum_y: f64 = pts.iter().map(|r| f64::from(r.1)).sum();
             let mean_x = sum_x / n;
             let mean_y = sum_y / n;
             let mut sxx = 0.0f64;
             let mut sxy = 0.0f64;
             for (rx, gy) in pts {
                 let x = *rx as f64 - mean_x;
-                let y = *gy as f64 - mean_y;
+                let y = f64::from(*gy) - mean_y;
                 sxx += x * x;
                 sxy += x * y;
             }
@@ -350,12 +365,12 @@ impl Calibration {
         };
 
         // Initial fit
-        let pts: Vec<(i64, f32)> = rows.iter().map(|r| (r.raw, r.grams)).collect();
+        let pts: Vec<(i64, f32)> = rows.into_iter().map(|r| (r.raw, r.grams)).collect();
         let (a0, b0) = fit(&pts)?;
         // Compute robust sigma estimate (RMS of residuals) without allocating residuals
         let mut sumsq: f64 = 0.0;
         for (x, y) in &pts {
-            let r = (*y as f64) - (a0 * (*x as f64) + b0);
+            let r = f64::from(*y) - (a0 * (*x as f64) + b0);
             sumsq += r * r;
         }
         let n_pts = pts.len();
@@ -379,7 +394,7 @@ impl Calibration {
         }
         let offset_i32 = zero_counts.round() as i32;
 
-        Ok(Calibration {
+        Ok(Self {
             offset: offset_i32,
             scale_factor: a as f32,
             // The OLS intercept is folded into `offset` (tare counts); no extra grams offset.
@@ -393,6 +408,11 @@ impl Calibration {
 /// over inliers only to compute slope and intercept. Returns None when refit is not applicable
 /// (e.g., non-finite/zero rms, <2 inliers, or degenerate variance), in which case the caller
 /// should keep the original (a0, b0).
+//
+// Lint rationale: same as `Calibration::from_rows` — the i64 raw counts are 24-bit HX711
+// samples so the f64 conversion is exact, and `mul_add` would change the rounding of the
+// covariance accumulation (it is a fused op), which we do not want in the calibration fit.
+#[allow(clippy::cast_precision_loss, clippy::suboptimal_flops)]
 fn robust_refit(pts: &[(i64, f32)], a0: f64, b0: f64, rms: f64, k: f64) -> Option<(f64, f64)> {
     if !(rms.is_finite() && rms > 0.0 && k.is_finite() && k > 0.0) {
         return None;
@@ -410,25 +430,21 @@ fn robust_refit(pts: &[(i64, f32)], a0: f64, b0: f64, rms: f64, k: f64) -> Optio
     let mut cxx = 0.0f64;
     let mut cxy = 0.0f64;
 
-    for (x_i, y_i) in pts.iter() {
+    for (x_i, y_i) in pts {
         let x = *x_i as f64;
-        let y = *y_i as f64;
+        let y = f64::from(*y_i);
         let r = y - (a0 * x + b0);
         if r.abs() <= thr {
             // Inlier: update online means and covariances
-            let n_old = n_in as f64;
             n_in += 1;
             let n_new = n_in as f64;
             let dx = x - mean_x;
             let dy = y - mean_y;
-            let mean_x_new = mean_x + dx / n_new;
-            let mean_y_new = mean_y + dy / n_new;
-            // Chan's update for covariance terms
-            cxx += dx * (x - mean_x_new);
-            cxy += dx * (y - mean_y_new);
-            mean_x = mean_x_new;
-            mean_y = mean_y_new;
-            let _ = n_old; // silence unused in optimized builds
+            mean_x += dx / n_new;
+            mean_y += dy / n_new;
+            // Chan's update for covariance terms (means are already advanced)
+            cxx += dx * (x - mean_x);
+            cxy += dx * (y - mean_y);
         }
     }
 
@@ -463,6 +479,9 @@ impl TryFrom<&[CalibrationRow]> for Calibration {
 }
 
 pub fn load_calibration_csv(path: &std::path::Path) -> eyre::Result<Calibration> {
+    // Bound the number of rows so a malformed/huge CSV cannot exhaust memory.
+    const MAX_CALIBRATION_ROWS: usize = 100_000;
+
     let mut rdr = csv::ReaderBuilder::new()
         .has_headers(true)
         .from_path(path)
@@ -474,7 +493,7 @@ pub fn load_calibration_csv(path: &std::path::Path) -> eyre::Result<Calibration>
         .map_err(|e| eyre::eyre!("read CSV headers {:?}: {}", path, e))?
         .clone();
     let expected = ["raw", "grams"];
-    let actual: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
+    let actual: Vec<String> = headers.iter().map(ToString::to_string).collect();
     if actual != expected {
         eyre::bail!(
             "calibration CSV must have headers 'raw,grams', got: {}",
@@ -482,8 +501,6 @@ pub fn load_calibration_csv(path: &std::path::Path) -> eyre::Result<Calibration>
         );
     }
 
-    // Bound the number of rows so a malformed/huge CSV cannot exhaust memory.
-    const MAX_CALIBRATION_ROWS: usize = 100_000;
     let mut rows = Vec::new();
     for (idx, rec) in rdr.deserialize::<CalibrationRow>().enumerate() {
         if rows.len() >= MAX_CALIBRATION_ROWS {

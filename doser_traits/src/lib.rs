@@ -18,7 +18,7 @@
 //! backends while keeping `doser_core` hardware-agnostic.
 pub mod clock;
 
-pub use clock::{Clock, MonotonicClock};
+pub use clock::{Clock, MonotonicClock, duration_to_ms};
 
 pub trait Scale {
     /// Read one raw ADC sample in counts, blocking up to `timeout`.

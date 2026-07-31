@@ -1,4 +1,4 @@
-//! Test and helper mocks for doser_core
+//! Test and helper mocks for `doser_core`
 
 /// A scale that always errors on read; useful when driving the control loop
 /// with externally sampled raw values via `step_from_raw`.

@@ -6,18 +6,22 @@
 /// Average of two i32 values, rounded to nearest with ties away from zero.
 /// Uses 64-bit intermediates; cannot overflow.
 #[inline]
+#[must_use]
 pub fn avg2_round_nearest_i32(a: i32, b: i32) -> i32 {
-    let s = (a as i64) + (b as i64);
-    if s >= 0 {
-        ((s + 1) / 2) as i32
-    } else {
-        ((s - 1) / 2) as i32
-    }
+    let s = i64::from(a) + i64::from(b);
+    let q = if s >= 0 { (s + 1) / 2 } else { (s - 1) / 2 };
+    // `|q| <= i32::MAX` for any pair of `i32` inputs, so the fallback is unreachable.
+    i32::try_from(q).unwrap_or_else(|_| if q.is_negative() { i32::MIN } else { i32::MAX })
 }
 
 /// Quantize a floating-point grams value to integer centigrams (cg), rounding to nearest
 /// and clamping to the `i32` range. Non-finite values (NaN/±Inf) map to 0.
+//
+// Lint rationale: this is the float/integer boundary. `i32 -> f32` has no infallible
+// constructor, and the narrowing `f32 -> i32` is guarded by the explicit clamp above it.
 #[inline]
+#[must_use]
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 pub fn quantize_to_cg_i32(x_g: f32) -> i32 {
     if !x_g.is_finite() {
         return 0;
@@ -34,27 +38,39 @@ pub fn quantize_to_cg_i32(x_g: f32) -> i32 {
 
 /// Absolute difference of two i32 values as u32 without overflow.
 ///
-/// Uses 64-bit intermediates to avoid overflow during subtraction.
-/// For any `i32` inputs, `|a - b| <= u32::MAX`, so the cast is always lossless.
+/// For any `i32` inputs, `|a - b| <= u32::MAX`, so the result is always exact
+/// (`i32::MIN.abs_diff(i32::MAX) == u32::MAX`).
 #[inline]
-pub fn abs_diff_i32_u32(a: i32, b: i32) -> u32 {
-    let diff = (a as i64) - (b as i64);
-    let mag = if diff >= 0 {
-        diff as u64
-    } else {
-        (-diff) as u64
-    };
-    debug_assert!(
-        mag <= u32::MAX as u64,
-        "abs_diff_i32_u32: magnitude out of u32 range: {mag}"
-    );
-    mag as u32
+#[must_use]
+pub const fn abs_diff_i32_u32(a: i32, b: i32) -> u32 {
+    a.abs_diff(b)
 }
 
 /// Shorthand: convert grams (f32) to centigrams (i32) via rounding.
+///
+/// Unlike [`quantize_to_cg_i32`], non-finite inputs follow Rust's saturating
+/// float-to-int cast (NaN maps to 0, ±Inf to the `i32` bounds).
+//
+// Lint rationale: `f32 -> i32` has no infallible constructor; the `as` cast's
+// saturating behaviour is exactly the clamping this function documents.
 #[inline]
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
 pub fn grams_to_cg(g: f32) -> i32 {
     ((g * 100.0).round()) as i32
+}
+
+/// Convert integer centigrams back to grams, for display and telemetry only.
+///
+/// The control loop never round-trips through this: it compares in cg.
+//
+// Lint rationale: `i32 -> f32` has no infallible constructor. Weights stay far below
+// 2^24 cg (167 tonnes), so the conversion is exact for every value we can measure.
+#[inline]
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn cg_to_grams(cg: i32) -> f32 {
+    (cg as f32) / 100.0
 }
 
 /// Fixed-point scaling applied to the calibration gain (centigrams-per-count)
@@ -71,13 +87,19 @@ pub const GAIN_SCALE: i64 = 1_000_000;
 /// Quantize a gain expressed in grams-per-count into a scaled integer of
 /// `centigrams-per-count * GAIN_SCALE`, rounding to nearest and clamping to the
 /// `i64` range. Non-finite inputs (NaN/±Inf) map to `0`.
+//
+// Lint rationale: same float/integer boundary as `quantize_to_cg_i32`. `i64 -> f64` has
+// no infallible constructor (`GAIN_SCALE` and the `i64` bounds are the only operands, and
+// `GAIN_SCALE` is exactly representable), and the narrowing `f64 -> i64` is clamped below.
 #[inline]
+#[must_use]
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 pub fn gain_to_scaled_cg_per_count(gain_g_per_count: f32) -> i64 {
     if !gain_g_per_count.is_finite() {
         return 0;
     }
     // cg-per-count = 100 * g-per-count; scale up for fractional resolution.
-    let scaled = ((gain_g_per_count as f64) * 100.0 * (GAIN_SCALE as f64)).round();
+    let scaled = (f64::from(gain_g_per_count) * 100.0 * (GAIN_SCALE as f64)).round();
     if scaled >= i64::MAX as f64 {
         i64::MAX
     } else if scaled <= i64::MIN as f64 {
@@ -94,27 +116,22 @@ pub fn gain_to_scaled_cg_per_count(gain_g_per_count: f32) -> i64 {
 /// Uses an `i128` intermediate so the multiply cannot overflow for any `i64`
 /// delta and gain.
 #[inline]
+#[must_use]
 pub fn cg_from_delta_scaled(
     delta_counts: i64,
     gain_scaled_cg_per_count: i64,
     offset_cg: i32,
 ) -> i32 {
-    let num = (delta_counts as i128) * (gain_scaled_cg_per_count as i128);
-    let den = GAIN_SCALE as i128;
+    let num = i128::from(delta_counts) * i128::from(gain_scaled_cg_per_count);
+    let den = i128::from(GAIN_SCALE);
     let half = den / 2;
     let q = if num >= 0 {
         (num + half) / den
     } else {
         (num - half) / den
     };
-    let cg = q + (offset_cg as i128);
-    if cg > i32::MAX as i128 {
-        i32::MAX
-    } else if cg < i32::MIN as i128 {
-        i32::MIN
-    } else {
-        cg as i32
-    }
+    let cg = q + i128::from(offset_cg);
+    i32::try_from(cg).unwrap_or_else(|_| if cg.is_negative() { i32::MIN } else { i32::MAX })
 }
 
 #[cfg(test)]

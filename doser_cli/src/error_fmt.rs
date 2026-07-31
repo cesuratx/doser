@@ -3,7 +3,7 @@
 use crate::cli::LAST_SAFETY;
 use crate::dose::abort_reason_name;
 
-/// Map an eyre::Report to a human-readable explanation with likely causes and fix hints.
+/// Map an `eyre::Report` to a human-readable explanation with likely causes and fix hints.
 pub fn humanize(err: &eyre::Report) -> String {
     use doser_core::error::{BuildError, DoserError};
 
@@ -31,7 +31,9 @@ pub fn humanize(err: &eyre::Report) -> String {
             return "What happened: Scale read timed out.\nLikely causes: HX711 not wired correctly, no power/ground, or timeout too low.\nHow to fix: Verify DT/SCK pins and power, and consider increasing hardware.sensor_read_timeout_ms in the config.".to_string();
         }
         if let DoserError::Abort(reason) = de {
-            use doser_core::error::AbortReason::*;
+            use doser_core::error::AbortReason::{
+                Estop, MaxAttempts, MaxRuntime, NoProgress, Overshoot,
+            };
             return match reason {
                 Estop => "What happened: Emergency stop was triggered.\nLikely causes: E-stop button pressed or input pin active.\nHow to fix: Release E-stop, ensure wiring is correct, then start a new run.".to_string(),
                 NoProgress => "What happened: No progress watchdog tripped.\nLikely causes: Jammed auger, empty hopper, or scale not changing within threshold.\nHow to fix: Check mechanics and materials; adjust safety.no_progress_* in config if needed.".to_string(),
@@ -71,16 +73,15 @@ pub fn humanize(err: &eyre::Report) -> String {
     }
 
     // Generic fallback
-    let mut cause = String::new();
-    if let Some(src) = err.source() {
-        cause = format!(" Cause: {src}");
-    }
+    let cause = err
+        .source()
+        .map_or_else(String::new, |src| format!(" Cause: {src}"));
     format!(
         "Something went wrong.{cause}\nHow to fix: Re-run with --log-level=debug for details. Original: {msg}"
     )
 }
 
-/// Map AbortReason (if present) to stable exit codes; non-abort errors return 2.
+/// Map `AbortReason` (if present) to stable exit codes; non-abort errors return 2.
 pub fn exit_code_for_error(err: &eyre::Report) -> i32 {
     use doser_core::error::DoserError;
     if let Some(DoserError::Abort(reason)) = err.downcast_ref::<DoserError>() {
@@ -118,11 +119,10 @@ pub fn format_error_json(err: &eyre::Report) -> String {
             _ => None,
         };
 
-        let obj = if let Some(d) = detail_obj {
-            json!({ "reason": reason_name, "details": d, "message": msg })
-        } else {
-            json!({ "reason": reason_name, "message": msg })
-        };
+        let obj = detail_obj.map_or_else(
+            || json!({ "reason": reason_name, "message": msg }),
+            |d| json!({ "reason": reason_name, "details": d, "message": msg }),
+        );
         return obj.to_string();
     }
 
