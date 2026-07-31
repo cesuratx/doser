@@ -5,7 +5,7 @@
 )]
 #![allow(clippy::module_name_repetitions, clippy::missing_errors_doc)]
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
-//! doser_hardware: hardware and simulation backends behind `doser_traits`.
+//! `doser_hardware`: hardware and simulation backends behind `doser_traits`.
 //!
 //! Features:
 //! - `hardware`: enable Raspberry Pi GPIO/HX711-backed implementations.
@@ -20,6 +20,16 @@
 
 pub mod error;
 pub mod util;
+
+/// Maximum commanded step rate, in steps per second.
+///
+/// Above this the bit-banged STEP pacing on a Pi stops being reliable (and the
+/// mechanism stalls long before it), so **every** backend clamps to this value —
+/// the hardware motor, its stepping thread, and the simulator alike, so sim and
+/// hardware agree. Callers that derive a duration from a step rate must clamp
+/// first (see `doser_cli`'s `motor` jog command), otherwise the requested step
+/// count silently falls short of what actually gets stepped.
+pub const MAX_STEP_RATE_SPS: u32 = 5_000;
 
 // Make the HX711 driver module available when hardware feature is enabled on Linux.
 #[cfg(all(feature = "hardware", target_os = "linux"))]
@@ -67,6 +77,7 @@ pub mod sim {
     impl SimulatedScale {
         /// Create an unlinked scale (no motor coupling). Use [`sim_pair`] to link a
         /// scale and motor so the reading responds to the motor running.
+        #[must_use]
         pub fn new() -> Self {
             Self {
                 grams: 0.0,
@@ -74,13 +85,17 @@ pub mod sim {
             }
         }
 
-        fn with_state(state: Arc<SimState>) -> Self {
+        const fn with_state(state: Arc<SimState>) -> Self {
             Self { grams: 0.0, state }
         }
     }
 
     impl Scale for SimulatedScale {
-        fn read(&mut self, _timeout: Duration) -> Result<i32, Box<dyn Error + Send + Sync>> {
+        // The final `grams -> centigram counts` conversion is a deliberate quantisation
+        // to the ADC's integer domain; `as` is the only float->int conversion available
+        // and it saturates, which is what we want for an out-of-range sim value.
+        #[allow(clippy::cast_possible_truncation)]
+        fn read(&mut self, timeout: Duration) -> Result<i32, Box<dyn Error + Send + Sync>> {
             // Optional: simulate a blocking timeout when DOSER_TEST_SIM_TIMEOUT is set.
             if std::env::var("DOSER_TEST_SIM_TIMEOUT")
                 .ok()
@@ -91,7 +106,7 @@ pub mod sim {
                 // Sleep roughly the requested timeout to mimic a real blocking call.
                 // The controller's watchdog logic does not depend on the exact sleep here.
                 // Use a small upper bound to avoid long stalls in tests.
-                let sleep_for = _timeout.min(Duration::from_millis(10));
+                let sleep_for = timeout.min(Duration::from_millis(10));
                 std::thread::sleep(sleep_for);
                 let err = std::io::Error::new(std::io::ErrorKind::TimedOut, "timeout");
                 return Err(Box::new(err));
@@ -118,11 +133,12 @@ pub mod sim {
 
     impl SimulatedMotor {
         /// Create an unlinked motor. Use [`sim_pair`] to link a scale and motor.
+        #[must_use]
         pub fn new() -> Self {
             Self::default()
         }
 
-        fn with_state(state: Arc<SimState>) -> Self {
+        const fn with_state(state: Arc<SimState>) -> Self {
             Self { state }
         }
     }
@@ -134,7 +150,11 @@ pub mod sim {
         }
 
         fn set_speed(&mut self, sps: u32) -> Result<(), Box<dyn Error + Send + Sync>> {
-            self.state.sps.store(sps, Ordering::Release);
+            // Clamp exactly like `HardwareMotor::set_speed` so a rate that the real
+            // driver would cap does not behave differently under simulation.
+            self.state
+                .sps
+                .store(sps.min(crate::MAX_STEP_RATE_SPS), Ordering::Release);
             Ok(())
         }
 
@@ -148,12 +168,35 @@ pub mod sim {
     /// Create a linked simulated `(scale, motor)` pair that share state, so the
     /// scale's reading responds to the motor running. Each pair is independent,
     /// keeping parallel simulations (e.g. tests) isolated.
+    #[must_use]
     pub fn sim_pair() -> (SimulatedScale, SimulatedMotor) {
         let state = SimState::shared();
         (
             SimulatedScale::with_state(state.clone()),
             SimulatedMotor::with_state(state),
         )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn set_speed_clamps_to_max_step_rate() {
+            let (_scale, mut motor) = sim_pair();
+            motor.set_speed(crate::MAX_STEP_RATE_SPS * 4).unwrap();
+            assert_eq!(
+                motor.state.sps.load(Ordering::Acquire),
+                crate::MAX_STEP_RATE_SPS
+            );
+        }
+
+        #[test]
+        fn set_speed_below_max_is_untouched() {
+            let (_scale, mut motor) = sim_pair();
+            motor.set_speed(200).unwrap();
+            assert_eq!(motor.state.sps.load(Ordering::Acquire), 200);
+        }
     }
 }
 
@@ -233,6 +276,7 @@ pub mod pacing {
     }
 
     impl Pacer {
+        #[must_use]
         pub fn new() -> Self {
             Self {
                 next_deadline: Instant::now(),
@@ -242,12 +286,18 @@ pub mod pacing {
                 avg_jitter_us: 0,
             }
         }
-        pub fn reset(&mut self) {
+        pub const fn reset(&mut self) {
             self.initialized = false;
         }
 
         /// Run one full period paced by absolute deadlines, invoking `mid_hook` exactly at half period.
-        /// Returns Some(avg_jitter_us) whenever the internal window (256) completes.
+        /// Returns `Some(avg_jitter_us)` whenever the internal window (256) completes.
+        //
+        // `self.next_deadline - half` cannot underflow: `next_deadline` is seeded as
+        // `now + period` and only ever advances by `period`, so it is always at least
+        // `half` past the monotonic epoch. Substituting a `checked_sub` fallback would
+        // silently shift the mid-period STEP edge, so the plain subtraction stays.
+        #[allow(clippy::unchecked_time_subtraction)]
         pub fn step_with<F, S: Sleeper>(
             &mut self,
             sleeper: &S,
@@ -278,7 +328,8 @@ pub mod pacing {
             self.jitter_count = self.jitter_count.saturating_add(1);
             self.next_deadline += period;
             if self.jitter_count >= 256 {
-                let avg = (self.jitter_accum_us / (self.jitter_count as u128)) as u32;
+                let avg = u32::try_from(self.jitter_accum_us / u128::from(self.jitter_count))
+                    .unwrap_or(u32::MAX);
                 self.avg_jitter_us = avg;
                 self.jitter_accum_us = 0;
                 self.jitter_count = 0;
@@ -296,11 +347,11 @@ pub mod pacing {
     /// Add a Duration to a timespec-like (sec, nsec) pair, normalizing nanoseconds and saturating seconds.
     #[cfg_attr(not(all(feature = "rt", target_os = "linux")), allow(dead_code))]
     #[inline]
-    fn add_duration_to_timespec(now_sec: i64, now_nsec: i64, delta: Duration) -> (i64, i64) {
-        let add_sec_i64 = i64::try_from(delta.as_secs()).unwrap_or(i64::MAX);
-        let add_nsec_i64 = delta.subsec_nanos() as i64; // < 1e9
-        let mut sec = now_sec.saturating_add(add_sec_i64);
-        let mut nsec = now_nsec.saturating_add(add_nsec_i64);
+    fn add_duration_to_timespec(now_secs: i64, now_nanos: i64, delta: Duration) -> (i64, i64) {
+        let add_secs = i64::try_from(delta.as_secs()).unwrap_or(i64::MAX);
+        let add_nanos = i64::from(delta.subsec_nanos()); // < 1e9
+        let mut sec = now_secs.saturating_add(add_secs);
+        let mut nsec = now_nanos.saturating_add(add_nanos);
         if nsec >= 1_000_000_000 {
             let carry = nsec / 1_000_000_000;
             sec = sec.saturating_add(carry);
@@ -542,7 +593,7 @@ pub mod hardware {
                     // Acquire pairs with the Release stores in start/stop/set_speed so the
                     // stepping thread promptly observes commanded state changes.
                     let is_running = running_bg.load(Ordering::Acquire);
-                    let sps_val = sps_bg.load(Ordering::Acquire).clamp(0, 5_000);
+                    let sps_val = sps_bg.load(Ordering::Acquire).min(crate::MAX_STEP_RATE_SPS);
                     if !(is_running && sps_val > 0) {
                         clock.sleep(Duration::from_millis(2));
                         pacer.reset();
@@ -551,12 +602,12 @@ pub mod hardware {
 
                     let period_us = (1_000_000u32 / sps_val).max(1) as u64; // us
                     // Rising edge
-                    let _ = step.set_high();
+                    step.set_high();
                     spin_delay_min();
                     crate::util::busy_wait_min_1us();
                     // High hold until mid, then fall and hold until end
                     if let Some(avg) = pacer.step_with(&sleeper, period_us, || {
-                        let _ = step.set_low();
+                        step.set_low();
                         spin_delay_min();
                         crate::util::busy_wait_min_1us();
                     }) {
@@ -612,14 +663,14 @@ pub mod hardware {
     impl Motor for HardwareMotor {
         fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
             self.set_enabled(true)
-                .map_err(|e| Box::<dyn Error + Send + Sync>::from(e))?;
+                .map_err(Box::<dyn Error + Send + Sync>::from)?;
             self.running.store(true, Ordering::Release);
             info!("motor started");
             Ok(())
         }
 
         fn set_speed(&mut self, sps: u32) -> Result<(), Box<dyn Error + Send + Sync>> {
-            let clamped = sps.clamp(0, 5_000);
+            let clamped = sps.min(crate::MAX_STEP_RATE_SPS);
             if clamped == 0 {
                 warn!("requested 0 sps; motor will idle");
             }
@@ -637,9 +688,9 @@ pub mod hardware {
         /// Set direction: true = clockwise (DIR high), false = counterclockwise (DIR low).
         fn set_direction(&mut self, clockwise: bool) -> Result<(), Box<dyn Error + Send + Sync>> {
             if clockwise {
-                let _ = self.dir.set_high();
+                self.dir.set_high();
             } else {
-                let _ = self.dir.set_low();
+                self.dir.set_low();
             }
             Ok(())
         }
@@ -665,8 +716,9 @@ pub mod hardware {
         };
 
         // Try to set FIFO priority (requires CAP_SYS_NICE); ignore EPERM with warning upstream
-        let mut param = sched_param { sched_priority: 10 };
-        let rc = unsafe { sched_setscheduler(0, SCHED_FIFO, &mut param) };
+        // `sched_setscheduler` takes a `*const sched_param`, so a shared borrow is enough.
+        let param = sched_param { sched_priority: 10 };
+        let rc = unsafe { sched_setscheduler(0, SCHED_FIFO, &param) };
         if rc != 0 {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() != Some(libc::EPERM) {
@@ -710,10 +762,7 @@ pub mod hardware {
         let flag_weak: Weak<AtomicBool> = Arc::downgrade(&flag);
         thread::spawn(move || {
             let clock = MonotonicClock::new();
-            loop {
-                let Some(flag) = flag_weak.upgrade() else {
-                    break;
-                };
+            while let Some(flag) = flag_weak.upgrade() {
                 let level_low = pin.read() == rppal::gpio::Level::Low;
                 let active = if active_low { level_low } else { !level_low };
                 flag.store(active, Ordering::Release);

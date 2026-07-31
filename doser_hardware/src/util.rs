@@ -34,7 +34,7 @@ pub fn wait_until_low_with_timeout(
     let start = clock.now();
     while is_high() {
         // Abort on timeout
-        if clock.ms_since(start) >= timeout.as_millis() as u64 {
+        if clock.ms_since(start) >= doser_traits::duration_to_ms(timeout) {
             return Err(HwError::DataReadyTimeout);
         }
         clock.sleep(poll_interval);

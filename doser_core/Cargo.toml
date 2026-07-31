@@ -20,6 +20,12 @@ doser_hardware = { path = "../doser_hardware", optional = true }
 eyre = "0.6.12"
 tracing = "0.1"
 
+[[bench]]
+name = "predictor"
+# Criterion supplies its own harness via `criterion_main!`; without this the
+# default libtest harness runs instead and silently measures nothing.
+harness = false
+
 [dev-dependencies]
 rstest = "0.23"
 proptest = "1"

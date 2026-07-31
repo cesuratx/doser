@@ -19,6 +19,12 @@ pub struct Calibration {
 
 impl Calibration {
     /// Convert raw counts to grams (floating-point path, used for display only).
+    //
+    // Lint rationale: `i32 -> f32` has no infallible constructor and the count delta is
+    // a 24-bit HX711 sample, so the conversion is exact; `mul_add` is a *fused* op that
+    // would round differently from the calibration definition documented on `to_cg`.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss, clippy::suboptimal_flops)]
     pub fn to_grams(&self, raw: i32) -> f32 {
         self.gain_g_per_count * ((raw - self.zero_counts) as f32) + self.offset_g
     }
@@ -27,13 +33,19 @@ impl Calibration {
     /// using integer fixed-point arithmetic.
     ///
     /// Definition (continuous):
-    ///   grams = gain_g_per_count * (raw - zero_counts) + offset_g
-    ///   centigrams = round(100 * grams)
+    ///
+    /// ```text
+    /// grams      = gain_g_per_count * (raw - zero_counts) + offset_g
+    /// centigrams = round(100 * grams)
+    /// ```
     ///
     /// Implementation (fixed-point):
-    /// - gain_scaled = round(100 * gain_g_per_count * GAIN_SCALE)  (cg/count × GAIN_SCALE)
-    /// - offset_cg = round(100 * offset_g)
-    /// - result_cg = round((raw - zero_counts) * gain_scaled / GAIN_SCALE) + offset_cg
+    ///
+    /// ```text
+    /// gain_scaled = round(100 * gain_g_per_count * GAIN_SCALE)  (cg/count × GAIN_SCALE)
+    /// offset_cg   = round(100 * offset_g)
+    /// result_cg   = round((raw - zero_counts) * gain_scaled / GAIN_SCALE) + offset_cg
+    /// ```
     ///
     /// Rationale:
     /// - Avoids per-sample floating-point math in the control loop.
@@ -55,8 +67,9 @@ impl Calibration {
     /// Example:
     /// - If `gain_g_per_count = 0.01`, `zero_counts = 0`, `offset_g = 0.0`,
     ///   and `raw = 123`, then `to_cg(123) == 123` (i.e., 1.23 g).
+    #[must_use]
     pub fn to_cg(&self, raw: i32) -> i32 {
-        let delta = (raw as i64) - (self.zero_counts as i64);
+        let delta = i64::from(raw) - i64::from(self.zero_counts);
         let gain_scaled = gain_to_scaled_cg_per_count(self.gain_g_per_count);
         let offset_cg = quantize_to_cg_i32(self.offset_g);
         cg_from_delta_scaled(delta, gain_scaled, offset_cg)

@@ -1,5 +1,14 @@
 # Phase 2 Work Session - Summary
 
+> **Historical record — parts are no longer current (note added 2026-07-30).** The CI layout
+> described below has since changed: the standalone `lint` job and ci.yml's `security` job
+> were removed (fmt+clippy now live only in `checks`; `cargo-audit` lives only in
+> security.yml), every job resolves the pinned toolchain from `rust-toolchain.toml` instead
+> of floating on `stable`, all three workflows declare least-privilege `permissions`, and the
+> Raspberry Pi release artifact is built `--features hardware`. See CHANGELOG "Unreleased"
+> and `docs/concepts/build-ci.md` for the current state. The text below is kept as a record
+> of that session, not as documentation.
+
 **Date**: October 19, 2024  
 **Duration**: ~2 hours  
 **Status**: ✅ **2 of 3 objectives complete** - Production ready!

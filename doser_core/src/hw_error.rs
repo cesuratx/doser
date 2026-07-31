@@ -16,8 +16,8 @@ pub fn map_hw_error(e: &(dyn std::error::Error + 'static)) -> DoserError {
     {
         if let Some(hw) = e.downcast_ref::<doser_hardware::error::HwError>() {
             return match hw {
-                doser_hardware::error::HwError::Timeout => DoserError::Timeout,
-                doser_hardware::error::HwError::DataReadyTimeout => DoserError::Timeout,
+                doser_hardware::error::HwError::Timeout
+                | doser_hardware::error::HwError::DataReadyTimeout => DoserError::Timeout,
                 other => DoserError::HardwareFault(other.to_string()),
             };
         }

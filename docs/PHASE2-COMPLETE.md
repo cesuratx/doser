@@ -1,5 +1,11 @@
 # Phase 2 Complete: Code Modularization & CI/CD ✅
 
+> **Historical record — parts are no longer current (note added 2026-07-30).** The CI job
+> list below ("checks, lint, test, hardware feature test, coverage") is stale: `lint` was
+> folded into `checks` and ci.yml's `security` job was removed in favour of security.yml's
+> `cargo-audit`. Toolchain resolution, workflow permissions and the hardware-feature release
+> artifact also changed. See `docs/concepts/build-ci.md` for the current state.
+
 ## Summary
 
 Successfully completed Phase 2 priorities from the business review:

@@ -22,6 +22,11 @@ speed_bands = [
 ]
 hysteresis_g = 0.07
 epsilon_g = 0.08
+# Settle window: the weight must stay within max(epsilon_g, hysteresis_g) for this
+# long after the motor stops before the dose is declared complete. This is the ONLY
+# settle knob — `timeouts.settle_ms` is parsed and ignored. 800 ms is ~8 samples at
+# this board's 10 SPS; it carries over the intent of the old `timeouts.settle_ms = 800`.
+stable_ms = 800
 
 [safety]
 max_run_ms = 45000
@@ -33,7 +38,8 @@ no_progress_ms = 1300
 # Per-read timeout. At 10 SPS a sample arrives every ~90-100 ms, so this must
 # comfortably exceed one sample period or every read will time out.
 sensor_ms = 200
-settle_ms = 800
+# NOTE: `settle_ms` used to be set here. It is parsed for backward compatibility and
+# then ignored — the real settle knob is `control.stable_ms` above. Do not tune it here.
 
 [predictor]
 enabled = true

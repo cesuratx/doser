@@ -11,6 +11,11 @@
 
 ### Overall Assessment: ⭐⭐⭐⭐½ (4.5/5) - **STRONG FOUNDATION, PRODUCTION-READY WITH MINOR IMPROVEMENTS**
 
+> **Historical record — do not read as current state (note added 2026-07-30).** Command
+> lines in this document invoke a `doser` binary; the package builds **`doser_cli`**, so read
+> `doser health` as `doser_cli --config <FILE> health` and `doser dose --grams 18 --rt` as
+> `doser_cli --config <FILE> dose --grams 18 --rt`. See `docs/reference/OPERATIONS.md`.
+
 Your codebase is **exceptionally well-positioned** for a commercial coffee bean doser product. Here's why:
 
 **Key Strengths for Coffee Application**:

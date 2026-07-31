@@ -10,10 +10,12 @@ use std::sync::Arc;
 use doser_traits::clock::{Clock, MonotonicClock};
 
 use crate::calibration::Calibration;
-use crate::config::*;
+use crate::config::{ControlCfg, FilterCfg, PredictorCfg, SafetyCfg, Timeouts};
 use crate::core::DoserCore;
 use crate::error::{BuildError, Result};
-use crate::fixed_point::{gain_to_scaled_cg_per_count, grams_to_cg, quantize_to_cg_i32};
+use crate::fixed_point::{
+    cg_to_grams, gain_to_scaled_cg_per_count, grams_to_cg, quantize_to_cg_i32,
+};
 use crate::status::DosingStatus;
 
 // ── Public dynamic-dispatch wrapper ──────────────────────────────────────────
@@ -26,11 +28,8 @@ pub struct Doser {
 impl core::fmt::Debug for Doser {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Doser")
-            .field("target_g", &((self.inner.target_cg as f32) / 100.0))
-            .field(
-                "last_weight_g",
-                &((self.inner.last_weight_cg as f32) / 100.0),
-            )
+            .field("target_g", &cg_to_grams(self.inner.target_cg))
+            .field("last_weight_g", &cg_to_grams(self.inner.last_weight_cg))
             .field("motor_started", &self.inner.motor_started)
             .finish()
     }
@@ -38,11 +37,13 @@ impl core::fmt::Debug for Doser {
 
 impl Doser {
     /// Start building a Doser.
+    #[must_use]
     pub fn builder() -> DoserBuilder<Missing, Missing, Missing> {
         DoserBuilder::default()
     }
 
     /// Return the last observed weight in grams.
+    #[must_use]
     pub fn last_weight(&self) -> f32 {
         self.inner.last_weight()
     }
@@ -53,6 +54,7 @@ impl Doser {
     }
 
     /// Return the configured filter parameters.
+    #[must_use]
     pub fn filter_cfg(&self) -> &FilterCfg {
         self.inner.filter_cfg()
     }
@@ -78,6 +80,7 @@ impl Doser {
     }
 
     /// Telemetry: last slope EMA in grams per second (approx), if available.
+    #[must_use]
     pub fn last_slope_ema_gps(&self) -> Option<f32> {
         self.inner
             .last_slope_ema_cg_per_ms
@@ -85,11 +88,19 @@ impl Doser {
     }
 
     /// Telemetry: inflight mass estimate in grams at last check, if available.
+    //
+    // `i32 -> f32` has no infallible constructor; centigram weights are far below 2^24
+    // so the conversion is exact. The `* 0.01` form is kept rather than routed through
+    // `cg_to_grams` so the reported value stays bit-identical to `DoserCore`'s.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
     pub fn last_inflight_g(&self) -> Option<f32> {
         self.inner.last_inflight_cg.map(|cg| (cg as f32) * 0.01)
     }
 
     /// Telemetry: weight at which predictor triggered early stop, in grams, if any.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)] // see `last_inflight_g`
     pub fn early_stop_at_g(&self) -> Option<f32> {
         self.inner.early_stop_at_cg.map(|cg| (cg as f32) * 0.01)
     }
@@ -111,7 +122,7 @@ pub struct DoserBuilder<S, M, T> {
     timeouts: Option<Timeouts>,
     calibration: Option<Calibration>,
     target_g: Option<f32>,
-    _calibration_loaded: bool,
+    calibration_loaded: bool,
     estop_check: Option<Box<dyn Fn() -> bool>>,
     clock: Option<Box<dyn Clock + Send + Sync>>,
     estop_debounce_n: Option<u8>,
@@ -132,7 +143,7 @@ impl Default for DoserBuilder<Missing, Missing, Missing> {
             timeouts: None,
             calibration: None,
             target_g: None,
-            _calibration_loaded: false,
+            calibration_loaded: false,
             estop_check: None,
             clock: None,
             estop_debounce_n: None,
@@ -144,26 +155,22 @@ impl Default for DoserBuilder<Missing, Missing, Missing> {
     }
 }
 
-/// Validate configuration and construct a `DoserCore` with precomputed caches.
+/// Bound on filter/predictor window sizes: they drive `Vec`/`VecDeque` allocations
+/// in the core, so a config typo must not turn into a huge allocation.
+const MAX_WINDOW: usize = 10_000;
+
+/// Reject any configuration the control loop cannot run safely.
 ///
-/// This is the single source of truth for validation and construction,
-/// used by both `DoserBuilder::try_build()` and `build_doser()`.
-#[allow(clippy::too_many_arguments)]
-fn validate_and_build<S: doser_traits::Scale, M: doser_traits::Motor>(
-    scale: S,
-    motor: M,
-    filter: FilterCfg,
-    mut control: ControlCfg,
-    safety: SafetyCfg,
-    timeouts: Timeouts,
-    calibration: Calibration,
+/// Split out of [`validate_and_build`] so each half stays readable; the checks run in
+/// the same order they always have, so the first-reported error is unchanged.
+fn validate_cfg(
+    filter: &FilterCfg,
+    control: &ControlCfg,
+    safety: &SafetyCfg,
+    timeouts: &Timeouts,
+    predictor: &PredictorCfg,
     target_g: f32,
-    estop_check: Option<Box<dyn Fn() -> bool>>,
-    predictor: PredictorCfg,
-    clock: Option<Box<dyn Clock + Send + Sync>>,
-    estop_debounce_n: u8,
-) -> Result<DoserCore<S, M>> {
-    // ── Validation ───────────────────────────────────────────────────────────
+) -> Result<()> {
     if !(0.1..=5000.0).contains(&target_g) {
         return Err(eyre::Report::new(BuildError::InvalidConfig(
             "target grams out of range",
@@ -209,8 +216,6 @@ fn validate_and_build<S: doser_traits::Scale, M: doser_traits::Motor>(
             "sample_rate_hz must be > 0",
         )));
     }
-    // Bound window sizes: they drive Vec/VecDeque allocations in the core.
-    const MAX_WINDOW: usize = 10_000;
     if filter.ma_window > MAX_WINDOW || filter.median_window > MAX_WINDOW {
         return Err(eyre::Report::new(BuildError::InvalidConfig(
             "filter window sizes must be <= 10000",
@@ -239,6 +244,33 @@ fn validate_and_build<S: doser_traits::Scale, M: doser_traits::Motor>(
             )));
         }
     }
+    Ok(())
+}
+
+/// Validate configuration and construct a `DoserCore` with precomputed caches.
+///
+/// This is the single source of truth for validation and construction,
+/// used by both `DoserBuilder::try_build()` and `build_doser()`.
+//
+// `similar_names` is allowed here: the `_us`/`_ms` and `_g`/`_cg` suffixes are this
+// crate's unit convention, and stripping them would lose the unit discipline that
+// keeps the fixed-point control loop honest.
+#[allow(clippy::too_many_arguments, clippy::similar_names)]
+fn validate_and_build<S: doser_traits::Scale, M: doser_traits::Motor>(
+    scale: S,
+    motor: M,
+    filter: FilterCfg,
+    mut control: ControlCfg,
+    safety: SafetyCfg,
+    timeouts: Timeouts,
+    calibration: Calibration,
+    target_g: f32,
+    estop_check: Option<Box<dyn Fn() -> bool>>,
+    predictor: PredictorCfg,
+    clock: Option<Box<dyn Clock + Send + Sync>>,
+    estop_debounce_n: u8,
+) -> Result<DoserCore<S, M>> {
+    validate_cfg(&filter, &control, &safety, &timeouts, &predictor, target_g)?;
 
     // ── Precompute ───────────────────────────────────────────────────────────
     let ma_cap = filter.ma_window.max(1);
@@ -353,41 +385,49 @@ impl<S, M, T> DoserBuilder<S, M, T> {
 
 /// Chainable setters that do not affect type-state.
 impl<S, M, T> DoserBuilder<S, M, T> {
-    pub fn with_filter(mut self, filter: FilterCfg) -> Self {
+    #[must_use]
+    pub const fn with_filter(mut self, filter: FilterCfg) -> Self {
         self.filter = Some(filter);
         self
     }
+    #[must_use]
     pub fn with_control(mut self, control: ControlCfg) -> Self {
         self.control = Some(control);
         self
     }
-    pub fn with_safety(mut self, safety: SafetyCfg) -> Self {
+    #[must_use]
+    pub const fn with_safety(mut self, safety: SafetyCfg) -> Self {
         self.safety = Some(safety);
         self
     }
-    pub fn with_timeouts(mut self, timeouts: Timeouts) -> Self {
+    #[must_use]
+    pub const fn with_timeouts(mut self, timeouts: Timeouts) -> Self {
         self.timeouts = Some(timeouts);
         self
     }
-    pub fn with_calibration(mut self, calibration: Calibration) -> Self {
+    #[must_use]
+    pub const fn with_calibration(mut self, calibration: Calibration) -> Self {
         self.calibration = Some(calibration);
-        self._calibration_loaded = true;
+        self.calibration_loaded = true;
         self
     }
+    #[must_use]
     pub fn with_tare_counts(mut self, zero_counts: i32) -> Self {
         let mut c = self.calibration.unwrap_or_default();
         c.zero_counts = zero_counts;
         self.calibration = Some(c);
         self
     }
+    #[must_use]
     pub fn with_calibration_gain_offset(mut self, gain_g_per_count: f32, offset_g: f32) -> Self {
         let mut c = self.calibration.unwrap_or_default();
         c.gain_g_per_count = gain_g_per_count;
         c.offset_g = offset_g;
         self.calibration = Some(c);
-        self._calibration_loaded = true;
+        self.calibration_loaded = true;
         self
     }
+    #[must_use]
     pub fn with_estop_check<F>(mut self, f: F) -> Self
     where
         F: Fn() -> bool + 'static,
@@ -395,22 +435,26 @@ impl<S, M, T> DoserBuilder<S, M, T> {
         self.estop_check = Some(Box::new(f));
         self
     }
+    #[must_use]
     pub fn with_estop_debounce(mut self, n: u8) -> Self {
         self.estop_debounce_n = Some(n.max(1));
         self
     }
     /// Configure the stop-early predictor.
-    pub fn with_predictor(mut self, predictor: PredictorCfg) -> Self {
+    #[must_use]
+    pub const fn with_predictor(mut self, predictor: PredictorCfg) -> Self {
         self.predictor = Some(predictor);
         self
     }
     /// Provide a custom clock implementation; defaults to `MonotonicClock` when not provided.
+    #[must_use]
     pub fn with_clock(mut self, clock: Box<dyn Clock + Send + Sync>) -> Self {
         self.clock = Some(clock);
         self
     }
 
     /// Backward-compatible no-op when `None` is passed.
+    #[must_use]
     pub fn apply_calibration<C>(self, _src: Option<C>) -> Self {
         self
     }
@@ -418,6 +462,7 @@ impl<S, M, T> DoserBuilder<S, M, T> {
 
 // Setters that advance type-state
 impl<M, T> DoserBuilder<Missing, M, T> {
+    #[must_use]
     pub fn with_scale(self, scale: impl doser_traits::Scale + 'static) -> DoserBuilder<Set, M, T> {
         DoserBuilder {
             scale: Some(Box::new(scale)),
@@ -428,7 +473,7 @@ impl<M, T> DoserBuilder<Missing, M, T> {
             timeouts: self.timeouts,
             calibration: self.calibration,
             target_g: self.target_g,
-            _calibration_loaded: self._calibration_loaded,
+            calibration_loaded: self.calibration_loaded,
             estop_check: self.estop_check,
             clock: self.clock,
             estop_debounce_n: self.estop_debounce_n,
@@ -441,6 +486,7 @@ impl<M, T> DoserBuilder<Missing, M, T> {
 }
 
 impl<S, T> DoserBuilder<S, Missing, T> {
+    #[must_use]
     pub fn with_motor(self, motor: impl doser_traits::Motor + 'static) -> DoserBuilder<S, Set, T> {
         DoserBuilder {
             scale: self.scale,
@@ -451,7 +497,7 @@ impl<S, T> DoserBuilder<S, Missing, T> {
             timeouts: self.timeouts,
             calibration: self.calibration,
             target_g: self.target_g,
-            _calibration_loaded: self._calibration_loaded,
+            calibration_loaded: self.calibration_loaded,
             estop_check: self.estop_check,
             clock: self.clock,
             estop_debounce_n: self.estop_debounce_n,
@@ -464,6 +510,7 @@ impl<S, T> DoserBuilder<S, Missing, T> {
 }
 
 impl<S, M> DoserBuilder<S, M, Missing> {
+    #[must_use]
     pub fn with_target_grams(self, grams: f32) -> DoserBuilder<S, M, Set> {
         DoserBuilder {
             scale: self.scale,
@@ -474,7 +521,7 @@ impl<S, M> DoserBuilder<S, M, Missing> {
             timeouts: self.timeouts,
             calibration: self.calibration,
             target_g: Some(grams),
-            _calibration_loaded: self._calibration_loaded,
+            calibration_loaded: self.calibration_loaded,
             estop_check: self.estop_check,
             clock: self.clock,
             estop_debounce_n: self.estop_debounce_n,

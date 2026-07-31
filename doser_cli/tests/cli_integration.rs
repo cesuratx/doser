@@ -1,60 +1,27 @@
+//! End-to-end behaviour of the `dose` happy path and the top-level argument
+//! surface, asserted against the binary's *user-facing* contract.
+//!
+//! stdout carries only the CLI's own output (`final: X.XX g`, or the `--json`
+//! result line); every tracing record goes to stderr. Tests here must never pin
+//! a log string on stdout — doing so is what let log records leak onto stdout
+//! unnoticed in the first place.
+
+mod common;
+
 use assert_cmd::prelude::*;
+use common::{Cfg, doser, exit, write_valid_config};
 use predicates::prelude::*;
 use rstest::rstest;
-use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
-use std::process::Command;
 use tempfile::tempdir;
-
-// Build a minimal valid TOML config for sim mode
-fn write_valid_config(dir: &tempfile::TempDir) -> PathBuf {
-    let toml = r#"
-[pins]
-# pins are unused in sim backend but must be present
-hx711_dt = 5
-hx711_sck = 6
-motor_step = 13
-motor_dir = 19
-motor_en = 26
-estop_in = 21
-
-[filter]
-ma_window = 1
-median_window = 1
-sample_rate_hz = 80
-
-[control]
-coarse_speed = 1000
-fine_speed = 200
-slow_at_g = 1.0
-hysteresis_g = 0.05
-stable_ms = 0
-# epsilon must be > 0 per validation
-epsilon_g = 0.02
-
-[timeouts]
-sample_ms = 50
-
-[safety]
-# Allow enough time for the control loop (80 Hz) to reach target in sim
-max_run_ms = 2000
-max_overshoot_g = 5.0
-no_progress_epsilon_g = 0.02
-no_progress_ms = 1200
-
-[hardware]
-sensor_read_timeout_ms = 100
-"#;
-    let path = dir.path().join("cfg.toml");
-    fs::write(&path, toml).unwrap();
-    path
-}
 
 #[rstest]
 #[case(&["--help"], 0, "Usage:", "stdout")]
-#[case(&["dose", "--grams", "5"], 0, "complete", "stdout")]
-#[case(&["dose"], 2, "required", "stderr")]
+// The user-facing success output is `final: X.XX g` on stdout. This case used to
+// assert "complete", which only ever matched the `dose complete` *log* record.
+#[case(&["dose", "--grams", "5"], 0, "final:", "stdout")]
+// Companion case pinning the log stream: the record exists, on stderr.
+#[case(&["dose", "--grams", "5"], 0, "dose complete", "stderr")]
+#[case(&["dose"], exit::USAGE, "required", "stderr")]
 fn cli_table_cases(
     #[case] args: &[&str],
     #[case] exit_code: i32,
@@ -64,10 +31,7 @@ fn cli_table_cases(
     let dir = tempdir().unwrap();
     let cfg = write_valid_config(&dir);
 
-    let mut cmd = Command::cargo_bin("doser_cli").unwrap();
-
-    // Always include a valid config to avoid relying on default path
-    cmd.arg("--config").arg(&cfg);
+    let mut cmd = doser(&cfg);
 
     // For dose runs that should progress, nudge the sim scale to increase
     if args.first().copied() == Some("dose") && exit_code == 0 {
@@ -78,14 +42,7 @@ fn cli_table_cases(
         cmd.arg(a);
     }
 
-    let assert = cmd.assert();
-
-    // Check exit status in a chained manner to keep ownership
-    let assert = if exit_code >= 0 {
-        assert.code(exit_code)
-    } else {
-        assert.failure()
-    };
+    let assert = cmd.assert().code(exit_code);
 
     match stream {
         "stdout" => {
@@ -98,38 +55,153 @@ fn cli_table_cases(
     }
 }
 
+/// The full stdout contract for a successful non-JSON dose: exactly one line,
+/// `final: <grams> g`, and nothing else. The grams value is parsed rather than
+/// string-matched because the sim lands on the first sample at or past the
+/// target, which depends on how many 0.5 g increments the sampler coalesces.
 #[rstest]
-fn cli_reports_bad_calibration_header() {
+fn dose_stdout_is_only_the_final_line() {
     let dir = tempdir().unwrap();
     let cfg = write_valid_config(&dir);
 
-    // Write a bad-header CSV
-    let bad_csv = dir.path().join("calib.csv");
-    let mut f = fs::File::create(&bad_csv).unwrap();
-    writeln!(f, "raw,value").unwrap();
-    writeln!(f, "100,0.0").unwrap();
-    writeln!(f, "200,1.0").unwrap();
+    let out = doser(&cfg)
+        .env("DOSER_TEST_SIM_INC", "0.5")
+        .args(["dose", "--grams", "2"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
 
-    let mut cmd = Command::cargo_bin("doser_cli").unwrap();
-    cmd.arg("--config")
-        .arg(&cfg)
-        .arg("--calibration")
-        .arg(&bad_csv)
-        .arg("self-check");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "stdout should be one line, got: {stdout:?}");
 
-    cmd.assert()
-        .failure()
-        .stderr(predicate::str::contains("Invalid headers"));
+    let grams = lines[0]
+        .strip_prefix("final: ")
+        .and_then(|r| r.strip_suffix(" g"))
+        .unwrap_or_else(|| panic!("stdout line is not `final: X.XX g`: {:?}", lines[0]))
+        .parse::<f32>()
+        .expect("final grams parses as a number");
+    assert!(
+        grams >= 2.0,
+        "a completed dose must reach the target, got {grams}"
+    );
+
+    // The dose log records exist — on stderr, where the contract puts them.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("dose start"), "stderr was: {stderr}");
+    assert!(stderr.contains("dose complete"), "stderr was: {stderr}");
 }
 
+/// `--stats` is not just formatting: it routes the dose through the runner's
+/// observer hook. Assert both that the run still succeeds and that the stats
+/// block lands on stderr (stdout stays reserved for the result).
+#[rstest]
+fn dose_stats_block_goes_to_stderr_and_the_dose_still_succeeds() {
+    let dir = tempdir().unwrap();
+    let cfg = write_valid_config(&dir);
+
+    doser(&cfg)
+        .env("DOSER_TEST_SIM_INC", "0.5")
+        .args(["dose", "--grams", "1", "--stats"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("final:"))
+        .stdout(predicate::str::contains("Doser Stats").not())
+        .stderr(predicate::str::contains("--- Doser Stats ---"))
+        .stderr(predicate::str::contains("Samples: "))
+        .stderr(predicate::str::contains("Period (us): "))
+        .stderr(predicate::str::contains("Latency min/avg/max/stdev (us): "))
+        .stderr(predicate::str::contains("Missed deadlines (> period): "));
+}
+
+/// `--print-runtime` reports on stderr, so it cannot corrupt a stdout consumer.
+#[rstest]
+fn dose_print_runtime_reports_on_stderr() {
+    let dir = tempdir().unwrap();
+    let cfg = write_valid_config(&dir);
+
+    let out = doser(&cfg)
+        .env("DOSER_TEST_SIM_INC", "0.5")
+        .args(["dose", "--grams", "1", "--print-runtime"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("runtime:"),
+        "runtime line must not be on stdout"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let line = stderr
+        .lines()
+        .find(|l| l.trim_start().starts_with("runtime: "))
+        .unwrap_or_else(|| panic!("no `runtime: N ms` line on stderr; stderr was: {stderr}"));
+    let ms = line
+        .trim_start()
+        .trim_start_matches("runtime: ")
+        .trim_end_matches(" ms")
+        .parse::<u64>()
+        .expect("runtime is a whole number of ms");
+    assert!(ms < 60_000, "implausible runtime {ms} ms");
+}
+
+/// `health` exercises both backends and reports each with a ✓ line.
+#[rstest]
+fn health_reports_both_subsystems_ok_on_the_sim_backend() {
+    let dir = tempdir().unwrap();
+    let cfg = write_valid_config(&dir);
+
+    doser(&cfg)
+        .arg("health")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("✓ Scale: responsive (raw: "))
+        .stdout(predicate::str::contains("✓ Motor: responsive"))
+        .stdout(predicate::str::contains("Health check: OK"));
+}
+
+/// `self-check` classifies the sensor rate and prints it on stdout.
 #[rstest]
 fn cli_self_check_reports_sps() {
     let dir = tempdir().unwrap();
     let cfg = write_valid_config(&dir);
-    let mut cmd = Command::cargo_bin("doser_cli").unwrap();
-    cmd.arg("--config").arg(&cfg).arg("self-check");
-    let out = cmd.assert().success().get_output().stdout.clone();
-    let s = String::from_utf8_lossy(&out);
-    // Sim backend increments per read and should easily meet <50ms median for 80 SPS classification
-    assert!(s.contains("Detected HX711 rate: 80 SPS") || s.contains("Detected HX711 rate: 10 SPS"));
+
+    let out = doser(&cfg)
+        .arg("self-check")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8_lossy(&out);
+    let line = stdout
+        .lines()
+        .find(|l| l.starts_with("Detected HX711 rate: "))
+        .unwrap_or_else(|| panic!("no rate line; stdout was: {stdout}"));
+    // Only two classifications exist (<50 ms median => 80 SPS, else 10 SPS).
+    assert!(
+        line == "Detected HX711 rate: 80 SPS" || line == "Detected HX711 rate: 10 SPS",
+        "unexpected rate line: {line}"
+    );
+}
+
+/// A dose that never sees the scale move must not report success, and the
+/// override-free path must still be bounded by the config's watchdogs.
+#[rstest]
+fn dose_without_progress_fails_and_prints_no_final_line() {
+    let dir = tempdir().unwrap();
+    let cfg = Cfg {
+        no_progress_ms: 200,
+        ..Cfg::default()
+    }
+    .write(&dir);
+
+    doser(&cfg)
+        .env("DOSER_TEST_SIM_INC", "0.0")
+        .args(["dose", "--grams", "10"])
+        .assert()
+        .code(exit::NO_PROGRESS)
+        .stdout(predicate::str::contains("final:").not());
 }

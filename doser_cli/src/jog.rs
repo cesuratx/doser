@@ -19,7 +19,7 @@ pub fn run<M>(
     sps: u32,
     clockwise: bool,
     duration: Duration,
-    shutdown: Arc<AtomicBool>,
+    shutdown: &Arc<AtomicBool>,
 ) -> eyre::Result<()>
 where
     M: Motor,
@@ -50,6 +50,10 @@ where
         std::thread::sleep(Duration::from_millis(10));
     }
 
+    // Bailing out here still de-energizes the driver: `motor` is owned by this
+    // frame, so `HardwareMotor::Drop` runs on the way out — it signals the
+    // stepping thread over `shutdown_tx`, joins it, and drives EN inactive.
+    // The `?` is about reporting the fault, not about motor safety.
     motor.stop().map_err(|e| eyre::eyre!("stop motor: {e}"))?;
     println!(
         "motor jog: {} — stopped",

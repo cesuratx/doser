@@ -2,7 +2,8 @@
 //! - the motor is actually stopped on every safety-abort path,
 //! - persisted calibration `offset_g` survives the conversion pipeline,
 //! - realistic small calibration gains are no longer quantized to zero,
-//! - hysteresis resets the settle timer on out-of-band (noisy) readings.
+//! - the settle window is bounded above: a reading over the acceptance band but
+//!   inside `max_overshoot_g` completes instead of livelocking to `max_run_ms`.
 
 use std::error::Error;
 use std::sync::Arc;
@@ -310,7 +311,10 @@ fn small_gain_calibration_reads_correctly() {
     assert!(tiny.to_cg(100_000) > 0);
 }
 
-/// Run an in-band-then-spike sequence and return the number of steps to complete.
+/// Run a reading sequence and return the number of steps to complete.
+///
+/// Panics if the run does not complete within 1000 steps, which is what makes it
+/// a livelock detector as well as a timing probe.
 fn steps_to_complete(readings: Vec<i32>) -> usize {
     let mut doser = Doser::builder()
         .with_scale(SeqScale {
@@ -352,15 +356,51 @@ fn steps_to_complete(readings: Vec<i32>) -> usize {
     panic!("did not complete");
 }
 
+/// A reading *above* the acceptance band must not extend the settle window.
+///
+/// This test previously asserted the opposite — that a high out-of-band spike
+/// restarts the settle timer. That rule is unbounded: the completion-zone branch
+/// stops the motor and returns before the motor-command section, so nothing in
+/// the loop can bring a high reading back down. The old test only passed because
+/// its fixture made the spike transient; the same code path with a *persistent*
+/// high reading (which is what beans still in flight when the motor stops
+/// actually produce) restarted the timer on every subsequent sample forever, burned
+/// the whole `max_run_ms`, and reported a finished, slightly over-delivered dose
+/// as `MaxRuntime`. `persistent_over_delivery_completes_instead_of_livelocking`
+/// below is the case the old rule could not survive.
+///
+/// The low-side delay behaviour is unaffected and is still covered: a dip out of
+/// the completion zone clears the settle timer and restarts the motor
+/// (`doser_core/tests/doser.rs::a_dip_out_of_the_completion_zone_resets_the_settle_timer`
+/// and `doser_core/tests/motor_restart.rs`).
 #[test]
-fn hysteresis_resets_settle_timer_on_out_of_band_spike() {
-    // Baseline: stays in band -> settles quickly.
+fn a_high_out_of_band_spike_does_not_extend_the_settle_window() {
+    // Baseline: stays in band -> settles after `stable_ms`.
     let baseline = steps_to_complete(vec![9, 10]);
-    // Same approach but with one out-of-band spike (13 g, |err| = 3 g > 0.2 g band)
-    // mid-settle: it must reset the timer, so completion takes strictly longer.
+    // Same approach with one high out-of-band spike (13 g, |err| = 3 g > the
+    // 0.2 g band, still inside the 5 g overshoot cap) mid-settle.
     let with_spike = steps_to_complete(vec![9, 10, 10, 13, 10]);
-    assert!(
-        with_spike > baseline,
-        "out-of-band spike should delay settle (baseline={baseline}, with_spike={with_spike})"
+    assert_eq!(
+        with_spike, baseline,
+        "a high spike must not delay settle (baseline={baseline}, with_spike={with_spike})"
+    );
+}
+
+/// The property that actually hardens the loop: a dose that settles persistently
+/// above the acceptance band, but within `max_overshoot_g`, must complete in
+/// bounded time rather than spinning until `max_run_ms`.
+///
+/// `steps_to_complete` panics after 1000 steps, so a livelock fails loudly here.
+#[test]
+fn persistent_over_delivery_completes_instead_of_livelocking() {
+    // Target 10 g, band 0.2 g, overshoot cap 5 g. The weight settles at 13 g:
+    // 2.8 g outside the band and 2 g inside the cap, and it never comes back
+    // down (`SeqScale` repeats its last value forever).
+    let baseline = steps_to_complete(vec![9, 10]);
+    let over = steps_to_complete(vec![9, 13]);
+    assert_eq!(
+        over, baseline,
+        "an over-delivered dose inside the overshoot cap must settle on the same \
+         schedule as an in-band one (baseline={baseline}, over={over})"
     );
 }

@@ -8,9 +8,13 @@ pub const MILLIS_PER_SEC: u64 = 1_000;
 /// Compute the period in microseconds for a given sampling rate in Hz.
 /// - Requires `hz > 0` (validated by higher layers) and asserts this in all builds.
 /// - Floors due to integer division and ensures the result is at least 1 microsecond.
-///   For very high rates (e.g., ≥ 1_000_000 Hz), the computed period underflows to 0
+///   For very high rates (e.g., ≥ `1_000_000` Hz), the computed period underflows to 0
 ///   and is floored to 1µs as the minimum representable unit.
+///
+/// # Panics
+/// Panics if `hz == 0`.
 #[inline]
+#[must_use]
 pub fn period_us(hz: u32) -> u64 {
     assert!(hz > 0, "hz must be > 0; validate at callsite");
     (MICROS_PER_SEC / u64::from(hz)).max(1)
@@ -22,7 +26,11 @@ pub fn period_us(hz: u32) -> u64 {
 ///   Note: This operates at millisecond resolution. For `hz ≥ 1000`, the true period
 ///   is < 1ms and will floor to 0; we cap to a minimum of 1ms. For accurate scheduling
 ///   at higher rates, use `period_us`.
+///
+/// # Panics
+/// Panics if `hz == 0`.
 #[inline]
+#[must_use]
 pub fn period_ms(hz: u32) -> u64 {
     assert!(hz > 0, "hz must be > 0; validate at callsite");
     (MILLIS_PER_SEC / u64::from(hz)).max(1)
@@ -43,14 +51,16 @@ pub fn period_ms(hz: u32) -> u64 {
 #[inline]
 pub(crate) fn div_round_nearest_i32(numer: i32, denom: i32) -> i32 {
     assert!(denom > 0, "div_round_nearest_i32: denom must be > 0");
-    let n = numer as i64;
-    let d = denom as i64;
+    let n = i64::from(numer);
+    let d = i64::from(denom);
     let q = if n >= 0 {
         (n + (d / 2)) / d
     } else {
         (n - (d / 2)) / d
     };
-    q as i32
+    // `|q| <= |n|` for every `d >= 1`, and `n` came from an `i32`, so `q` is always
+    // back in `i32` range; the fallback is unreachable but keeps the cast total.
+    i32::try_from(q).unwrap_or_else(|_| if q.is_negative() { i32::MIN } else { i32::MAX })
 }
 
 #[cfg(test)]

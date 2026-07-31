@@ -17,16 +17,16 @@ use std::time::Duration;
 pub type ShutdownFlag = Arc<AtomicBool>;
 
 #[inline]
-fn shutdown_requested(flag: &Option<ShutdownFlag>) -> bool {
-    flag.as_ref().is_some_and(|f| f.load(Ordering::Relaxed))
+fn shutdown_requested(flag: Option<&ShutdownFlag>) -> bool {
+    flag.is_some_and(|f| f.load(Ordering::Relaxed))
 }
 
 /// How sampling should be orchestrated
 #[derive(Debug, Clone, Copy)]
 pub enum SamplingMode {
-    /// Read inside control loop using Scale::read(timeout)
+    /// Read inside control loop using `Scale::read(timeout)`
     Direct,
-    /// Event-driven: block on sensor DRDY via Scale::read(timeout)
+    /// Event-driven: block on sensor DRDY via `Scale::read(timeout)`
     Event,
     /// Rate-paced sampling at given Hz
     Paced(u32),
@@ -90,13 +90,13 @@ fn compute_stall_threshold_ms(sensor_timeout_ms: u64, period_ms: u64, max_run_ms
 
 /// Derive a quick stall threshold from per-read sensor timeout.
 #[inline]
-fn fast_threshold_ms(sensor_timeout_ms: u64) -> u64 {
+const fn fast_threshold_ms(sensor_timeout_ms: u64) -> u64 {
     sensor_timeout_ms.saturating_mul(4)
 }
 
 /// Ensure the stall threshold spans at least two periods to tolerate one miss.
 #[inline]
-fn two_periods_ms(period_ms: u64) -> u64 {
+const fn two_periods_ms(period_ms: u64) -> u64 {
     period_ms.saturating_mul(2)
 }
 
@@ -107,18 +107,73 @@ fn cap_below_max_run(threshold: u64, max_run_ms: u64) -> u64 {
 }
 
 #[inline]
-fn stalled_now(elapsed_ms: u64, stalled_ms: u64, threshold_ms: u64) -> bool {
+const fn stalled_now(elapsed_ms: u64, stalled_ms: u64, threshold_ms: u64) -> bool {
     elapsed_ms >= threshold_ms && stalled_ms > threshold_ms
 }
 
-/// Run the controller until completion or abort, returning final grams on success.
-/// The caller should pre-merge any safety overrides (e.g., max_run_ms) into `safety`.
+/// Result of a successful dosing run: final weight plus predictor telemetry.
+///
+/// Returned instead of a bare `f32` so callers that want telemetry (the CLI's
+/// `--json` output) do not have to reimplement the control loop — and therefore
+/// cannot lose the watchdogs this module enforces.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RunOutcome {
+    /// Final weight in grams.
+    pub final_g: f32,
+    /// Last slope EMA in grams per second, if the predictor produced one.
+    pub slope_ema_gps: Option<f32>,
+    /// Weight at which the predictor triggered an early stop, in grams.
+    pub early_stop_at_g: Option<f32>,
+    /// Last in-flight (coast compensation) estimate in grams.
+    pub inflight_g: Option<f32>,
+}
+
+/// Per-sample observer: called with the wall time spent on each control-loop
+/// iteration that consumed a sample.
+///
+/// This is the supported way to collect latency/jitter statistics around the
+/// dose loop; it deliberately exists so callers never need a second copy of the
+/// loop. It is passed as a separate argument rather than living in
+/// [`RunParams`], which stays `Debug + Clone`.
+pub type StepObserver<'a> = &'a mut dyn FnMut(Duration);
+
+#[inline]
+fn outcome_of<S, M>(doser: &crate::DoserG<S, M>) -> RunOutcome
+where
+    S: doser_traits::Scale,
+    M: doser_traits::Motor,
+{
+    RunOutcome {
+        final_g: doser.last_weight(),
+        slope_ema_gps: doser.last_slope_ema_gps(),
+        early_stop_at_g: doser.early_stop_at_g(),
+        inflight_g: doser.last_inflight_g(),
+    }
+}
+
+/// Run the controller until completion or abort.
+/// The caller should pre-merge any safety overrides (e.g. `max_run_ms`) into `safety`.
 pub fn run<S, M>(
     scale: S,
     motor: M,
     estop_check: Option<Box<dyn Fn() -> bool + Send + Sync>>,
     params: RunParams,
-) -> CoreResult<f32>
+) -> CoreResult<RunOutcome>
+where
+    S: doser_traits::Scale + Send + 'static,
+    M: doser_traits::Motor + 'static,
+{
+    run_observed(scale, motor, estop_check, params, None)
+}
+
+/// Like [`run`], but reports per-sample loop latency to `observer`.
+pub fn run_observed<S, M>(
+    scale: S,
+    motor: M,
+    estop_check: Option<Box<dyn Fn() -> bool + Send + Sync>>,
+    params: RunParams,
+    observer: Option<StepObserver<'_>>,
+) -> CoreResult<RunOutcome>
 where
     S: doser_traits::Scale + Send + 'static,
     M: doser_traits::Motor + 'static,
@@ -136,7 +191,8 @@ where
             estop_check,
             params.estop_debounce_n,
             params.predictor,
-            params.shutdown,
+            params.shutdown.as_ref(),
+            observer,
         ),
         SamplingMode::Event | SamplingMode::Paced(_) => run_with_sampler(
             scale,
@@ -152,7 +208,8 @@ where
             params.prefer_timeout_first,
             params.mode,
             params.predictor,
-            params.shutdown,
+            params.shutdown.as_ref(),
+            observer,
         ),
     }
 }
@@ -170,8 +227,9 @@ fn run_direct<S, M>(
     estop_check: Option<Box<dyn Fn() -> bool + Send + Sync>>,
     estop_debounce_n: u8,
     predictor: Option<crate::PredictorCfg>,
-    shutdown: Option<ShutdownFlag>,
-) -> CoreResult<f32>
+    shutdown: Option<&ShutdownFlag>,
+    mut observer: Option<StepObserver<'_>>,
+) -> CoreResult<RunOutcome>
 where
     S: doser_traits::Scale + 'static,
     M: doser_traits::Motor + 'static,
@@ -196,7 +254,7 @@ where
     tracing::info!(target_g, mode = "direct", "dose start");
 
     loop {
-        if shutdown_requested(&shutdown) {
+        if shutdown_requested(shutdown) {
             if let Err(e) = doser.motor_stop() {
                 tracing::warn!(error = %e, "motor_stop failed on shutdown");
             }
@@ -205,12 +263,17 @@ where
                 AbortReason::Estop,
             )));
         }
-        match doser.step()? {
-            DosingStatus::Running => continue,
+        let t_start = std::time::Instant::now();
+        let status = doser.step()?;
+        if let Some(obs) = observer.as_deref_mut() {
+            obs(t_start.elapsed());
+        }
+        match status {
+            DosingStatus::Running => {}
             DosingStatus::Complete => {
-                let final_g = doser.last_weight();
-                tracing::info!(final_g, "dose complete");
-                return Ok(final_g);
+                let outcome = outcome_of(&doser);
+                tracing::info!(final_g = outcome.final_g, "dose complete");
+                return Ok(outcome);
             }
             DosingStatus::Aborted(e) => {
                 let _ = doser.motor_stop();
@@ -221,7 +284,9 @@ where
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+// `similar_names` allowed: `period_us`/`period_ms` follow the crate-wide unit-suffix
+// convention, and renaming either would hide which unit the value is in.
+#[allow(clippy::too_many_arguments, clippy::similar_names)]
 fn run_with_sampler<S, M>(
     scale: S,
     motor: M,
@@ -236,8 +301,9 @@ fn run_with_sampler<S, M>(
     prefer_timeout_first: bool,
     mode: SamplingMode,
     predictor: Option<crate::PredictorCfg>,
-    shutdown: Option<ShutdownFlag>,
-) -> CoreResult<f32>
+    shutdown: Option<&ShutdownFlag>,
+    mut observer: Option<StepObserver<'_>>,
+) -> CoreResult<RunOutcome>
 where
     S: doser_traits::Scale + Send + 'static,
     M: doser_traits::Motor + 'static,
@@ -250,6 +316,9 @@ where
     // Bound stall threshold by max_run_ms to keep it meaningful and allow early watchdog firing
     let stall_threshold_ms =
         compute_stall_threshold_ms(timeouts.sensor_ms, period_ms, safety.max_run_ms);
+
+    // Read out before `safety` is moved into the builder below.
+    let max_run_ms = safety.max_run_ms;
 
     let sampler_timeout = Duration::from_millis(timeouts.sensor_ms);
     let sampler = match mode {
@@ -268,10 +337,10 @@ where
     let mut doser = crate::build_doser(
         NoopScale,
         motor,
-        filter.clone(),
-        control.clone(),
-        safety.clone(),
-        timeouts.clone(),
+        filter,
+        control,
+        safety,
+        timeouts,
         calibration,
         target_g,
         estop_check_core,
@@ -285,7 +354,7 @@ where
 
     let start = std::time::Instant::now();
     loop {
-        if shutdown_requested(&shutdown) {
+        if shutdown_requested(shutdown) {
             if let Err(e) = doser.motor_stop() {
                 tracing::warn!(error = %e, "motor_stop failed on shutdown");
             }
@@ -301,10 +370,7 @@ where
                 AbortReason::Estop,
             )));
         }
-        let elapsed_ms: u64 = {
-            let ms = start.elapsed().as_millis();
-            (ms.min(u128::from(u64::MAX))) as u64
-        };
+        let elapsed_ms: u64 = doser_traits::duration_to_ms(start.elapsed());
         // Timeout vs max-run precedence
         let stalled_ms = sampler.stalled_for_now();
         if prefer_timeout_first && stalled_now(elapsed_ms, stalled_ms, stall_threshold_ms) {
@@ -315,7 +381,7 @@ where
         }
 
         // Max run enforcement
-        if elapsed_ms >= safety.max_run_ms {
+        if elapsed_ms >= max_run_ms {
             if let Err(e) = doser.motor_stop() {
                 tracing::warn!(error = %e, "motor_stop failed on max-run cap");
             }
@@ -331,13 +397,18 @@ where
             return Err(crate::error::Report::new(DoserError::Timeout));
         }
 
+        let t_start = std::time::Instant::now();
         if let Some(raw) = sampler.latest() {
-            match doser.step_from_raw(raw)? {
-                DosingStatus::Running => continue,
+            let status = doser.step_from_raw(raw)?;
+            if let Some(obs) = observer.as_deref_mut() {
+                obs(t_start.elapsed());
+            }
+            match status {
+                DosingStatus::Running => {}
                 DosingStatus::Complete => {
-                    let final_g = doser.last_weight();
-                    tracing::info!(final_g, "dose complete");
-                    return Ok(final_g);
+                    let outcome = outcome_of(&doser);
+                    tracing::info!(final_g = outcome.final_g, "dose complete");
+                    return Ok(outcome);
                 }
                 DosingStatus::Aborted(e) => {
                     if let Err(me) = doser.motor_stop() {

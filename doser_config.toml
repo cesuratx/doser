@@ -41,18 +41,20 @@ no_progress_ms = 1500        # 1.5 s stall detection
 [logging]
 file = "doser.log"
 rotation = "never"
-level = "info"
+# NOTE: `level` is parsed here but ignored. The console level comes from the CLI
+# flag `--log-level` (or RUST_LOG, which wins over the flag). Only `file` and
+# `rotation` in this table have any effect.
 
 # [hardware]                # optional; default = 150 ms
 # sensor_read_timeout_ms = 150
 
-# Optional E‑stop configuration (used when pins.estop_in is set)
 [predictor]
 enabled = true            # predictive early-stop to reduce overshoot
 window = 6                # 6-sample rolling window for slope estimate
 extra_latency_ms = 30     # filter+sensor lag compensation
 min_progress_ratio = 0.10 # activate after 10% of target dispensed
 
+# Optional E-stop configuration (used when pins.estop_in is set)
 [estop]
 active_low = true # treat low level as pressed
 debounce_n = 2    # consecutive polls required to latch

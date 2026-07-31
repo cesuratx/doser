@@ -46,28 +46,23 @@ impl Sampler {
                     break;
                 }
 
-                match scale.read(timeout) {
-                    Ok(v) => {
-                        let now = clock.ms_since(epoch);
-                        // Release so the watchdog reader (Acquire) observes a fresh timestamp.
-                        // Mark liveness on a successful read, independent of delivery.
-                        last_ok_clone.store(now, Ordering::Release);
-                        // Non-blocking publish (latest-value, best effort). A blocking send
-                        // on the bounded(1) channel could deadlock the Drop join if the
-                        // consumer stops while the channel is full, so never block here.
-                        match tx.try_send(v) {
-                            Ok(()) => {}
-                            Err(xch::TrySendError::Full(_)) => {
-                                // Consumer is behind; drop this sample.
-                            }
-                            Err(xch::TrySendError::Disconnected(_)) => {
-                                tracing::debug!("Sampler consumer disconnected, exiting thread");
-                                break;
-                            }
+                // On a read error there is nothing to publish; skip it and let the
+                // controller's watchdog notice if samples stop arriving entirely.
+                if let Ok(v) = scale.read(timeout) {
+                    let now = clock.ms_since(epoch);
+                    // Release so the watchdog reader (Acquire) observes a fresh timestamp.
+                    // Mark liveness on a successful read, independent of delivery.
+                    last_ok_clone.store(now, Ordering::Release);
+                    // Non-blocking publish (latest-value, best effort). A blocking send
+                    // on the bounded(1) channel could deadlock the Drop join if the
+                    // consumer stops while the channel is full, so never block here.
+                    match tx.try_send(v) {
+                        // Delivered, or the consumer is behind and we drop this sample.
+                        Ok(()) | Err(xch::TrySendError::Full(_)) => {}
+                        Err(xch::TrySendError::Disconnected(_)) => {
+                            tracing::debug!("Sampler consumer disconnected, exiting thread");
+                            break;
                         }
-                    }
-                    Err(_) => {
-                        // Optional: send special value or skip; controller has watchdog
                     }
                 }
 
@@ -111,30 +106,22 @@ impl Sampler {
                     break;
                 }
 
-                match scale.read(timeout) {
-                    Ok(v) => {
-                        let now = clock.ms_since(epoch);
-                        // Release so the watchdog reader (Acquire) observes a fresh timestamp.
-                        // Mark liveness on a successful read, independent of delivery.
-                        last_ok_clone.store(now, Ordering::Release);
-                        // Non-blocking publish (latest-value, best effort): never block on a
-                        // full channel, so the thread always observes shutdown and the Drop
-                        // join cannot deadlock.
-                        match tx.try_send(v) {
-                            Ok(()) => {}
-                            Err(xch::TrySendError::Full(_)) => {
-                                // Consumer is behind; drop this sample.
-                            }
-                            Err(xch::TrySendError::Disconnected(_)) => {
-                                tracing::debug!(
-                                    "Sampler event consumer disconnected, exiting thread"
-                                );
-                                break;
-                            }
+                // On timeout or transient error, just continue; controller will watchdog.
+                if let Ok(v) = scale.read(timeout) {
+                    let now = clock.ms_since(epoch);
+                    // Release so the watchdog reader (Acquire) observes a fresh timestamp.
+                    // Mark liveness on a successful read, independent of delivery.
+                    last_ok_clone.store(now, Ordering::Release);
+                    // Non-blocking publish (latest-value, best effort): never block on a
+                    // full channel, so the thread always observes shutdown and the Drop
+                    // join cannot deadlock.
+                    match tx.try_send(v) {
+                        // Delivered, or the consumer is behind and we drop this sample.
+                        Ok(()) | Err(xch::TrySendError::Full(_)) => {}
+                        Err(xch::TrySendError::Disconnected(_)) => {
+                            tracing::debug!("Sampler event consumer disconnected, exiting thread");
+                            break;
                         }
-                    }
-                    Err(_) => {
-                        // On timeout or transient error, just continue; controller will watchdog
                     }
                 }
 
@@ -156,19 +143,19 @@ impl Sampler {
         }
     }
 
+    #[must_use]
     pub fn latest(&self) -> Option<i32> {
         self.rx.try_iter().last()
     }
+    #[must_use]
     pub fn stalled_for(&self, now_ms: u64) -> u64 {
         now_ms.saturating_sub(self.last_ok.load(Ordering::Acquire))
     }
     /// Convenience helper: compute stall using this sampler's epoch and a real monotonic clock.
+    #[must_use]
     pub fn stalled_for_now(&self) -> u64 {
-        let now_ms = {
-            let dur = Instant::now().saturating_duration_since(self.epoch);
-            let ms = dur.as_millis();
-            (ms.min(u128::from(u64::MAX))) as u64
-        };
+        let now_ms =
+            doser_traits::duration_to_ms(Instant::now().saturating_duration_since(self.epoch));
         now_ms.saturating_sub(self.last_ok.load(Ordering::Acquire))
     }
 }

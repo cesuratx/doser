@@ -1,9 +1,36 @@
 use std::error::Error;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use doser_core::{ControlCfg, Doser, DosingStatus, FilterCfg, SafetyCfg, Timeouts};
+use doser_traits::clock::Clock;
 use doser_traits::{Motor, Scale};
 use rstest::rstest;
+
+/// Deterministic clock: `sleep` advances a virtual offset instead of blocking.
+/// Tests that only care about sample *sequence* should use this so they do not
+/// spend one real sampling period per step.
+#[derive(Clone)]
+struct ManualClock {
+    origin: Instant,
+    offset: Arc<Mutex<Duration>>,
+}
+impl ManualClock {
+    fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+            offset: Arc::new(Mutex::new(Duration::ZERO)),
+        }
+    }
+}
+impl Clock for ManualClock {
+    fn now(&self) -> Instant {
+        self.origin + *self.offset.lock().unwrap()
+    }
+    fn sleep(&self, d: Duration) {
+        *self.offset.lock().unwrap() += d;
+    }
+}
 
 /// Scale that returns a fixed sequence, then repeats the last value.
 struct SeqScale {
@@ -89,6 +116,7 @@ fn ema_converges_on_step_input() {
         })
         .with_timeouts(Timeouts { sensor_ms: 5 })
         .with_target_grams(10.0)
+        .with_clock(Box::new(ManualClock::new()))
         .apply_calibration::<()>(None)
         .build()
         .unwrap();
@@ -659,96 +687,307 @@ fn estop_condition_latches_until_begin() {
     }
 }
 
+/// `epsilon_g` exists so the completion zone is entered *before* the target is
+/// crossed. Without it, a run whose sample-to-sample step straddles the target
+/// jumps from "still below the zone" straight past the overshoot limit and
+/// aborts. This pins that behaviour in both directions.
+///
+/// The scale/motor pair below is a local, fully scripted simulation rather than
+/// `doser_hardware::sim_pair()` driven by `DOSER_TEST_SIM_INC`: that env var is
+/// process-global, so setting it races every other test in the binary, and the
+/// increment it produced could not actually trip the overshoot guard (with a
+/// 0.12 g step and a 0.05 g limit, the first reading at or past 5.00 g is
+/// 5.04 g, which lands *inside* the completion zone rather than past the
+/// 5.05 g abort line — so the assertion was permanently unreachable).
 #[rstest]
 fn overshoot_epsilon_regression() {
-    // Sim backends advance grams by DOSER_TEST_SIM_INC per read while motor is running.
-    // Configure a small overshoot limit that can be tripped when epsilon=0.0, and verify
-    // that with epsilon=0.08 the run avoids aborting and typically completes.
-    unsafe {
-        std::env::set_var("DOSER_TEST_SIM_INC", "0.12");
+    /// Shared auger state: mass only accumulates while the motor is running.
+    #[derive(Default)]
+    struct SimState {
+        cg: i32,
+        running: bool,
     }
 
-    let base_filter = FilterCfg {
-        ma_window: 1,
-        median_window: 1,
-        sample_rate_hz: 50,
-        ema_alpha: 0.0,
-    };
-    let base_timeouts = Timeouts { sensor_ms: 10 };
+    /// Advances by exactly `inc_cg` per read while running; 1 count == 1 cg
+    /// (calibration gain 0.01 g/count), so every value below is exact.
+    struct SimScale {
+        st: Arc<Mutex<SimState>>,
+        inc_cg: i32,
+    }
+    impl Scale for SimScale {
+        fn read(&mut self, _timeout: Duration) -> Result<i32, Box<dyn Error + Send + Sync>> {
+            let mut st = self.st.lock().unwrap();
+            if st.running {
+                st.cg += self.inc_cg;
+            }
+            Ok(st.cg)
+        }
+    }
+    struct SimMotor {
+        st: Arc<Mutex<SimState>>,
+        stops: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl Motor for SimMotor {
+        fn start(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+            self.st.lock().unwrap().running = true;
+            Ok(())
+        }
+        fn set_speed(&mut self, _sps: u32) -> Result<(), Box<dyn Error + Send + Sync>> {
+            Ok(())
+        }
+        fn stop(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+            self.st.lock().unwrap().running = false;
+            self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    // 0.12 g per sample against a 5.00 g target with a 0.03 g overshoot limit:
+    //   epsilon 0.00 -> zone starts at 500 cg; samples are 0,12,...,492,504.
+    //                   492 is below the zone, 504 > 503 -> Overshoot abort.
+    //   epsilon 0.08 -> zone starts at 492 cg; the 492 sample completes the run
+    //                   and stops the motor, so 504 is never produced.
+    const INC_CG: i32 = 12;
     let safety = SafetyCfg {
         max_run_ms: 5_000,
-        max_overshoot_g: 0.05,
+        max_overshoot_g: 0.03,
         no_progress_epsilon_g: 0.0,
         no_progress_ms: 0,
     };
 
-    // epsilon 0.0
-    let (scale_zero, motor_zero) = doser_hardware::sim_pair();
-    let mut doser_zero = Doser::builder()
-        .with_scale(scale_zero)
-        .with_motor(motor_zero)
-        .with_filter(base_filter.clone())
+    let build = |epsilon_g: f32| {
+        let st = Arc::new(Mutex::new(SimState::default()));
+        let stops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let doser = Doser::builder()
+            .with_scale(SimScale {
+                st: st.clone(),
+                inc_cg: INC_CG,
+            })
+            .with_motor(SimMotor {
+                st: st.clone(),
+                stops: stops.clone(),
+            })
+            .with_filter(FilterCfg {
+                ma_window: 1,
+                median_window: 1,
+                sample_rate_hz: 50,
+                ema_alpha: 0.0,
+            })
+            .with_control(ControlCfg {
+                epsilon_g,
+                stable_ms: 0,
+                ..ControlCfg::default()
+            })
+            .with_safety(safety.clone())
+            .with_timeouts(Timeouts { sensor_ms: 10 })
+            .with_calibration(doser_core::Calibration {
+                gain_g_per_count: 0.01,
+                zero_counts: 0,
+                offset_g: 0.0,
+            })
+            .with_target_grams(5.0)
+            .with_clock(Box::new(ManualClock::new()))
+            .apply_calibration::<()>(None)
+            .build()
+            .unwrap_or_else(|e| panic!("build doser: {e}"));
+        (doser, stops)
+    };
+
+    let run = |doser: &mut Doser| -> DosingStatus {
+        for k in 1..=200 {
+            match doser.step().unwrap_or_else(|e| panic!("step {k}: {e}")) {
+                DosingStatus::Running => {}
+                other => return other,
+            }
+        }
+        panic!("run did not terminate within 200 steps");
+    };
+
+    // epsilon 0.0 -> the step straddles the completion zone and trips the guard.
+    let (mut doser_zero, stops_zero) = build(0.0);
+    doser_zero.begin();
+    match run(&mut doser_zero) {
+        DosingStatus::Aborted(doser_core::error::DoserError::Abort(reason)) => assert_eq!(
+            reason,
+            doser_core::error::AbortReason::Overshoot,
+            "expected an overshoot abort with epsilon_g=0.0"
+        ),
+        other => panic!("expected Aborted(Overshoot) with epsilon_g=0.0, got {other:?}"),
+    }
+    assert!(
+        (doser_zero.last_weight() - 5.04).abs() < 1e-6,
+        "overshoot abort should fire on the 5.04 g sample, got {}",
+        doser_zero.last_weight()
+    );
+    assert!(
+        stops_zero.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "the overshoot abort must stop the motor"
+    );
+
+    // epsilon 0.08 -> the same increment completes one sample earlier instead.
+    let (mut doser_eps, stops_eps) = build(0.08);
+    doser_eps.begin();
+    match run(&mut doser_eps) {
+        DosingStatus::Complete => {}
+        other => panic!("expected Complete with epsilon_g=0.08, got {other:?}"),
+    }
+    assert!(
+        (doser_eps.last_weight() - 4.92).abs() < 1e-6,
+        "expected completion at 4.92 g, got {}",
+        doser_eps.last_weight()
+    );
+    assert!(
+        stops_eps.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+        "completion must stop the motor"
+    );
+}
+
+/// A dose that settles *above* the acceptance band but within `max_overshoot_g`
+/// must complete, not spin until `max_run_ms`.
+///
+/// This was a livelock. The settle timer was restarted by any out-of-band
+/// reading, including a high one. But the completion-zone branch stops the motor
+/// and returns before the motor-command section, so once the weight is above the
+/// band nothing in the loop can bring it back down: the timer restarted on every
+/// subsequent sample forever, and the run burned the whole `max_run_ms` before
+/// aborting `MaxRuntime` — misreporting a finished, slightly over-delivered dose
+/// as a stalled one. Beans still in flight when the motor stops make this the
+/// ordinary case on real hardware, not a corner case.
+///
+/// Fixture: target 5.00 g, band = max(hysteresis 0.07, epsilon 0.08) = 8 cg, so
+/// the band tops out at 5.08 g. The scale settles at 5.10 g — 2 cg above the
+/// band and well inside the 0.60 g overshoot cap.
+#[rstest]
+fn settling_above_the_band_but_within_overshoot_completes() {
+    let mut doser = Doser::builder()
+        .with_scale(SeqScale::new([400, 490, 510]))
+        .with_motor(SpyMotor { stopped: false })
+        .with_filter(FilterCfg {
+            ma_window: 1,
+            median_window: 1,
+            sample_rate_hz: 50, // 20 ms period on the manual clock
+            ema_alpha: 0.0,
+        })
         .with_control(ControlCfg {
-            epsilon_g: 0.0,
+            stable_ms: 100,
+            epsilon_g: 0.08,
+            hysteresis_g: 0.07,
             ..ControlCfg::default()
         })
-        .with_safety(safety.clone())
-        .with_timeouts(base_timeouts)
+        .with_safety(SafetyCfg {
+            max_run_ms: 60_000,
+            max_overshoot_g: 0.6,
+            no_progress_epsilon_g: 0.0,
+            no_progress_ms: 0,
+        })
+        .with_timeouts(Timeouts { sensor_ms: 5 })
+        .with_calibration(doser_core::Calibration {
+            gain_g_per_count: 0.01,
+            zero_counts: 0,
+            offset_g: 0.0,
+        })
         .with_target_grams(5.0)
+        .with_clock(Box::new(ManualClock::new()))
         .apply_calibration::<()>(None)
         .build()
-        .unwrap();
-    doser_zero.begin();
-    let mut aborted_zero = false;
-    for _ in 0..200 {
-        if matches!(doser_zero.step().unwrap(), DosingStatus::Aborted(_)) {
-            aborted_zero = true;
+        .unwrap_or_else(|e| panic!("build doser: {e}"));
+    doser.begin();
+
+    // 100 ms of settle at a 20 ms period is 5 samples; 64 is generous headroom
+    // and still far short of the 60 s cap, so a hang shows up as MaxRuntime.
+    let mut status = DosingStatus::Running;
+    for k in 1..=64 {
+        status = doser.step().unwrap_or_else(|e| panic!("step {k}: {e}"));
+        if !matches!(status, DosingStatus::Running) {
             break;
         }
     }
+    assert!(
+        matches!(status, DosingStatus::Complete),
+        "a dose settled 0.02 g above the band and 0.58 g inside the overshoot cap \
+         must complete, got {status:?}"
+    );
+    assert!(
+        (doser.last_weight() - 5.10).abs() < 1e-6,
+        "final weight {}",
+        doser.last_weight()
+    );
+}
 
-    // epsilon 0.08
-    let (scale_eps, motor_eps) = doser_hardware::sim_pair();
-    let mut doser_eps = Doser::builder()
-        .with_scale(scale_eps)
-        .with_motor(motor_eps)
-        .with_filter(base_filter)
+/// The companion to the test above: the settle timer must still be reset by a
+/// reading that leaves the completion zone downward, so the fix above is not a
+/// blanket "never reset the timer" that would complete a short dose on stale
+/// elapsed time.
+///
+/// This is the *reachable* form of the recovery path. An in-zone reading can
+/// never be below the acceptance band — the zone opens at `target - epsilon`
+/// and the band opens at `target - max(hysteresis, epsilon)`, at or below it —
+/// so a dip deep enough to matter has already left the zone and is handled by
+/// the `else` arm, which clears the timer and restarts the motor.
+#[rstest]
+fn a_dip_out_of_the_completion_zone_resets_the_settle_timer() {
+    // Target 5.00 g, epsilon 0.08 g, so the zone opens at 4.92 g. `stable_ms` is
+    // 60 ms at a 20 ms period, so completion needs the zone held for 3 samples.
+    //
+    // Sequence: 4.00 (below), 4.95 (entry at t=20 ms), four samples at 4.80 g
+    // (out of the zone), then 4.95 g again (re-entry at t=120 ms). The dip is
+    // deliberately long enough that 100 ms have passed since the *original*
+    // entry: if the timer were not cleared, the very first sample back in the
+    // zone would already read >= 60 ms elapsed and complete on stale time. With
+    // the clear, the timer restarts at re-entry and three more samples are
+    // needed.
+    let mut doser = Doser::builder()
+        .with_scale(SeqScale::new([
+            400, 495, 480, 480, 480, 480, 495, 495, 495, 495,
+        ]))
+        .with_motor(SpyMotor { stopped: false })
+        .with_filter(FilterCfg {
+            ma_window: 1,
+            median_window: 1,
+            sample_rate_hz: 50, // 20 ms period
+            ema_alpha: 0.0,
+        })
         .with_control(ControlCfg {
+            stable_ms: 60,
             epsilon_g: 0.08,
+            hysteresis_g: 0.07,
             ..ControlCfg::default()
         })
-        .with_safety(safety)
-        .with_timeouts(Timeouts { sensor_ms: 10 })
+        .with_safety(SafetyCfg {
+            max_run_ms: 60_000,
+            max_overshoot_g: 0.6,
+            no_progress_epsilon_g: 0.0,
+            no_progress_ms: 0,
+        })
+        .with_timeouts(Timeouts { sensor_ms: 5 })
+        .with_calibration(doser_core::Calibration {
+            gain_g_per_count: 0.01,
+            zero_counts: 0,
+            offset_g: 0.0,
+        })
         .with_target_grams(5.0)
+        .with_clock(Box::new(ManualClock::new()))
         .apply_calibration::<()>(None)
         .build()
-        .unwrap();
-    doser_eps.begin();
-    let mut aborted_eps = false;
-    let mut _completed_eps = false;
-    for _ in 0..200 {
-        match doser_eps.step().unwrap() {
-            DosingStatus::Aborted(_) => {
-                aborted_eps = true;
-                break;
-            }
-            DosingStatus::Complete => {
-                _completed_eps = true;
-                break;
-            }
-            _ => {}
-        }
-    }
+        .unwrap_or_else(|e| panic!("build doser: {e}"));
+    doser.begin();
 
-    // If zero-epsilon aborted, then epsilon case should not also abort.
-    if aborted_zero {
+    // Steps 1-9 must all be Running. Step 7 is the load-bearing one: it is the
+    // re-entry sample, and it completes here only if the dip failed to clear the
+    // timer. Steps 8-9 are the restarted timer not yet having elapsed.
+    for k in 1..=9 {
+        let status = doser.step().unwrap_or_else(|e| panic!("step {k}: {e}"));
         assert!(
-            !aborted_eps,
-            "epsilon_g=0.08 should avoid overshoot abort compared to 0.0"
+            matches!(status, DosingStatus::Running),
+            "step {k} should still be Running (the dip must reset the settle \
+             timer), got {status:?}"
         );
     }
-    // cleanup env to not affect other tests
-    unsafe {
-        std::env::remove_var("DOSER_TEST_SIM_INC");
-    }
+
+    // Step 10 carries the restarted timer to exactly `stable_ms`.
+    let status = doser.step().unwrap_or_else(|e| panic!("step 10: {e}"));
+    assert!(
+        matches!(status, DosingStatus::Complete),
+        "the dose should complete once the restarted settle timer elapses, got {status:?}"
+    );
 }

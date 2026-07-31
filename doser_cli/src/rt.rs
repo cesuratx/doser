@@ -1,4 +1,4 @@
-//! Real-time scheduling helpers (Linux SCHED_FIFO / affinity / mlockall; macOS mlockall).
+//! Real-time scheduling helpers (Linux `SCHED_FIFO` / affinity / mlockall; macOS mlockall).
 
 use crate::cli::RtLock;
 
