@@ -42,7 +42,7 @@ jobs:
         # v2 (was v1, whose node16 runtime GitHub has deprecated). v2's inputs
         # are `token` (still required), `ignore` and `working-directory`; this
         # call site only uses `token`, so nothing else needed adjusting.
-        uses: rustsec/audit-check@e9159ac5f7d7d873ce074ca134da2f445c0a4a61 # v2
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
