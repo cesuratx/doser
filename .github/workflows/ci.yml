@@ -1,22 +1,45 @@
+# Third-party actions are pinned to a full 40-char commit SHA, never to a
+# mutable tag like `@v4`. A tag can be force-moved by whoever owns the action
+# (or by whoever compromises that account), and a moved tag would run attacker
+# code with this workflow's GITHUB_TOKEN — that is exactly how the
+# tj-actions/changed-files compromise spread. A SHA cannot be re-pointed.
+#
+# To update a pin:
+#   gh api repos/<owner>/<repo>/commits/<tag> --jq .sha
+# then replace the SHA and update the trailing `# vN` comment to match. Bumping
+# the trailing comment across a MAJOR version (v4 -> v5) is a breaking change,
+# not a pin refresh — read that action's release notes first.
 name: CI
 
 on:
   push:
-    branches: [main, dev, "release-*"]
+    branches: [master, main, dev, "release-*"]
   pull_request:
   workflow_dispatch:
 
+# Least privilege: CI only ever needs to read the repository.
+permissions:
+  contents: read
+
 jobs:
+  # `checks` is the single owner of fmt + clippy for the whole workflow.
+  # Do not re-add those steps to other jobs: every job is a cold build on a
+  # fresh runner, so duplicating them just multiplies CI time.
   checks:
     name: checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install pinned toolchain (from rust-toolchain.toml)
+        # rust-toolchain.toml pins the exact channel and the rustfmt/clippy
+        # components. Installing via rustup (instead of an action that exports
+        # RUSTUP_TOOLCHAIN) is what keeps CI on the pinned version.
+        run: |
+          rustup toolchain install --no-self-update || rustup show
+          rustup show active-toolchain
+          cargo --version
       - name: Cache cargo registry and target
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -38,36 +61,21 @@ jobs:
           RUSTFLAGS: "-D warnings"
         run: cargo check -p doser_hardware --no-default-features --features hardware
       - name: Install cargo-hack
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2
         with:
           tool: cargo-hack
       - name: cargo hack check --each-feature
         run: cargo hack check --each-feature
-  lint:
-    name: lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - name: Format check
-        run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     name: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - name: Format check
-        run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install pinned toolchain (from rust-toolchain.toml)
+        run: |
+          rustup toolchain install --no-self-update || rustup show
+          rustup show active-toolchain
       - name: Build and test (simulation only)
         env:
           RUSTFLAGS: "-D warnings"
@@ -87,27 +95,35 @@ jobs:
     # continue-on-error defaults to false; uncomment to allow soft-failures
     # continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - name: Format check
-        run: cargo fmt --all -- --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install pinned toolchain (from rust-toolchain.toml)
+        run: |
+          rustup toolchain install --no-self-update || rustup show
+          rustup show active-toolchain
       - name: Check hardware feature compiles
         run: |
           cargo build -p doser_hardware --features hardware --no-default-features
           cargo build -p doser_cli --features hardware --no-default-features
 
+  # Informational only. This job publishes a coverage number for the owner to
+  # look at; it enforces no threshold and gates nothing. It is deliberately
+  # non-blocking on pull requests so the slowest job in the workflow can never
+  # hold up a merge. If coverage ever becomes a real gate, add an explicit
+  # threshold here and flip continue-on-error off.
   coverage:
+    # Name kept stable ("coverage") so any existing branch-protection required
+    # check keeps resolving.
     name: coverage
     runs-on: ubuntu-latest
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install pinned toolchain (from rust-toolchain.toml)
+        run: |
+          rustup toolchain install --no-self-update || rustup show
+          rustup show active-toolchain
       - name: Cache cargo registry and target
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -117,23 +133,21 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
       - name: Install cargo-tarpaulin
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2
         with:
           tool: cargo-tarpaulin
       - name: Run coverage (tarpaulin)
+        # --no-default-features == the simulation backends, i.e. everything that
+        # can actually execute on an x86 runner. Hardware paths are excluded by
+        # construction, so this number understates real coverage.
         run: |
           cargo tarpaulin --workspace --no-default-features --out Xml --output-dir target/tarpaulin --timeout 120
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-cobertura
           path: target/tarpaulin/cobertura.xml
 
-  security:
-    name: security-audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+# Dependency auditing lives in .github/workflows/security.yml (cargo-audit +
+# cargo-deny). It used to be duplicated here as a `security` job; do not
+# re-add it.
