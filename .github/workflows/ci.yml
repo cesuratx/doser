@@ -35,7 +35,7 @@ jobs:
     name: checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned toolchain (from rust-toolchain.toml)
         # rust-toolchain.toml pins the exact channel and the rustfmt/clippy
         # components. Installing via rustup (instead of an action that exports
@@ -86,7 +86,7 @@ jobs:
     name: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned toolchain (from rust-toolchain.toml)
         run: |
           rustup toolchain install --no-self-update || rustup show
@@ -110,7 +110,7 @@ jobs:
     # continue-on-error defaults to false; uncomment to allow soft-failures
     # continue-on-error: true
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned toolchain (from rust-toolchain.toml)
         run: |
           rustup toolchain install --no-self-update || rustup show
@@ -156,7 +156,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: ${{ github.event_name == 'pull_request' }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install pinned toolchain (from rust-toolchain.toml)
         run: |
           rustup toolchain install --no-self-update || rustup show
