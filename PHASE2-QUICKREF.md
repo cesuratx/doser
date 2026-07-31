@@ -1,5 +1,9 @@
 # Phase 2 Quick Reference
 
+> **Historical record — parts are no longer current (note added 2026-07-30).** ci.yml no
+> longer has a `security` job (security.yml's `cargo-audit` owns that) and the `lint` job was
+> folded into `checks`. For what CI runs today see `docs/concepts/build-ci.md`.
+
 **Status**: ✅ 2/3 Complete - Production Ready!  
 **Date**: October 19, 2024
 

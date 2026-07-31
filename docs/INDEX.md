@@ -10,6 +10,7 @@ docs/
 │
 ├── guides/                     # Learning and development guides
 │   ├── DeveloperHandbook.md    # Complete developer guide
+│   ├── HARDWARE_SETUP.md       # BOM, wiring, calibration, smoke test
 │   ├── RUST_PRIMER.md          # Rust introduction
 │   ├── RUST_PRIMER_DETAILED.md # Detailed Rust concepts
 │   └── Glossary.md             # Terms and definitions
@@ -38,7 +39,8 @@ docs/
 │   └── [more concept docs...]
 │
 ├── ops/                        # Operations and deployment
-│   └── Runbook.md              # Production operations guide
+│   ├── Runbook.md              # Production operations guide
+│   └── HARDWARE_LESSONS.md     # Append-only hardware lessons (newest first)
 │
 ├── reference/                  # Reference documentation
 │   ├── CONFIG_SCHEMA.md        # Configuration reference
@@ -54,6 +56,18 @@ docs/
     ├── fix-1.2-sampler-thread-lifecycle.md  # Thread fix doc
     └── performance-roadmap.md                # Optimization roadmap
 ```
+
+## 🧭 CLI at a glance
+
+The binary is **`doser_cli`** (not `doser`). Global flags come before the subcommand.
+
+| Command | Purpose |
+| --- | --- |
+| `dose --grams N` | Run the control loop and dispense N grams |
+| `health` | Read the scale once and start/stop the motor → `Health check: OK` |
+| `self-check` | Read the scale for 1 s → `Detected HX711 rate: {10\|80} SPS` (no motor) |
+| `monitor` | Live weight web UI — unauthenticated, see [Operations](./reference/OPERATIONS.md#live-weight-monitor) |
+| `motor` | Fixed-rate jog for bring-up — no scale, no control loop |
 
 ## 🎯 Quick Navigation
 
@@ -198,10 +212,21 @@ When adding new documentation:
 
 ## 🔄 Documentation Maintenance
 
-**Last Updated**: October 2025  
+**Last Updated**: July 2026 (documentation-accuracy remediation pass)  
 **Maintained By**: Doser Contributors  
 **Review Cycle**: Quarterly  
-**Next Review**: January 2026
+**Next Review**: October 2026
+
+### Recent Changes (July 2026)
+
+- ✅ Rewrote `reference/CONFIG_SCHEMA.md` from the actual types and `Default` impls, marking
+  required vs defaulted keys and documenting `[estop]`, `[runner]`, `[calibration]`,
+  `control.speed_bands`, `filter.ema_alpha` and the `sensor_ms` alias
+- ✅ Corrected the `self-check` vs `health` descriptions everywhere (`self-check` never
+  touches the motor and never prints `OK`)
+- ✅ Fixed CLI invocations that omitted the subcommand or used the nonexistent `doser` binary
+- ✅ Documented the `monitor` and `motor` subcommands for operators
+- ✅ Stated what CI actually runs (fuzzing and benches are local-only)
 
 ### Recent Changes (October 2025)
 

@@ -280,6 +280,17 @@ The project ships with a tuned `doser_config.toml` optimized for ±0.1 g accurac
 | `predictor.extra_latency_ms` | 30      | Compensates for filter + sensor lag      |
 | `safety.max_overshoot_g`     | 0.5     | Aborts if >0.5 g over target             |
 
+Two configs ship with the repo and they are not interchangeable:
+
+- **`doser_config.toml`** (repo root) — the precision profile in the table above. It assumes
+  an **80 SPS** HX711 (`RATE` pad bridged HIGH).
+- **`etc/doser_config.toml`** — what `--config` defaults to. It is tuned for the bench board,
+  which runs at **10 SPS** (`sample_rate_hz = 10`, `sensor_ms = 200`, `stable_ms = 800`).
+
+Using the 80 SPS profile on a 10 SPS board makes every read time out. Check with
+`self-check` / the probe before choosing. Note also that `timeouts.settle_ms` is parsed and
+**ignored** — the settle window is `control.stable_ms`.
+
 ---
 
 ## 7. Calibration
@@ -312,6 +323,24 @@ To get the `raw` values, run a quick test read:
 
 The `health` command prints the raw count from the HX711 (`✓ Scale: responsive (raw: …)`). Note the value with no weight (tare), then place each calibration weight and record the raw count. (`self-check` only reports the detected sample rate, not the raw count.)
 
+Easier for a series of weights: run the live monitor and read the value off the page as you
+add each weight.
+
+```bash
+./target/release/doser_cli --config doser_config.toml monitor --bind 127.0.0.1
+# then: ssh -L 8080:127.0.0.1:8080 pi@doser.local  →  http://localhost:8080
+```
+
+The UI is unauthenticated, so keep it on loopback and tunnel to it rather than binding the
+LAN (the default `--bind 0.0.0.0` prints a warning on stderr).
+
+> **The calibration CSV has no comment syntax.** The reader is built without a comment
+> character, so a leading `#` line is taken as the header and rejected
+> (`Invalid headers in calibration CSV. Expected 'raw,grams'.`) and a `#` line mid-file fails
+> as a malformed record (`found record with 1 fields, but the previous record has 2 fields`).
+> Keep the file to the header plus data rows. Rows must be strictly monotonic in `raw`, with
+> at least 2 of them. `doser_config.csv` in the repo root is a working example.
+
 ### 7.3 Alternatively: Persisted Calibration in TOML
 
 If you already know your gain and zero-counts, add to `doser_config.toml`:
@@ -320,8 +349,15 @@ If you already know your gain and zero-counts, add to `doser_config.toml`:
 [calibration]
 gain_g_per_count = 0.0005492    # grams per ADC count
 zero_counts = 842913            # raw count at 0 g (tare)
-offset_g = 0.0                  # additive offset (usually 0)
+offset_g = 0.0                  # additive offset (usually 0, may be omitted)
 ```
+
+> **This table wins over `--calibration`.** When `[calibration]` is present the CLI uses it
+> and never reads the CSV, so a stale table silently overrides the file you just measured.
+> Delete the table if you want the CSV to take effect.
+>
+> With no calibration at all, the core falls back to `gain_g_per_count = 0.01`,
+> `zero_counts = 0` — right for the simulator, meaningless on real hardware.
 
 ### 7.4 Verification
 
@@ -339,16 +375,49 @@ Check that `final_g` in the JSON output is within ±0.1 g of the known weight.
 
 Run these in order after wiring everything up:
 
-### Step 1: Self-Check
+### Step 1: Health Check
+
+```bash
+./target/release/doser_cli --config doser_config.toml health
+```
+
+**Expected** (on stdout):
+
+```
+✓ Scale: responsive (raw: 842913)
+✓ Motor: responsive
+
+Health check: OK
+```
+
+If it fails:
+
+- _"timeout"_ on the scale line: check HX711 wiring (DT/SCK pins, power, ground) and raise
+  `hardware.sensor_read_timeout_ms`.
+- A `✗ Motor` line: check STEP/DIR connections and the 12 V supply.
+
+### Step 1b: Sample rate
 
 ```bash
 ./target/release/doser_cli --config doser_config.toml self-check
 ```
 
-**Expected:** "OK" with a raw scale reading printed. If it fails:
+**Expected:** `Detected HX711 rate: 10 SPS` (or `80 SPS`). This command reads only the
+scale — it never touches the motor and never prints `OK`. The detector calls any inter-read
+gap under 50 ms "80 SPS", so treat the answer as a hint and confirm with the probe
+(`cargo run -p doser_hardware --example hx711_probe --features hardware`) if anything looks
+odd. Make sure `filter.sample_rate_hz` and the per-read timeout match reality: at 10 SPS a
+sample takes ~90–100 ms, so `sample_ms`/`sensor_ms` must comfortably exceed that.
 
-- _"timeout"_: Check HX711 wiring (DT/SCK pins, power, ground).
-- _"motor"_: Check STEP/DIR connections and 12 V supply.
+### Step 1c: Motor jog (optional, motor only)
+
+```bash
+./target/release/doser_cli --config doser_config.toml motor --sps 400 --ms 2000 --dir cw
+```
+
+Spins the motor at a fixed rate with no scale and no control loop — the quickest way to check
+direction, wiring and the A4988 current limit. `--sps` is limited to `1..=5000`; `--steps N`
+substitutes an approximate step count for `--ms`. Ctrl-C stops it immediately.
 
 ### Step 2: Small Dose
 
@@ -424,6 +493,18 @@ rustup target add aarch64-unknown-linux-gnu
 cargo build -p doser_cli --features hardware --release --target aarch64-unknown-linux-gnu
 scp target/aarch64-unknown-linux-gnu/release/doser_cli pi@doser.local:~/
 ```
+
+Adding the target is not enough on its own — you also need a cross linker for
+`aarch64-unknown-linux-gnu`. The simplest route (and what the release workflow uses) is
+[`cross`](https://github.com/cross-rs/cross), which builds inside a container:
+
+```bash
+cargo install cross --locked
+cross build -p doser_cli --features hardware --release --target aarch64-unknown-linux-gnu
+```
+
+Alternatively, grab the prebuilt `doser-aarch64-unknown-linux-gnu.tar.gz` from GitHub
+Releases — it is the one artifact built with `--features hardware`.
 
 ## Appendix C: Quick Precision Checklist
 

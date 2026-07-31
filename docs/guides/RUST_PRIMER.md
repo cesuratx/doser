@@ -4,7 +4,7 @@ This primer explains the Rust language features and idioms used in this reposito
 
 If you’re new to Rust, keep The Rust Book handy: https://doc.rust-lang.org/book/
 
-Note: For a system-level overview and diagrams, see [ARCHITECTURE](../ARCHITECTURE.md).
+Note: For a system-level overview and diagrams, see [ARCHITECTURE](../architecture/ARCHITECTURE.md).
 
 ---
 
@@ -311,7 +311,10 @@ This section maps familiar software design patterns to concrete spots in the rep
   - Most tests use `SimulatedScale`/`SimulatedMotor`, keeping CI fast and platform-independent.
 
 - Health Check CLI
-  - `self-check` subcommand probes scale read and motor start/stop without moving the mechanism, suitable for bring-up and automation.
+  - `health` probes a scale read and a brief motor start/stop without dosing — suitable for
+    bring-up and automation. It prints `Health check: OK`.
+  - `self-check` only reads the scale for a second and reports the detected HX711 sample rate
+    (`Detected HX711 rate: 80 SPS`). It never touches the motor.
 
 ---
 
@@ -358,18 +361,20 @@ flowchart LR
   CLI -->|logs| LOGS["tracing → console (+ optional file)"]
 ```
 
-See also: [ARCHITECTURE](../ARCHITECTURE.md) for a deeper discussion.
+See also: [ARCHITECTURE](../architecture/ARCHITECTURE.md) for a deeper discussion.
 
 ---
 
 ## 24) Handy Cross‑links
 
-- Traits: `../doser_traits/src/lib.rs`
-- Core controller: `../doser_core/src/lib.rs`
-- Hardware backends: `../doser_hardware/src/lib.rs`
-- CLI entrypoint: `../doser_cli/src/main.rs`
-- Examples: `../examples/`
-- Architecture doc: `../ARCHITECTURE.md`
+Paths are relative to the repo root:
+
+- Traits: `doser_traits/src/lib.rs`
+- Core controller: `doser_core/src/core.rs` (plus `builder.rs`, `runner.rs`, `sampler.rs`)
+- Hardware backends: `doser_hardware/src/lib.rs`
+- CLI entrypoint: `doser_cli/src/main.rs`
+- Examples: `doser_cli/examples/` (`cargo run -p doser_cli --example quick_start`)
+- Architecture doc: [ARCHITECTURE.md](../architecture/ARCHITECTURE.md)
 
 ---
 
@@ -429,27 +434,41 @@ DOSER_TEST_SIM_INC=0.01 cargo run -p doser_cli -- \
 Tips:
 
 - Put `--log-level` before the subcommand (`dose`).
-- Increase `DOSER_TEST_SIM_INC` (e.g., 0.02–0.03) for faster runs; decrease for higher precision.
+- Raise `DOSER_TEST_SIM_INC` toward 0.02 for faster runs; lower it (0.005) for a finer
+  approach. Much above 0.02 the simulated weight steps past the settle band and the run can
+  trip the max-runtime guard instead of completing.
 
 ---
 
-## Quick self-check
+## Quick health check and self-check
 
-Run a basic health check to probe a scale read and motor start/stop without performing a dose.
+Two different commands — do not confuse them.
 
-Simulation (default backend):
+`health` probes a scale read and a brief motor start/stop without dosing:
+
+```bash
+cargo run -p doser_cli -- --config ./doser_config.toml health
+# ✓ Scale: responsive (raw: 0)
+# ✓ Motor: responsive
+#
+# Health check: OK
+```
+
+`self-check` reads the scale for one second and reports the detected HX711 rate. It never
+touches the motor and never prints `OK`:
 
 ```bash
 cargo run -p doser_cli -- --config ./doser_config.toml self-check
+# Detected HX711 rate: 80 SPS
 ```
 
-Hardware (Raspberry Pi):
+On a Raspberry Pi, add `--features hardware` and use the bench config:
 
 ```bash
-cargo run -p doser_cli --features hardware -- --config ./doser_config.toml self-check
+cargo run -p doser_cli --features hardware -- --config ./etc/doser_config.toml health
 ```
 
 Notes:
 
-- Place `--log-level` before `self-check` if you want more detail (e.g., `--log-level debug`).
-- Expected output ends with `OK` when the probe succeeds.
+- Place `--log-level` before the subcommand if you want more detail (e.g. `--log-level debug`).
+- Log records go to stderr; these result lines go to stdout.

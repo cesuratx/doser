@@ -6,6 +6,16 @@
 **Date**: 2025  
 **Branch**: release-25.9.1
 
+> **Historical record — do not read as current state (note added 2026-07-30).** This is a
+> dated review, kept for its findings and reasoning. Several things it describes as current
+> have since changed: the CLI has `health`, `monitor` and `motor` subcommands in addition to
+> `dose`/`self-check`; the built binary is `doser_cli`, so the sample workflows and
+> `ExecStartPre=/usr/local/bin/doser health` snippets below name a path that does not exist;
+> the examples moved from a root `examples/` directory into `doser_cli/examples/`; and
+> `install.sh` was rewritten (GitHub Releases origin, per-target tarballs, a hardened and
+> deliberately *disabled* systemd unit that runs `monitor`). See CHANGELOG "Unreleased",
+> `docs/concepts/build-ci.md` and `docs/ops/Runbook.md` for what is true today.
+
 ---
 
 ## Executive Summary

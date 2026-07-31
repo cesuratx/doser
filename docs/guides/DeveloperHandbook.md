@@ -2,7 +2,7 @@
 
 Welcome! This guide is for Java/C# engineers onboarding to the Rust-based "doser" project. It’s concise, repo-specific, and links to deeper pages.
 
-- Repo root: `cesuratx/doser` (branch: release-25.9.1)
+- Repo root: `cesuratx/doser` (default branch: `master`)
 - Crates:
   - `doser_traits` — interfaces (Scale, Motor, Clock). Safe boundary.
   - `doser_core` — control loop, filters, predictor, runner. Hardware-agnostic.
@@ -36,7 +36,7 @@ Reading order for Java/.NET devs:
 4. Data flow → docs/architecture/DataFlow.md
 5. ADR: Predictive stop → docs/adr/ADR-001-predictive-stop.md
 6. Ops runbook → docs/ops/Runbook.md
-7. Glossary → docs/Glossary.md
+7. Glossary → docs/guides/Glossary.md
 
 Project tree with purpose:
 
@@ -44,8 +44,10 @@ Project tree with purpose:
 - `doser_core/` — engine (builder, control loop, filters, predictor, runner) and tests.
 - `doser_hardware/` — `hardware` feature for Pi GPIO; `sim` fallback; `pacing` utilities.
 - `doser_config/` — TOML schema, validation, calibration CSV + robust refit.
-- `doser_cli/` — CLI, JSONL output, tracing, RT helpers using libc.
+- `doser_cli/` — CLI, JSONL output, tracing, RT helpers using libc. Also `examples/` (three
+  runnable examples: `cargo run -p doser_cli --example quick_start`).
 - `docs/` — this handbook and deeper pages.
+- `fuzz/` — cargo-fuzz target for the config loader (local/manual, not in CI).
 
 ## B. Rust Primer for Java/.NET Developers
 
@@ -75,24 +77,39 @@ Project tree with purpose:
 
 ## D. Business Rules (with code pointers)
 
-- Guards: `max_run_ms`, `max_overshoot_g`, `no_progress_ms/epsilon` → `doser_core/src/lib.rs` (DoserCore.step/step_from_raw).
-- E-stop with debounce/latch → `DoserCore::poll_estop`, fields `estop_debounce_n`, `estop_latched`.
+- Guards: `max_run_ms`, `max_overshoot_g`, `no_progress_ms/epsilon` → `doser_core/src/core.rs`
+  (`DoserCore::step` / `step_from_raw`). The no-progress deadline only counts time while the
+  motor is commanded to run, and is re-armed when the motor is restarted after the weight
+  dips back below `target - epsilon`.
+- E-stop with debounce/latch → `DoserCore::poll_estop` / `poll_estop_stop`, fields
+  `estop_debounce_n`, `estop_latched`.
 - Two-phase dosing: bands/slowdown controlled by `ControlCfg`; settle window via `stable_ms` and `epsilon_g`.
 - Predictive stop: `maybe_early_stop` uses EMA-like slope and inflight mass.
 
 ## E. Observability
 
-- `tracing` configured in CLI (`doser_cli/src/main.rs::init_tracing`).
-- JSONL per-dose record produced in `doser_cli/src/main.rs` with stable keys: `timestamp,target_g,final_g,duration_ms,profile,slope_ema,stop_at_g,coast_comp_g,abort_reason`.
+- `tracing` configured in `doser_cli/src/tracing_setup.rs::init_tracing`.
+- **Stream contract:** both console layers (pretty and JSON) write to **stderr**. stdout
+  carries only the CLI's own output — the `--json` result line, `final: X.XX g`, and the
+  monitor/jog status lines. Anything that scrapes stdout depends on this.
+- JSONL per-dose record produced in `doser_cli/src/main.rs` with stable keys:
+  `timestamp,target_g,final_g,duration_ms,profile,slope_ema,stop_at_g,coast_comp_g,abort_reason`.
+  `slope_ema`/`stop_at_g`/`coast_comp_g` come from the runner's `RunOutcome` on every path,
+  with or without `--stats`.
 
 ## F. Deployment & Ops
 
-- See docs/ops/Runbook.md (systemd, logrotate, non-root, paths). `install.sh` provisions files.
+- See docs/ops/Runbook.md (systemd, logrotate, non-root, paths). `install.sh` provisions the
+  binary, the service user, log dirs, logrotate and a **disabled** systemd unit — it does
+  **not** provision config files (they are machine-specific; pass `DOSER_CONF_SRC` /
+  `DOSER_CALIB_SRC` or copy them yourself) and it does not enable or start the service.
 
 ## G. Testing Strategy
 
-- Unit + property (`proptest`) in core; CLI integration tests; fuzz target for config TOML; benches via Criterion; coverage via tarpaulin.
-- See docs/testing/Strategy.md
+- Unit + property (`proptest`) in core; CLI integration tests; coverage via tarpaulin
+  (informational only, gates nothing).
+- The cargo-fuzz target and the Criterion benches are **local/manual** — no CI job runs
+  either. See docs/testing/Strategy.md for the exact commands.
 
 ## H. Unsafe & OS Integration
 
@@ -108,4 +125,4 @@ Project tree with purpose:
 
 ## J. Glossary + FAQ
 
-- See docs/glossary.md for Rust↔Java/C# mappings and domain terms.
+- See docs/guides/Glossary.md for Rust↔Java/C# mappings and domain terms.

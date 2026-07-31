@@ -18,7 +18,14 @@ repository discipline, and accumulated hardware expertise.
 | `doser_hardware` | GPIO/HX711/motor drivers **and** simulation backends |
 | `doser_config` | Typed config (TOML) + validation |
 | `doser_traits` | `Scale`/`Motor`/`Clock` traits shared across crates |
-| `doser_cli` | Binary `doser_cli`: `dose`, `health`, `self-check` |
+| `doser_cli` | Binary `doser_cli`: `dose`, `health`, `self-check`, `monitor`, `motor` |
+
+**Subcommands:** `dose --grams N` runs the control loop; `health` reads the scale once and
+starts/stops the motor (`Health check: OK`); `self-check` only reads the scale for 1 s and
+prints `Detected HX711 rate: {10|80} SPS` — it never touches the motor; `monitor` serves the
+live weight web UI (unauthenticated, `--bind 0.0.0.0` by default — use `--bind 127.0.0.1`);
+`motor --sps N --ms M|--steps N [--dir cw|ccw]` jogs the motor with no scale and no control
+loop, which is the bring-up tool.
 
 **Feature gating:** real hardware is behind the `hardware` cargo feature (`rppal`, Linux
 only). Default builds use the simulation backends so CI runs on x86. The `rt` feature adds
@@ -65,6 +72,8 @@ assertion.
 ## Hardware bring-up quickstart
 
 - Real-backend smoke test: `doser_cli --config etc/doser_config.toml health`.
+- Motor-only bring-up (no scale, no loop): `doser_cli --config etc/doser_config.toml motor --sps 400 --ms 2000`.
+- Watch the raw counts live: `doser_cli --config etc/doser_config.toml monitor --bind 127.0.0.1`.
 - Authoritative HX711 probe: `cargo run -p doser_hardware --example hx711_probe --features hardware`
   (env: `HX711_STREAM=1` for the live load test, `HX711_DT`/`HX711_SCK`/`HX711_HIGH_US`...).
 - Pin states: `pinctrl get 5,6`. Note `pinctrl` pulses are too slow to validate fast

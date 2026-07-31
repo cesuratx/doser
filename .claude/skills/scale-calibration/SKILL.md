@@ -23,8 +23,8 @@ Collect ≥3 points (more is better) across the range you actually dose in (e.g.
 18 g, 50 g). Calibration weights should bracket your typical target.
 
 ## 2. Write the calibration CSV (strict header)
-Header MUST be exactly `raw,grams`. Raw values must be **strictly monotonic** (increasing or
-decreasing), no duplicates, ≥2 rows:
+Header MUST be exactly `raw,grams`, on the **first line**. Raw values must be **strictly
+monotonic** (increasing or decreasing), no duplicates, ≥2 rows:
 ```csv
 raw,grams
 123456,0.0
@@ -32,12 +32,30 @@ raw,grams
 5123987,18.0
 14002311,50.0
 ```
+
+> **No comment lines.** The CSV reader has no comment character configured, so a leading `#`
+> line is parsed as the header and the file is rejected with
+> `Invalid headers in calibration CSV. Expected 'raw,grams'.`
+> Record the date, cell and board in the commit message or in
+> `docs/ops/HARDWARE_LESSONS.md` — not inside the CSV.
+
 The OLS fit folds the intercept into a tare offset (counts), so you do not hand-tune zero.
 
 ## 3. Validate the fit
 ```bash
 ./target/release/doser_cli --config etc/doser_config.toml --calibration cal.csv health
 ```
+`--calibration` is a **global** flag: it goes before the subcommand, as above.
+
+> **A `[calibration]` table in the TOML config silently wins over `--calibration`.** The load
+> order in `doser_cli/src/main.rs` takes the persisted TOML calibration if present and only
+> falls back to the CSV otherwise — with no warning that your `--calibration` file was ignored.
+> If a new CSV appears to change nothing, check the config first:
+> ```bash
+> grep -n '\[calibration\]' etc/doser_config.toml
+> ```
+> Remove or update that table to let the CSV take effect.
+
 The fit fails loudly on degenerate input (zero/non-finite slope, non-monotonic raw). Then
 sanity-check: put a known weight on and confirm reported grams matches within tolerance.
 
@@ -49,5 +67,6 @@ weight reads >1–2% off.
 ## 5. Record it
 Commit the validated CSV (e.g. `etc/calibration.csv`), note the cell/board it was taken with,
 the date, and the residual error in `docs/ops/HARDWARE_LESSONS.md`. Recalibrate after any
-mechanical change to the cell, mount, or wiring. A persisted TOML calibration
-(`PersistedCalibration`) is preferred over CSV at runtime when present.
+mechanical change to the cell, mount, or wiring. To make a fit permanent, promote it into the
+config's `[calibration]` table (`PersistedCalibration`) — that is what runtime prefers, and per
+step 3 it then overrides any `--calibration` CSV.

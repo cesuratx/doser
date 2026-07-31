@@ -25,10 +25,44 @@ cargo build --release -p doser_cli --features hardware   # binary: target/releas
 ## 2. Smoke test via CLI
 ```bash
 ./target/release/doser_cli --config etc/doser_config.toml health      # one raw read + motor pulse
-./target/release/doser_cli --config etc/doser_config.toml --log-level trace self-check | grep raw
+./target/release/doser_cli --config etc/doser_config.toml self-check  # sample-rate detector
 ```
+`health` is the one that gives you a number: it prints `✓ Scale: responsive (raw: <count>)` on
+stdout, so `health 2>/dev/null | grep raw` isolates it. Do **not** pipe `self-check` looking for
+a raw count — it only ever prints `Detected HX711 rate: N SPS`, and all tracing (any
+`--log-level`) goes to stderr, so a `| grep raw` there matches nothing regardless of verbosity.
+
 Caveat: `self-check`'s "80 SPS" detector is unreliable (labels any <50 ms gap as 80 SPS).
 Trust the probe, not this.
+
+## 2b. Isolate the two halves
+Split motor from scale before you debug either — most bring-up faults are in one half only.
+
+```bash
+# Motor only: no scale read, no control loop. Listen/watch for stepping.
+./target/release/doser_cli --config etc/doser_config.toml motor --sps 400 --ms 2000
+./target/release/doser_cli --config etc/doser_config.toml motor --sps 400 --steps 800 --dir ccw
+```
+`--sps` is 1..=5000 (the driver clamp); `--steps` is *approximate* — it is converted to a
+duration of N/sps seconds, so jitter lands a step or two either side. Ctrl-C stops early.
+
+```bash
+# Scale only: live raw counts in a browser, with tare buttons.
+./target/release/doser_cli --config etc/doser_config.toml monitor --bind 127.0.0.1
+```
+This is the fastest way to watch counts move while you press the cell — better than re-running
+the probe. `--bind` defaults to `0.0.0.0`, which exposes an **unauthenticated** feed to the whole
+LAN; use `127.0.0.1` and an SSH tunnel unless you trust the network. `--port` defaults to 8080,
+`--hz` overrides `filter.sample_rate_hz`.
+
+The `POST /tare` and `POST /tare/clear` endpoints require an `X-Doser-Monitor: 1` header (a CSRF
+defence — without it a random page in the operator's browser could zero the scale mid-dose), so a
+hand-rolled curl needs it:
+```bash
+curl -s http://127.0.0.1:8080/reading                                  # JSON: raw, grams, sps, tare state
+curl -s -X POST -H 'X-Doser-Monitor: 1' http://127.0.0.1:8080/tare     # {"ok":true}; 403 without the header
+curl -s -X POST -H 'X-Doser-Monitor: 1' http://127.0.0.1:8080/tare/clear
+```
 
 ## 3. Authoritative probe (Instant-timed bit-bang)
 ```bash
