@@ -22,7 +22,7 @@ pub const fn abort_reason_name(r: &doser_core::error::AbortReason) -> &'static s
 fn make_estop_check(cfg: &doser_config::Config) -> Option<Box<dyn Fn() -> bool + Send + Sync>> {
     #[cfg(all(feature = "hardware", target_os = "linux"))]
     {
-        if let Some(pin) = cfg.pins.estop_in {
+        cfg.pins.estop_in.and_then(|pin| {
             match doser_hardware::make_estop_checker(pin, cfg.estop.active_low, cfg.estop.poll_ms) {
                 Ok(c) => {
                     tracing::info!(
@@ -38,9 +38,7 @@ fn make_estop_check(cfg: &doser_config::Config) -> Option<Box<dyn Fn() -> bool +
                     None
                 }
             }
-        } else {
-            None
-        }
+        })
     }
     #[cfg(not(all(feature = "hardware", target_os = "linux")))]
     {

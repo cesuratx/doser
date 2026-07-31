@@ -232,7 +232,9 @@ pub mod pacing {
                         tv_sec: 0,
                         tv_nsec: 0,
                     };
-                    if clock_gettime(CLOCK_MONOTONIC, &mut now_ts) == 0 {
+                    // `clock_gettime` takes `tp: *mut timespec` — the kernel writes the
+                    // current time through it, so this must stay a mutable raw pointer.
+                    if clock_gettime(CLOCK_MONOTONIC, &raw mut now_ts) == 0 {
                         let (sec, nsec) =
                             add_duration_to_timespec(now_ts.tv_sec, now_ts.tv_nsec, delta);
                         let target = timespec {
@@ -240,10 +242,13 @@ pub mod pacing {
                             tv_nsec: nsec,
                         };
                         loop {
+                            // `rqtp` is `*const timespec` (the kernel only reads the
+                            // requested deadline); `rmtp` is the `*mut` out-param and we
+                            // pass null because an absolute deadline needs no remainder.
                             let rc = clock_nanosleep(
                                 CLOCK_MONOTONIC,
                                 TIMER_ABSTIME,
-                                &target,
+                                &raw const target,
                                 std::ptr::null_mut(),
                             );
                             if rc == 0 {
@@ -474,7 +479,7 @@ pub mod hardware {
                 .map_err(|e| HwError::Gpio(format!("get HX711 SCK pin: {e}")))?
                 .into_output_low();
             // Channel A / gain 128: 1 extra SCK pulse after the 24 data bits (25 total).
-            let hx = Hx711::new(dt, sck, 1, Duration::from_millis(150))?;
+            let hx = Hx711::new(dt, sck, 1, Duration::from_millis(150));
             Ok(Self { hx })
         }
 
@@ -500,7 +505,7 @@ pub mod hardware {
                 data_ready_timeout_ms
             };
             // Channel A / gain 128: 1 extra SCK pulse after the 24 data bits (25 total).
-            let hx = Hx711::new(dt, sck, 1, Duration::from_millis(drt))?;
+            let hx = Hx711::new(dt, sck, 1, Duration::from_millis(drt));
             Ok(Self { hx })
         }
 
@@ -534,7 +539,8 @@ pub mod hardware {
     }
 
     impl HardwareMotor {
-        /// Create a motor from GPIO pin numbers. EN is taken from the DOSER_EN_PIN env var if present.
+        /// Create a motor from GPIO pin numbers. EN is taken from the `DOSER_EN_PIN` env
+        /// var if present.
         pub fn try_new(step_pin: u8, dir_pin: u8) -> HwResult<Self> {
             let en_env = std::env::var("DOSER_EN_PIN")
                 .ok()
@@ -600,7 +606,7 @@ pub mod hardware {
                         continue;
                     }
 
-                    let period_us = (1_000_000u32 / sps_val).max(1) as u64; // us
+                    let period_us = u64::from((1_000_000u32 / sps_val).max(1)); // us
                     // Rising edge
                     step.set_high();
                     spin_delay_min();
@@ -696,14 +702,29 @@ pub mod hardware {
         }
     }
 
-    /// Return average jitter in microseconds over the last window (approximate).
     impl HardwareMotor {
+        /// Return average jitter in microseconds over the last window (approximate).
+        #[must_use]
         pub fn avg_jitter_us(&self) -> u32 {
             self.avg_jitter_us.load(Ordering::Relaxed)
         }
     }
 
     /// Very small spin to make edges clean.
+    ///
+    /// Note this is *not* where the STEP pulse-width guarantee comes from: the body is a
+    /// single `spin_loop()` hint (~1 cycle on aarch64), and every call site follows it
+    /// immediately with [`crate::util::busy_wait_min_1us`], whose `Instant` deadline is
+    /// the actual minimum-width guarantee. See `docs/ops/HARDWARE_LESSONS.md` Lesson 1.
+    #[allow(
+        clippy::inline_always,
+        reason = "Body is a single `spin_loop()` intrinsic, so an out-of-line call would \
+                  cost far more than the body — one of the cases where `inline(always)` is \
+                  correct. It also sits in the bit-banged STEP path, where HARDWARE_LESSONS \
+                  Lesson 1 records a real Pi 5 fault caused by codegen-level timing \
+                  assumptions; changing codegen there is a deliberate decision, not a \
+                  drive-by in a lint pass."
+    )]
     #[inline(always)]
     fn spin_delay_min() {
         std::hint::spin_loop();
@@ -716,9 +737,10 @@ pub mod hardware {
         };
 
         // Try to set FIFO priority (requires CAP_SYS_NICE); ignore EPERM with warning upstream
-        // `sched_setscheduler` takes a `*const sched_param`, so a shared borrow is enough.
+        // `sched_setscheduler` takes `param: *const sched_param` — the kernel only reads
+        // it, so `&raw const` is the exact match for the signature.
         let param = sched_param { sched_priority: 10 };
-        let rc = unsafe { sched_setscheduler(0, SCHED_FIFO, &param) };
+        let rc = unsafe { sched_setscheduler(0, SCHED_FIFO, &raw const param) };
         if rc != 0 {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() != Some(libc::EPERM) {

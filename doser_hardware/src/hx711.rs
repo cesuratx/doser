@@ -5,6 +5,13 @@ use crate::error::Result;
 use crate::util::{busy_wait_min_1us, wait_until_low_with_timeout};
 use doser_traits::clock::MonotonicClock;
 
+/// Sign bit of the HX711's 24-bit two's-complement conversion result (bit 23).
+const SIGN_BIT_24: i32 = 0x0080_0000;
+
+/// Mask covering the 24 valid data bits of a conversion result. Bits above this are
+/// filled in from [`SIGN_BIT_24`] to sign-extend into `i32`.
+const DATA_MASK_24: i32 = 0x00FF_FFFF;
+
 pub struct Hx711 {
     dt: rppal::gpio::InputPin,
     sck: rppal::gpio::OutputPin,
@@ -16,19 +23,23 @@ pub struct Hx711 {
 }
 
 impl Hx711 {
+    /// Construct a driver over already-claimed DT/SCK pins, leaving SCK idle low.
+    ///
+    /// Infallible: `rppal`'s `set_low` does not report failure and nothing else here can
+    /// fail, so this returns `Self` rather than a `Result` that could only ever be `Ok`.
     pub fn new(
         dt_pin: rppal::gpio::InputPin,
         mut sck_pin: rppal::gpio::OutputPin,
         gain_pulses: u8,
         data_ready_timeout: Duration,
-    ) -> Result<Self> {
+    ) -> Self {
         sck_pin.set_low(); // clock idle low
-        Ok(Self {
+        Self {
             dt: dt_pin,
             sck: sck_pin,
             gain_pulses,
             data_ready_timeout,
-        })
+        }
     }
 
     pub fn read_with_timeout(&mut self, timeout: Duration) -> Result<i32> {
@@ -70,8 +81,8 @@ impl Hx711 {
         }
 
         // Sign extend 24-bit
-        if (value & 0x800000) != 0 {
-            value |= !0xFFFFFF;
+        if (value & SIGN_BIT_24) != 0 {
+            value |= !DATA_MASK_24;
         }
         trace!(raw = value, "hx711 raw read");
         Ok(value)
