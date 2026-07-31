@@ -292,7 +292,7 @@ fn cmd_self_check<S: doser_traits::Scale>(scale: S, cfg: &Config) -> eyre::Resul
                 let param = sched_param {
                     sched_priority: req,
                 };
-                let rc = sched_setscheduler(0, SCHED_FIFO, &param);
+                let rc = sched_setscheduler(0, SCHED_FIFO, &raw const param);
                 if rc != 0 {
                     let err = std::io::Error::last_os_error();
                     let code = err.raw_os_error().unwrap_or(0);

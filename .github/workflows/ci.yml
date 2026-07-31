@@ -25,6 +25,12 @@ jobs:
   # `checks` is the single owner of fmt + clippy for the whole workflow.
   # Do not re-add those steps to other jobs: every job is a cold build on a
   # fresh runner, so duplicating them just multiplies CI time.
+  #
+  # ONE deliberate exception: the feature-gated release clippy lives in
+  # `test-hardware-feature`, because it needs a different feature set than
+  # anything here and that job already pays for a hardware-feature build. It is
+  # not a duplicate of the clippy steps below — see the comment on that step for
+  # why default-feature clippy cannot see that code. Do not "de-duplicate" it.
   checks:
     name: checks
     runs-on: ubuntu-latest
@@ -113,6 +119,30 @@ jobs:
         run: |
           cargo build -p doser_hardware --features hardware --no-default-features
           cargo build -p doser_cli --features hardware --no-default-features
+      - name: cargo clippy (release profile, hardware + rt features)
+        # Third instance of the same blind spot. The release-profile clippy in
+        # `checks` runs with DEFAULT features, and default is `hardware = off,
+        # rt = off`. Everything inside
+        #   #[cfg(all(feature = "hardware", target_os = "linux"))]   (HX711 driver,
+        #                                                             HardwareMotor)
+        #   #[cfg(all(feature = "rt",       target_os = "linux"))]   (clock_nanosleep
+        #                                                             pacing, SCHED_FIFO)
+        # is therefore never even parsed by that step, so the crate-level
+        # deny(clippy::all, pedantic, nursery) never sees it. That is exactly how 10
+        # errors accumulated in doser_hardware while CI stayed green — the same way
+        # 321 accumulated before the release step existed at all.
+        #
+        # `doser_cli/hardware` and `doser_cli/rt` forward to the matching
+        # `doser_hardware` features, so this single invocation enables the union of
+        # both cfgs — including the `#[cfg(feature = "rt")]` RT-elevation call nested
+        # inside the hardware-only stepping thread, which needs BOTH features to
+        # compile. No --target is needed: this runner is already linux, which is what
+        # satisfies the target_os = "linux" half of every cfg above.
+        #
+        # This does NOT replace the default-feature clippy in `checks`: with
+        # `hardware` on, the simulation backends are cfg'd out. The two runs are
+        # complementary and both are required to cover the crate.
+        run: cargo clippy --release --workspace --all-targets --features doser_cli/hardware,doser_cli/rt -- -D warnings
 
   # Informational only. This job publishes a coverage number for the owner to
   # look at; it enforces no threshold and gates nothing. It is deliberately
