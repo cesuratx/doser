@@ -52,7 +52,7 @@ jobs:
         # `draft` and `prerelease` inputs are unchanged in v2; the token moved
         # from the `GITHUB_TOKEN` env var to a first-class `token:` input that
         # defaults to `${{ github.token }}`, so it is passed explicitly here.
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           name: Release ${{ steps.get_version.outputs.VERSION }}
@@ -139,7 +139,7 @@ jobs:
         # v2 (was v1/node16). `files` keeps the same newline-delimited-globs
         # contract; the token moved from the `GITHUB_TOKEN` env var to a
         # `token:` input, so it is passed explicitly here.
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           # Without this a glob that matches nothing still succeeds, so a release
