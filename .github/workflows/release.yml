@@ -30,7 +30,7 @@ jobs:
     permissions:
       contents: write # creates the GitHub Release
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Get version from tag
         id: get_version
         # `workflow_dispatch` can be run against a branch as well as a tag. On a
@@ -89,7 +89,7 @@ jobs:
             features: ""
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install pinned toolchain (from rust-toolchain.toml)
         # Released binaries must be built with the version pinned in
