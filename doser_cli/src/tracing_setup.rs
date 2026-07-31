@@ -3,7 +3,7 @@
 use crate::cli::FILE_GUARD;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-/// Build a file sink writer with optional rotation, storing the non-blocking guard in OnceLock.
+/// Build a file sink writer with optional rotation, storing the non-blocking guard in `OnceLock`.
 fn file_layer(
     file: Option<&str>,
     rotation: Option<&str>,
@@ -24,6 +24,14 @@ fn file_layer(
 }
 
 /// Initialize tracing once for the whole app.
+///
+/// Both console layers write to **stderr**, never stdout. stdout is reserved for
+/// the CLI's own output — the `--json` JSONL result line and the human-readable
+/// `final: X.XX g` / status lines printed with `println!`. Without an explicit
+/// writer `fmt::layer()` defaults to stdout, which used to interleave log records
+/// with the result line; a JSON log event carrying a `final_g` field was then
+/// indistinguishable from the real result line to anything scanning stdout.
+/// The file-sink layers keep their own non-blocking writer.
 pub fn init_tracing(json: bool, level: &str, file: Option<&str>, rotation: Option<&str>) {
     // Prefer RUST_LOG if set; otherwise use CLI level
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
@@ -31,7 +39,10 @@ pub fn init_tracing(json: bool, level: &str, file: Option<&str>, rotation: Optio
     let registry = tracing_subscriber::registry().with(filter);
 
     if json {
-        let console = fmt::layer().json().with_target(false);
+        let console = fmt::layer()
+            .json()
+            .with_target(false)
+            .with_writer(std::io::stderr);
         if let Some(nb_writer) = file_layer(file, rotation) {
             let file_l = fmt::layer()
                 .with_ansi(false)
@@ -42,7 +53,10 @@ pub fn init_tracing(json: bool, level: &str, file: Option<&str>, rotation: Optio
             registry.with(console).init();
         }
     } else {
-        let console = fmt::layer().pretty().with_target(false);
+        let console = fmt::layer()
+            .pretty()
+            .with_target(false)
+            .with_writer(std::io::stderr);
         if let Some(nb_writer) = file_layer(file, rotation) {
             let file_l = fmt::layer()
                 .with_ansi(false)
