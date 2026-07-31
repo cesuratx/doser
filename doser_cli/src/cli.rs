@@ -1,6 +1,7 @@
 //! CLI argument definitions and shared statics.
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use doser_hardware::MAX_STEP_RATE_SPS;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -62,20 +63,24 @@ pub enum RtLock {
 
 impl RtLock {
     #[inline]
-    pub fn os_default() -> Self {
+    #[must_use]
+    pub const fn os_default() -> Self {
         #[cfg(target_os = "linux")]
         {
-            return RtLock::Current;
+            return Self::Current;
         }
         #[cfg(target_os = "macos")]
         {
-            return RtLock::None;
+            return Self::None;
         }
         #[allow(unreachable_code)]
-        RtLock::None
+        Self::None
     }
 }
 
+// `doc_markdown` allowed: clap renders these doc comments verbatim as `--help` text,
+// so backticks added for rustdoc's benefit would show up in the terminal output.
+#[allow(clippy::doc_markdown)]
 #[derive(Subcommand, Debug)]
 pub enum Commands {
     /// Dispense a target amount of material
@@ -137,8 +142,12 @@ pub enum Commands {
         /// TCP port to listen on
         #[arg(long, default_value_t = 8080)]
         port: u16,
-        /// Address to bind; 0.0.0.0 lets other machines on the LAN connect
-        #[arg(long, default_value = "0.0.0.0")]
+        /// Address to bind; the default 0.0.0.0 exposes an UNAUTHENTICATED UI to the whole LAN
+        #[arg(
+            long,
+            default_value = "0.0.0.0",
+            long_help = "Address to bind the monitor's HTTP server to.\n\nThe default 0.0.0.0 listens on every interface, which is what makes the UI reachable from another machine on the LAN — but the server has NO authentication and NO transport security, so anyone who can reach the Pi can read the live scale feed. Use 127.0.0.1 to keep it on the Pi itself, and only bind a routable address on a network you trust."
+        )]
         bind: String,
         /// Override sample rate in Hz (defaults to config `filter.sample_rate_hz`)
         #[arg(long, value_name = "HZ")]
@@ -146,14 +155,26 @@ pub enum Commands {
     },
     /// Jog the motor at a fixed rate for bring-up/testing (no scale, no control loop)
     Motor {
-        /// Step rate in steps-per-second
-        #[arg(long, value_name = "HZ", default_value_t = 200)]
+        // Upper bound is `doser_hardware::MAX_STEP_RATE_SPS` (5000) — both motor
+        // backends clamp to it, so rejecting out-of-range rates here keeps the
+        // commanded rate and the stepped rate the same number.
+        /// Step rate in steps-per-second (1..=5000, the driver's max)
+        #[arg(
+            long,
+            value_name = "HZ",
+            default_value_t = 200,
+            value_parser = clap::value_parser!(u32).range(1..=i64::from(MAX_STEP_RATE_SPS)),
+        )]
         sps: u32,
         /// How long to run, in milliseconds
         #[arg(long, value_name = "MS", default_value_t = 1000)]
         ms: u64,
-        /// Run an exact number of steps instead of a duration (overrides --ms)
-        #[arg(long, value_name = "N")]
+        /// Approximate step count instead of a duration (overrides --ms)
+        #[arg(
+            long,
+            value_name = "N",
+            long_help = "Run for roughly N steps instead of --ms (overrides it).\n\nThe count is APPROXIMATE, not exact: it is turned into a wall-clock duration of N/--sps seconds (rounded up) and the stepping thread paces the pulses, so scheduling jitter and the rounding can land a step or two either side of N. Use it to move a known-ish amount during bring-up, not to index a mechanism precisely."
+        )]
         steps: Option<u32>,
         /// Rotation direction
         #[arg(long, value_enum, default_value_t = Direction::Cw)]
@@ -173,7 +194,8 @@ pub enum Direction {
 impl Direction {
     /// True when clockwise; maps directly to the DIR line level.
     #[inline]
-    pub fn is_clockwise(self) -> bool {
-        matches!(self, Direction::Cw)
+    #[must_use]
+    pub const fn is_clockwise(self) -> bool {
+        matches!(self, Self::Cw)
     }
 }
