@@ -1,0 +1,30 @@
+# Dependabot keeps the SHA-pinned GitHub Actions current.
+#
+# The workflows pin every action to a full commit SHA rather than a movable tag,
+# because a force-moved tag would run attacker code with the workflow's
+# GITHUB_TOKEN. That closes the hijack vector but freezes the versions: a SHA
+# never updates itself, so without this file the repo would quietly sit on stale
+# actions — including ones whose runtime GitHub later deprecates, which is
+# exactly how `rustsec/audit-check` and `softprops/action-gh-release` ended up
+# stranded on node16.
+#
+# Dependabot understands the `# vN` trailing comments and updates the SHA and
+# the comment together, so the pins stay both current and legible.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+    groups:
+      # One PR per week for routine bumps rather than one per action. Major
+      # bumps stay separate: they can carry breaking input changes and deserve
+      # to be reviewed on their own (see the v1 -> v2 migrations in #25).
+      actions-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"

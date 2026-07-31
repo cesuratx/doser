@@ -52,6 +52,15 @@ jobs:
         run: cargo fmt --all -- --check
       - name: cargo clippy (workspace, all targets, deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo clippy (release profile)
+        # Not redundant with the debug run above. Every crate carries
+        #   #![cfg_attr(all(not(debug_assertions), not(test)),
+        #                deny(clippy::all, clippy::pedantic, clippy::nursery))]
+        # so the release profile lints a strictly larger set, and CI only ever
+        # ran the debug profile. That gap let 321 errors accumulate unnoticed:
+        # compilation died in doser_traits, so the four crates downstream of it
+        # had never been release-linted at all.
+        run: cargo clippy --release --workspace --all-targets -- -D warnings
       - name: cargo check (workspace, all targets)
         env:
           RUSTFLAGS: "-D warnings"
