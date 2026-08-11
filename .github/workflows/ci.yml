@@ -76,7 +76,7 @@ jobs:
           RUSTFLAGS: "-D warnings"
         run: cargo check -p doser_hardware --no-default-features --features hardware
       - name: Install cargo-hack
-        uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2
+        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2
         with:
           tool: cargo-hack
       - name: cargo hack check --each-feature
@@ -172,7 +172,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
       - name: Install cargo-tarpaulin
-        uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2
+        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2
         with:
           tool: cargo-tarpaulin
       - name: Run coverage (tarpaulin)
